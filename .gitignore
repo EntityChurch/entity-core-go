@@ -1,0 +1,49 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Built CLI binaries (from accidental `go build` without -o)
+/entity-peer
+/entity-sync
+/peer-manager
+/validate-peer
+/compare-types
+/dump-messages
+/bench-localfiles
+/entity-shell
+/probe-peer
+/probe-files
+/probe-grant
+/dump-types
+/entity-cli
+/wire-conformance
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+*.prof
+
+# Wire-trace / debug logs (never commit — large, ephemeral, may leak peer addrs)
+*.log
+
+# Go workspace (go.work is tracked — it defines our multi-module layout)
+go.work.sum
+
+# Per-machine podman resource-cap overrides (see Makefile + RESOURCE-CAPS.md)
+caps.local.mk
+
+# Dependency directory
+vendor/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store

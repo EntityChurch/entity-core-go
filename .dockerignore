@@ -1,0 +1,42 @@
+# Keep the build context small and reproducible.
+
+.git
+.gitignore
+.claude
+.idea
+.vscode
+
+# Pre-built host binaries that live in the repo root (see .gitignore).
+/entity-peer
+/entity-shell
+/entity-sync
+/peer-manager
+/probe-peer
+/probe-files
+/probe-grant
+/validate-peer
+/compare-types
+/dump-messages
+
+# Test/coverage artifacts.
+*.test
+*.out
+*.prof
+
+# Editor / OS noise.
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Docs and reviews don't affect the build.
+docs/
+README.md
+CLAUDE.md
+
+# Don't recurse into a vendor dir if one ever appears.
+vendor/
+
+# Don't ship the Dockerfile/.dockerignore into the image context root.
+Dockerfile
+.dockerignore

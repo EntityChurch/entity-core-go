@@ -1,0 +1,100 @@
+[project]
+name   = "Entity Core Go"
+slug   = "entity-core-go"
+repo   = "entity-core-go"
+github = "https://github.com/EntityChurch/entity-core-go"
+intro  = """
+The Go reference implementation of Entity Core Protocol v7, and the interop
+oracle the Rust and Python implementations validate against. It sits in the
+"reference implementation" layer of the stack: it depends on the protocol
+specification (entity-core-architecture) and is depended on by binding/app
+repos (notably entity-workbench-go, which pins this module at v0.8.0). It is a
+solid, exercised implementation — the conformance suite runs green against it
+and it serves as the cohort baseline. Build is make + podman only (no host Go
+required); a fresh clone builds and tests standalone.
+
+Headline command-line tools (all under cmd/, built by `make build`):
+- entity-peer    — run a protocol peer (the server).
+- validate-peer  — conformance validator; runs the spec test suite against any
+                   peer, single- or multi-peer (`--profile core` for the core
+                   profile). This is the tool that produces the conformance
+                   signal.
+- peer-manager   — start/stop/list Go, Rust, and Python peers for interop runs.
+- entity-sync    — set up cross-peer sync (continuations + subscriptions).
+The `make` targets (`build`, `test`, `vet`, `race`, `validate*`) are the
+supported entry points; see README.md.
+"""
+
+[[doc]]
+path  = "README.md"
+title = "Entity Core Go — overview, build, and tools"
+blurb = "What the repo is and where it sits in the stack; make+podman build; vanity module paths; the make targets and CLI tools; interop validation."
+group = "Overview"
+
+[[doc]]
+path  = "docs/DOCUMENTATION-STRUCTURE.md"
+title = "Documentation structure (doc tiers)"
+blurb = "The repo's doc-tier standard — what counts as a spec, guide, review, or status doc, and where each lives. The map for the canonical surface."
+group = "Overview"
+
+# ── Architecture (the design models this implementation realizes) ────────────
+[[doc]]
+path  = "docs/architecture/specs/EXTENSION-ARCHITECTURE.md"
+title = "Extension architecture (3-layer model)"
+blurb = "The core/extension boundary and the 3-layer extension model the Go implementation is built around."
+group = "Architecture"
+
+[[doc]]
+path  = "docs/architecture/specs/QUERY-STORAGE-ARCHITECTURE.md"
+title = "Query & storage architecture"
+blurb = "The storage-composability model (ContentStore / LocationIndex) and how query layers over it."
+group = "Architecture"
+
+[[doc]]
+path  = "docs/architecture/specs/EXECUTION-CONTEXT-PROPAGATION.md"
+title = "Execution-context propagation"
+blurb = "How authority/context propagates through dispatch and handler execution."
+group = "Architecture"
+
+# ── Guides (how to use the tools + cross-impl workflows) ─────────────────────
+[[doc]]
+path  = "docs/architecture/guides/PEER-VALIDATION-WORKFLOW.md"
+title = "Peer-validation workflow"
+blurb = "The cross-implementation convergence methodology — how validate-peer is used to drive interop agreement across Go/Rust/Python."
+group = "Guides"
+
+[[doc]]
+path  = "docs/architecture/guides/USING-DIAGNOSTICS.md"
+title = "Using the diagnostics"
+blurb = "How to drive the diagnostic/debug probes when investigating a peer."
+group = "Guides"
+
+[[doc]]
+path  = "docs/architecture/guides/VALIDATE-PEER-GRANTS.md"
+title = "Validating peer grants"
+blurb = "The grant-gating model and how to reason about capability grants during validation."
+group = "Guides"
+
+[[doc]]
+path  = "docs/architecture/guides/ENTITY-SYNC.md"
+title = "entity-sync — cross-peer sync"
+blurb = "How to set up cross-peer sync (continuations + subscriptions) with the headline entity-sync tool."
+group = "Guides"
+
+[[doc]]
+path  = "docs/architecture/guides/ENTITY-CONFIG-DIRECTORY.md"
+title = "The ~/.entity config directory"
+blurb = "The shared ~/.entity/ convention (identities, config) used across the CLI tools."
+group = "Guides"
+
+[[doc]]
+path  = "docs/architecture/guides/GUIDE-CONVERGENT-MIRROR-RECIPE.md"
+title = "Convergent-mirror recipe"
+blurb = "Step-by-step recipe for the convergent-mirroring flow."
+group = "Guides"
+
+[[doc]]
+path  = "RESOURCE-CAPS.md"
+title = "Build resource caps"
+blurb = "The podman build resource limits (defaults in the Makefile; per-machine override via env or an untracked caps.local.mk)."
+group = "Guides"
