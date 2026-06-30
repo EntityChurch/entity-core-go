@@ -98,3 +98,9 @@ path  = "RESOURCE-CAPS.md"
 title = "Build resource caps"
 blurb = "The podman build resource limits (defaults in the Makefile; per-machine override via env or an untracked caps.local.mk)."
 group = "Guides"
+
+[[doc]]
+path  = "docs/status/STATUS.md"
+title = "Status"
+blurb = "Current project status — where the project is, recent work, backlog, and what's next."
+group = "Overview"
