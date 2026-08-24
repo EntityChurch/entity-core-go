@@ -20,8 +20,13 @@
 // emitting twice produces identical bytes, and every keypair comes from a fixed
 // seed. A vector file you cannot re-derive is not a conformance artifact.
 //
-//	go run ./cmd/webrtc-vectors -emit   docs/validation/vectors/webrtc-coordination-go.cbor
-//	go run ./cmd/webrtc-vectors -verify docs/validation/vectors/webrtc-coordination-rust.cbor
+// Our half lives in testdata/ beside this command — it is a build input (the
+// staleness test below reads it), not documentation, and filing it under docs/
+// once got it stripped out of the published mirror. The sibling's half is THEIR
+// artifact in THEIR tree; name the file, never guess their path.
+//
+//	go run ./cmd/webrtc-vectors -emit   cmd/webrtc-vectors/testdata/webrtc-coordination-go.cbor
+//	go run ./cmd/webrtc-vectors -verify <entity-core-rust>/webrtc-coordination-rust.cbor
 package main
 
 import (

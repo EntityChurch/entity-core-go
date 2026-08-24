@@ -44,6 +44,10 @@
 // fails on any row that is newly unresolved. The baseline is exact in both
 // directions: a row that becomes resolved also fails the gate, because a
 // baseline nobody re-pins is a baseline that stops meaning anything.
+//
+// The baseline lives at baseline.json BESIDE this command. It is a build input
+// — a published binary's -check mode reads it by default — not documentation,
+// and filing it under docs/ once got it stripped out of the published mirror.
 package main
 
 import (
@@ -60,7 +64,7 @@ var (
 	flagPkg      = flag.String("validate-pkg", "cmd/internal/validate", "the oracle's check package")
 	flagProto    = flag.String("proto", "../entity-core-protocol", "entity-core-protocol checkout (the core spec floor)")
 	flagArch     = flag.String("arch", "../entity-system-architecture", "entity-system-architecture checkout (extensions, guides, proposals)")
-	flagBaseline = flag.String("baseline", "docs/validation/conformance-register-baseline.json", "committed findings baseline for -check")
+	flagBaseline = flag.String("baseline", "cmd/conformance-register/baseline.json", "committed findings baseline for -check")
 
 	flagMD        = flag.Bool("md", false, "emit the register as markdown")
 	flagJSON      = flag.Bool("json", false, "emit the register as JSON")

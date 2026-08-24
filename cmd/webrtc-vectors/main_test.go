@@ -395,7 +395,7 @@ func TestTheSigningInputIsTheCohortAgreedBytes(t *testing.T) {
 // (Decoded maps come back ECF-sorted; freshly built ones are in insertion
 // order, so a value-tree comparison fails on map ordering alone.)
 func TestTheCommittedVectorFileIsNotStale(t *testing.T) {
-	const path = "../../docs/validation/vectors/webrtc-coordination-go.cbor"
+	const path = "testdata/webrtc-coordination-go.cbor"
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read committed artifact: %v (the file is the deliverable; a missing one is a failure, not a skip)", err)
@@ -462,7 +462,7 @@ func compareCanonical(t *testing.T, name string, committed, fresh any) {
 		offset = min(len(a), len(b))
 	}
 	t.Errorf("%s: the committed artifact is STALE — re-run `go run ./cmd/webrtc-vectors -emit "+
-		"docs/validation/vectors/webrtc-coordination-go.cbor` and commit it.\n"+
+		"cmd/webrtc-vectors/testdata/webrtc-coordination-go.cbor` and commit it.\n"+
 		"  committed: %d bytes\n  emitter:   %d bytes\n  first differing byte at offset %d",
 		name, len(a), len(b), offset)
 }

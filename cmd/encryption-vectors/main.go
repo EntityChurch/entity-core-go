@@ -5,8 +5,12 @@
 // The rows, the verifier, and the reason the vector exists at all live in
 // cmd/internal/encvectors — this is the CLI shell around them.
 //
-//	go run ./cmd/encryption-vectors -emit   docs/validation/vectors/encryption-resolve-order-go.cbor
-//	go run ./cmd/encryption-vectors -verify docs/validation/vectors/encryption-resolve-order-rust.cbor
+// Our half lives in testdata/ beside this command — a build input, not
+// documentation. The sibling's half is THEIR artifact in THEIR tree; name the
+// file, never guess their path.
+//
+//	go run ./cmd/encryption-vectors -emit   cmd/encryption-vectors/testdata/encryption-resolve-order-go.cbor
+//	go run ./cmd/encryption-vectors -verify <entity-core-rust>/encryption-resolve-order-rust.cbor
 package main
 
 import (
