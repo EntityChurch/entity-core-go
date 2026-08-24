@@ -98,7 +98,7 @@ func RunConformancePassthrough(ctx context.Context, client *PeerClient, corpusPa
 		switch v.Kind {
 		case "encode_equal":
 			r.Declare("put_"+v.ID, "EXTENSION-CBOR-ENCODING §E.3 (content_hash agreement)")
-			r.Declare("get_"+v.ID, "ENTITY-CORE-MACHINE-SPEC §1.8 (byte-fidelity on read)")
+			r.Declare("get_"+v.ID, "ENTITY-CBOR-ENCODING §5.4 (byte-fidelity on read)")
 		case "decode_reject":
 			r.Declare("reject_"+v.ID, "EXTENSION-CBOR-ENCODING §6.3")
 		}

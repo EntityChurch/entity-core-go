@@ -24,6 +24,7 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -36,6 +37,20 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 )
+
+// ErrUnknownProfileRef is returned by a backend when `profile_ref` names a
+// transport profile it does not serve.
+//
+// It exists so the substrate can tell a CALLER error from a BACKEND failure.
+// Both used to surface as `500 backend_error`, which is the wrong class: an
+// unrecognized `profile_ref` is an unknown enum VALUE supplied by the caller,
+// and §3.3 (arch Ruling-5 erratum) maps those to 400 — the same reasoning
+// already applied to an unknown `backend`, which this handler answers 400 two
+// lines above. A 500 additionally tells the caller to retry something that can
+// never succeed.
+//
+// Backends wrap it: fmt.Errorf("...: %w", discovery.ErrUnknownProfileRef).
+var ErrUnknownProfileRef = errors.New("discovery: unknown profile_ref")
 
 // HandlerPattern is the substrate pattern path.
 const HandlerPattern = "system/discovery"
@@ -302,6 +317,10 @@ func (h *Handler) handleAnnounce(ctx context.Context, req *handler.Request) (*ha
 			"discovery backend not registered: "+rd.Backend)
 	}
 	if err := b.Announce(ctx, rd.ProfileRef); err != nil {
+		if errors.Is(err, ErrUnknownProfileRef) {
+			return handler.NewErrorResponse(400, "invalid_params",
+				"announce on "+rd.Backend+": "+err.Error())
+		}
 		return handler.NewErrorResponse(500, "backend_error",
 			"announce on "+rd.Backend+" failed: "+err.Error())
 	}

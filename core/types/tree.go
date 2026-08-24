@@ -99,7 +99,7 @@ func PutRequestDataFromEntity(e entity.Entity) (PutRequestData, error) {
 // across a next_page chain. Absent on the last/only page. The head
 // page is served at the tree route (`{path}.list`); subsequent pages
 // are content-addressed `system/tree/listing` entities fetched via
-// `/content/{hex33(H)}`. The publish pipeline MUST bind each chain
+// `/content/{hex(H)}`. The publish pipeline MUST bind each chain
 // page into the served content namespace (§6.4.2) or it 404s.
 type ListingData struct {
 	Path     string                 `cbor:"path"`

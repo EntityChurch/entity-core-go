@@ -470,7 +470,7 @@ func (h *Handler) ingestEntity(hctx *handler.HandlerContext, raw cbor.RawMessage
 }
 
 // bindHashTreePresence wires the CONTENT §6.4.2 Hash Tree Presence
-// binding for one stored entity: a tree binding at {namespace}/{hex33(H)}
+// binding for one stored entity: a tree binding at {namespace}/{hex(H)}
 // → H. This is the existing CONTENT §6.4.1 MUST ("ingest into namespace
 // P writes to the content store AND binds at the canonical path in the
 // tree") and the predicate that NamespaceScope checks in serving-mode.
@@ -484,7 +484,7 @@ func (h *Handler) ingestEntity(hctx *handler.HandlerContext, raw cbor.RawMessage
 //
 // namespace is the resource target (e.g. "system/content/public"). A
 // caller with no resource target (default namespace) gets a binding
-// at "system/content/{hex33(H)}" — the §6.4.2 canonical form for the
+// at "system/content/{hex(H)}" — the §6.4.2 canonical form for the
 // default namespace prefix. An empty namespace short-circuits without
 // binding, leaving the legacy single-trust-domain topology (§6.4.1
 // opt-in) intact for callers that explicitly want flat-KV semantics.

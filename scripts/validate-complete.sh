@@ -6,8 +6,10 @@
 # The plain `validate-peer -addr <a>` invocation does not exercise the whole
 # suite. Several categories are gated on the peer being STARTED with a surface
 # enabled and the validator being PASSED the matching flag, and when either is
-# missing those checks skip. A default run exercises ~1429 checks; this one
-# scores 1538 in pass 1 plus 53 in pass 2. The difference is not noise — it is:
+# missing those checks skip. A default run against a bare peer scores 1458 with
+# 10 F and 26 S; this one scores 1566 · 0F · 0S in pass 1, plus 55 in pass 2 and
+# 12 in pass 3 (go, measured at the commit that added this line, under BOTH
+# content_hash_formats). The difference is not noise — it is:
 #
 #   - the LOCAL-FILES read/write/list/delete round-trip and frame-budget chunking
 #   - the published-root / manifest / HTTP-poll serving face
@@ -46,18 +48,32 @@
 #              hashes under SHA-256 on a SHA-384 peer. Everything a default run
 #              exercises, it exercises under exactly one format.
 #
-#              IT DOES NOT PASS TODAY, AND THAT IS THE FINDING — not a reason
-#              to skip it. 2026-08-10 at 502ac9c: 27 F + 1 S in pass 1, 13 F in
-#              pass 2, and 30 of the 31 distinct failures are ONE spec rule.
-#              EXTENSION-NETWORK §6.5.3.1 pins the served hash hex at 66 chars
-#              while justifying the format byte as crypto-agility, so a
-#              SHA-384 peer's own 98-char hashes 400 on its own content route;
-#              EXTENSION-SIGNALING §6.3 pins the signing input's
-#              inner_content_hash at 33. Both are arch's, both are filed:
-#              docs/validation/spec-issues/2026-08-10-the-33-byte-hash-*.md.
-#              So this is a DIAGNOSTIC, not a gate — the gate is the default
-#              SHA-256 run. Do not "fix" the failures locally; a unilateral
-#              change here breaks URL⇄binding parity with rust and python.
+#              AGAINST A GO PEER THIS IS A GATE, NOT A DIAGNOSTIC. Arch ruled
+#              both blocking gaps on 2026-08-10 (NETWORK §6.5.3.1 the hex length
+#              follows its own format byte and is never assumed; SIGNALING §6.3
+#              drops the fixed-33 on inner_content_hash) and set the promotion
+#              condition explicitly: sha384 becomes a gate once the impl lands
+#              the ruling and the validator's own SHA-256 assumptions land with
+#              it. Go did both at e166971. Run it; treat a failure as a failure.
+#
+#              This block previously read "IT DOES NOT PASS TODAY, AND THAT IS
+#              THE FINDING — 27 F + 1 S in pass 1, 13 F in pass 2 at 502ac9c."
+#              Every word of that was true when written and false four commits
+#              later. It is left named rather than quietly deleted because a
+#              measurement pinned to a commit that has since moved is the
+#              stale-build-state defect this repo keeps catching in OTHER
+#              people's text (AGENTS.md, "Verify build state before you assert
+#              it"), and it is worth one recorded instance of catching it in
+#              our own.
+#
+#              STILL A DIAGNOSTIC AGAINST `rust` / `python`, and the reason is
+#              a build-state fact with a pin, not an assumption: at
+#              entity-core-rust b8e0ae2 the poll route is still
+#              `content/{hex33}` (core/peer/src/http_live.rs) and
+#              bindings/ffi/src/hash.rs still rejects `hex.len() != 66`, so a
+#              SHA-384 run against a rust peer measures the pre-ruling gate.
+#              Re-read that tree before trusting this sentence — it decays the
+#              moment rust commits.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -201,6 +217,30 @@ echo "    $TARGET_ADDR"
 # Pass 2 scores them against a namespace-scoped peer where they mean something.
 T4_UNSATISFIABLE="serving_mode.content_get_out_of_scope_404,serving_mode.content_get_t4_oracle_identity,serving_mode.tree_entity_out_of_scope_404,serving_mode.tree_entity_t4_oracle_identity"
 
+# registry_issuer is scored in PASS 3, against a peer that IS a registry.
+#
+# THE ORIGINAL REASON IS FIXED, and is recorded here because the fix is what
+# makes the current reason legible. This used to read: arming the §6a.9 issuer
+# changes the peer's ADMISSION POSTURE, because the issuer seeds its narrow
+# register-request grant at the `default` policy pattern and a policy entry is
+# a request-time CEILING (V7 v7.62 §4) — so --open-access and
+# --issuer-policy-mode, two flags that each GRANT, combined to grant LESS than
+# either alone (six `capability` checks 403, two `authz` skipped). That was a
+# real defect in our own CLI composition, not a property of the deployment;
+# entity-peer now unions the two (issuerSeedGrants, guarded by
+# TestIssuerSeedGrantsAreMonotoneUnderOpenAccess). Measured after the fix on a
+# single peer carrying BOTH flags: capability 13/13, authz 11/11,
+# registry_issuer 12/12.
+#
+# The remaining reason is state, not authority: registry_issuer drives live
+# register / revoke / renew against an armed issuer and leaves bindings behind,
+# and it rewrites `system/registry/issuer-policy` to reach all three policy
+# modes. Pass 1's target also scores the `registry` and `peer_issued`
+# categories, which read that same surface. Keeping them on separate peers
+# keeps one pass from resolving the other's leftovers — the same reason the
+# peer-issued fixture is pinned with `-wire` rather than the cohort bundle.
+PASS3_ONLY="registry_issuer"
+
 echo "==> PASS 1/2 — every surface, closure-of-signed-root scope"
 set +e
 go run ./cmd/validate-peer \
@@ -210,7 +250,7 @@ go run ./cmd/validate-peer \
     "${PI_ARGS_VALIDATE[@]}" \
     "${HASH_ARGS_VALIDATE[@]}" \
     -keepalive-envelope-ms 6000 \
-    -exclude "$T4_UNSATISFIABLE" \
+    -exclude "$T4_UNSATISFIABLE,$PASS3_ONLY" \
     ${EXTRA:-}
 RC1=$?
 set -e
@@ -234,7 +274,7 @@ set -e
 # makes closure the floor when signed_pointer is advertised, and T4 governs the
 # namespace-scoped posture. A peer picks one posture; the suite must cover both.)
 echo
-echo "==> PASS 2/2 — serving_mode against a namespace-scoped peer (T4 needs an out-of-scope hash)"
+echo "==> PASS 2/3 — serving_mode against a namespace-scoped peer (T4 needs an out-of-scope hash)"
 NS_TARGET="vcns-${STAMP}"
 NS_PORT=$((POLL_PORT + 1))
 NS_ADDR=$(go run ./cmd/peer-manager start --name "$NS_TARGET" --type "$TYPE" --debug \
@@ -254,9 +294,40 @@ if [ "${KEEP:-0}" != "1" ]; then
     go run ./cmd/peer-manager stop "$NS_TARGET" >/dev/null 2>&1 || true
 fi
 
+# PASS 3 — registry_issuer ONLY, against a peer that is a REGISTRY.
+#
+# EXTENSION-REGISTRY §6a.9's live-registration surface is default-off: without
+# --issuer-policy-mode the handler is not registered at all. That is why the
+# surface sat fully built and fully unvalidated until 2026-08-10 — peer-manager
+# had no passthrough, so no check could start it, and the absent coverage read
+# as covered (GUIDE-CONFORMANCE §5.2b).
+#
+# `open` here is only the ARMING mode. The category writes the
+# system/registry/issuer-policy entity itself to drive open / allowlist /
+# manual in turn — the Issuer resolves policy store-first — so all three modes
+# are measured against this one peer, and the store-wins precedence gets
+# exercised as a side effect.
 echo
-echo "PASS 1 exit $RC1 (all surfaces, closure scope) · PASS 2 exit $RC2 (serving_mode, namespace scope)"
-echo "Zero failures AND zero skips in BOTH is the bar — read each COVERAGE block for"
+echo "==> PASS 3/3 — registry_issuer against a peer that is a registry (§6a.9 is default-off)"
+REG_TARGET="vcreg-${STAMP}"
+REG_ADDR=$(go run ./cmd/peer-manager start --name "$REG_TARGET" --type "$TYPE" --debug \
+    --issuer-policy-mode open \
+    "${HASH_ARGS_PEER[@]}" \
+    | sed -n 's/.*addr=\([^ ]*\).*/\1/p')
+set +e
+go run ./cmd/validate-peer \
+    -addr "$REG_ADDR" \
+    "${HASH_ARGS_VALIDATE[@]}" \
+    -category registry_issuer
+RC3=$?
+set -e
+if [ "${KEEP:-0}" != "1" ]; then
+    go run ./cmd/peer-manager stop "$REG_TARGET" >/dev/null 2>&1 || true
+fi
+
+echo
+echo "PASS 1 exit $RC1 (all surfaces, closure scope) · PASS 2 exit $RC2 (serving_mode, namespace scope) · PASS 3 exit $RC3 (registry_issuer, registry posture)"
+echo "Zero failures AND zero skips in ALL THREE is the bar — read each COVERAGE block for"
 echo "anything that did not run, and close it rather than allowlisting it."
-[ "$RC1" -eq 0 ] && [ "$RC2" -eq 0 ] || exit 1
+[ "$RC1" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 0 ] || exit 1
 exit 0

@@ -390,7 +390,7 @@ func StaticResolver(table map[string]struct {
 	return func(profileRef string) (int, []string, error) {
 		entry, ok := table[profileRef]
 		if !ok {
-			return 0, nil, fmt.Errorf("static resolver: unknown profile_ref %q", profileRef)
+			return 0, nil, fmt.Errorf("static resolver: %w %q", discovery.ErrUnknownProfileRef, profileRef)
 		}
 		return entry.Port, entry.Protos, nil
 	}

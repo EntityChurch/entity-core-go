@@ -36,6 +36,7 @@ import (
 	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/handler"
 	"go.entitychurch.org/entity-core-go/core/hash"
+	"go.entitychurch.org/entity-core-go/core/store"
 	"go.entitychurch.org/entity-core-go/core/types"
 )
 
@@ -45,11 +46,18 @@ import (
 // operations live here.
 const IssuerHandlerPattern = "system/registry/peer-issued"
 
-// Operation names per §6a.9.
+// Operation names per §6a.9 (the three registration ops) and §6a.9.2 (the
+// two policy-management ops).
 const (
 	OpRegisterRequest = "register-request"
 	OpRevokeRequest   = "revoke-request"
 	OpRenewRequest    = "renew-request"
+
+	// §6a.9.2, RATIFIED 2026-08-10. Both gated by
+	// types.CapRegistryManageIssuerPolicy — they are operator surface, and
+	// deliberately absent from RequestBindingSeedGrants().
+	OpSetIssuerPolicy = "set-issuer-policy"
+	OpGetIssuerPolicy = "get-issuer-policy"
 )
 
 // DefaultReplayWindowMillis is the default issued_at window inside which the
@@ -72,14 +80,21 @@ func WithReplayWindow(ms uint64) IssuerOption {
 	return func(i *Issuer) { i.replayWindow = ms }
 }
 
-// WithFallbackPolicy installs an in-memory issuer-policy used when the
-// store has no `system/registry/issuer-policy` entity. Useful for tests and
-// for operators who configure mode via CLI rather than authoring the
-// policy entity by hand. The store-side policy still wins if present.
-func WithFallbackPolicy(p types.IssuerPolicyData) IssuerOption {
+// WithSeedPolicy carries an out-of-band-configured policy (a CLI flag, an
+// operator's startup config) so SeedPolicy can write it into the tree once
+// the store exists.
+//
+// §6a.9.2 makes resolution order store-first `[MUST]`, and is explicit that
+// out-of-band arming is "a **seed for that entity**, never a parallel source
+// consulted at request time." This replaces the former WithFallbackPolicy,
+// which was exactly that prohibited parallel source: it was consulted by
+// loadPolicy on every request and shadowed nothing, but it meant a peer armed
+// by flag had no policy entity in its tree, so get-issuer-policy would have
+// reported `not_found` on a registry that was demonstrably running a mode.
+func WithSeedPolicy(p types.IssuerPolicyData) IssuerOption {
 	return func(i *Issuer) {
 		copy := p
-		i.fallbackPolicy = &copy
+		i.seedPolicy = &copy
 	}
 }
 
@@ -103,10 +118,14 @@ type Issuer struct {
 	signerHash     hash.Hash // content_hash(canonical(system/peer for keypair)) — the SignatureData.Signer value
 	ready          bool
 
-	seenNonces     map[string]uint64 // "target_peer_id|hex(nonce)" → request.issued_at
-	clock          func() uint64
-	replayWindow   uint64
-	fallbackPolicy *types.IssuerPolicyData
+	seenNonces   map[string]uint64 // "target_peer_id|hex(nonce)" → request.issued_at
+	clock        func() uint64
+	replayWindow uint64
+
+	// seedPolicy is the out-of-band-armed policy awaiting a store to be
+	// written into (§6a.9.2 store-first). It is NEVER read on the request
+	// path — see SeedPolicy and loadPolicy.
+	seedPolicy *types.IssuerPolicyData
 }
 
 // NewIssuer constructs an Issuer signing under `kp`. The registry's system/peer
@@ -174,12 +193,23 @@ func (i *Issuer) Manifest() types.HandlerManifestData {
 				InputType:  types.TypeRegistryRenewRequest,
 				OutputType: types.TypeRegistryLocalNameBindResult,
 			},
+			// §6a.9.2 — the two policy-management ops. get takes no input.
+			OpSetIssuerPolicy: {
+				InputType:  types.TypeRegistryIssuerPolicy,
+				OutputType: types.TypeRegistryIssuerPolicy,
+			},
+			OpGetIssuerPolicy: {
+				OutputType: types.TypeRegistryIssuerPolicy,
+			},
 		},
 		InternalScope: []types.GrantEntry{
 			{
-				Handlers:   types.CapabilityScope{Include: []string{IssuerHandlerPattern}},
-				Resources:  types.CapabilityScope{Include: []string{IssuerHandlerPattern + "/*"}},
-				Operations: types.CapabilityScope{Include: []string{OpRegisterRequest, OpRevokeRequest, OpRenewRequest}},
+				Handlers:  types.CapabilityScope{Include: []string{IssuerHandlerPattern}},
+				Resources: types.CapabilityScope{Include: []string{IssuerHandlerPattern + "/*"}},
+				Operations: types.CapabilityScope{Include: []string{
+					OpRegisterRequest, OpRevokeRequest, OpRenewRequest,
+					OpSetIssuerPolicy, OpGetIssuerPolicy,
+				}},
 			},
 		},
 	}
@@ -245,6 +275,10 @@ func (i *Issuer) Handle(ctx context.Context, req *handler.Request) (*handler.Res
 		return i.handleRevokeRequest(ctx, req)
 	case OpRenewRequest:
 		return i.handleRenewRequest(ctx, req)
+	case OpSetIssuerPolicy:
+		return i.handleSetIssuerPolicy(ctx, req)
+	case OpGetIssuerPolicy:
+		return i.handleGetIssuerPolicy(ctx, req)
 	default:
 		return handler.NewErrorResponse(400, "unknown_operation",
 			IssuerHandlerPattern+" does not support operation: "+req.Operation)
@@ -292,10 +326,18 @@ func (i *Issuer) handleRegisterRequest(_ context.Context, req *handler.Request) 
 		return handler.NewErrorResponse(status, code, msg)
 	}
 
-	// Load issuer-policy (store entity wins; fallback otherwise; default = open).
-	policy := i.loadPolicy(hctx)
+	// Load issuer-policy — store-only per §6a.9.2. No policy means this is a
+	// curated-only registry, not an implicitly-open one.
+	policy, armed := i.loadPolicy(hctx)
+	if !armed {
+		return curatedOnlyResponse(OpRegisterRequest)
+	}
 
 	// §6a.9.1 mode "domain-control" is DEFERRED per §6a.10 — v1 rejects.
+	// This is the *stored-policy* path and keeps its 501: §6a.9.2's 400
+	// unsupported_mode is a requirement on set-issuer-policy, which refuses
+	// to store the mode in the first place. A policy that predates that
+	// refusal still has to be answered here.
 	if policy.Mode == types.IssuerPolicyModeDomainControl {
 		return handler.NewErrorResponse(501, "not_implemented",
 			"domain-control mode is deferred to the web-native domain-proof co-design (§6a.10)")
@@ -480,21 +522,177 @@ func (i *Issuer) applyAdmission(policy types.IssuerPolicyData, body types.Regist
 	}
 }
 
-// loadPolicy reads the issuer-policy entity from the local store. Falls
-// back to the in-memory fallback policy when set; defaults to mode=open
-// when neither is present (the §6a.9.1 cohort-pragmatic default).
-func (i *Issuer) loadPolicy(hctx *handler.HandlerContext) types.IssuerPolicyData {
-	if h, ok := hctx.LocationIndex.Get(types.IssuerPolicyStoragePath); ok {
-		if ent, ok := hctx.Store.Get(h); ok {
-			if p, err := types.IssuerPolicyDataFromEntity(ent); err == nil {
-				return p
-			}
-		}
+// --- §6a.9.2 policy management -------------------------------------------
+
+// handleSetIssuerPolicy implements `set-issuer-policy` per §6a.9.2.
+//
+// Replace-whole `[MUST]`: the stored entity becomes exactly the submitted
+// policy. There is deliberately no merge with any previously-stored policy —
+// "an absent optional field means *unset*, not *unchanged*; a merge semantics
+// would make the resulting policy depend on write order, which two peers
+// cannot reconstruct." Implemented by simply writing the input entity, which
+// is also what makes the response "the stored policy, as written."
+func (i *Issuer) handleSetIssuerPolicy(_ context.Context, req *handler.Request) (*handler.Response, error) {
+	hctx := req.Context
+	if hctx == nil || hctx.Store == nil || hctx.LocationIndex == nil {
+		return handler.NewErrorResponse(500, "internal_error",
+			OpSetIssuerPolicy+" requires a store-backed handler context")
 	}
-	if i.fallbackPolicy != nil {
-		return *i.fallbackPolicy
+	if req.Params.Type != types.TypeRegistryIssuerPolicy {
+		return handler.NewErrorResponse(400, "invalid_params",
+			fmt.Sprintf("%s expects a %s entity, got %q",
+				OpSetIssuerPolicy, types.TypeRegistryIssuerPolicy, req.Params.Type))
 	}
-	return types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen}
+	policy, err := types.IssuerPolicyDataFromEntity(req.Params)
+	if err != nil {
+		return handler.NewErrorResponse(400, "invalid_params",
+			"decode issuer-policy: "+err.Error())
+	}
+
+	// §6a.9.2: reject domain-control at the door "rather than storing a
+	// policy it cannot enforce." This is the difference between refusing to
+	// arm and arming into a mode that 501s on every request.
+	if policy.Mode == types.IssuerPolicyModeDomainControl {
+		return handler.NewErrorResponse(400, types.RegistryErrUnsupportedMode,
+			"mode \"domain-control\" is deferred to the web-native domain-proof "+
+				"co-design (§6a.9.1/§6a.10) and will not be stored")
+	}
+	switch policy.Mode {
+	case types.IssuerPolicyModeOpen, types.IssuerPolicyModeAllowlist, types.IssuerPolicyModeManual:
+		// enforceable
+	default:
+		return handler.NewErrorResponse(400, types.RegistryErrUnsupportedMode,
+			fmt.Sprintf("unknown issuer-policy mode %q (expected open, allowlist or manual)", policy.Mode))
+	}
+	if policy.Mode == types.IssuerPolicyModeAllowlist && len(policy.Allowlist) == 0 {
+		return handler.NewErrorResponse(400, "invalid_params",
+			"mode \"allowlist\" requires a non-empty allowlist — an empty one denies every "+
+				"request, which is what mode \"manual\" is for")
+	}
+
+	// Store the submitted entity verbatim. Re-encoding via ToEntity would
+	// author a second entity with the same fields; writing what arrived is
+	// what makes the round-trip byte-exact.
+	if _, err := hctx.Store.Put(req.Params); err != nil {
+		return handler.NewErrorResponse(500, "internal_error",
+			"store issuer-policy: "+err.Error())
+	}
+	if err := hctx.LocationIndex.Set(types.IssuerPolicyStoragePath, req.Params.ContentHash); err != nil {
+		return handler.NewErrorResponse(500, "internal_error",
+			"bind issuer-policy: "+err.Error())
+	}
+	return &handler.Response{Status: 200, Result: req.Params}, nil
+}
+
+// handleGetIssuerPolicy implements `get-issuer-policy` per §6a.9.2 — the
+// stored policy, or 404 not_found when unset.
+//
+// It MUST NOT synthesize a default `open`; see loadPolicy.
+func (i *Issuer) handleGetIssuerPolicy(_ context.Context, req *handler.Request) (*handler.Response, error) {
+	hctx := req.Context
+	if hctx == nil || hctx.Store == nil || hctx.LocationIndex == nil {
+		return handler.NewErrorResponse(500, "internal_error",
+			OpGetIssuerPolicy+" requires a store-backed handler context")
+	}
+	h, ok := hctx.LocationIndex.Get(types.IssuerPolicyStoragePath)
+	if !ok {
+		return handler.NewErrorResponse(404, types.RegistryErrNotFound,
+			"no issuer-policy is stored (§6a.9.2 — unset is not a mode)")
+	}
+	ent, ok := hctx.Store.Get(h)
+	if !ok {
+		return handler.NewErrorResponse(404, types.RegistryErrNotFound,
+			"issuer-policy pointer resolves to no entity")
+	}
+	return &handler.Response{Status: 200, Result: ent}, nil
+}
+
+// ManageIssuerPolicySeedGrants returns the GrantEntry slice authorizing the
+// two §6a.9.2 policy-management ops, gated by
+// types.CapRegistryManageIssuerPolicy.
+//
+// Deliberately NOT part of RequestBindingSeedGrants: a publisher that can
+// call register-request must not be able to rewrite the policy that admits
+// it. Install this only for the registry operator.
+func ManageIssuerPolicySeedGrants() []types.GrantEntry {
+	return []types.GrantEntry{
+		{
+			Handlers:   types.CapabilityScope{Include: []string{IssuerHandlerPattern}},
+			Resources:  types.CapabilityScope{Include: []string{IssuerHandlerPattern + "/*"}},
+			Operations: types.CapabilityScope{Include: []string{OpSetIssuerPolicy, OpGetIssuerPolicy}},
+		},
+	}
+}
+
+// loadPolicy reads the issuer-policy entity from the local store. The store
+// is the ONLY source: §6a.9.2 makes resolution order store-first `[MUST]` and
+// bars any parallel source at request time.
+//
+// Returns ok=false when no policy entity is stored. "Unset is not a mode"
+// (§6a.9.2) — callers MUST NOT substitute a default, least of all `open`,
+// which would silently turn a curated registry into a first-come-first-serve
+// one. A decode failure is also ok=false: a policy we cannot read is not a
+// policy we may guess at.
+func (i *Issuer) loadPolicy(hctx *handler.HandlerContext) (types.IssuerPolicyData, bool) {
+	h, ok := hctx.LocationIndex.Get(types.IssuerPolicyStoragePath)
+	if !ok {
+		return types.IssuerPolicyData{}, false
+	}
+	ent, ok := hctx.Store.Get(h)
+	if !ok {
+		return types.IssuerPolicyData{}, false
+	}
+	p, err := types.IssuerPolicyDataFromEntity(ent)
+	if err != nil {
+		return types.IssuerPolicyData{}, false
+	}
+	return p, true
+}
+
+// curatedOnlyResponse is what the live-registration ops return when no policy
+// entity is stored. §6a.9.2: with no policy the registry "does not run live
+// registration at all (§6a.9's handler is unregistered) — it is a conformant
+// curated-only registry per §6a.8."
+//
+// Go registers the handler unconditionally (it is wired pre-Build, before any
+// store exists to consult), so the closest conformant behaviour available to
+// it is to answer as though the handler were absent: 404. The distinction is
+// invisible to a client, which is the point.
+func curatedOnlyResponse(op string) (*handler.Response, error) {
+	return handler.NewErrorResponse(404, types.RegistryErrNotFound,
+		IssuerHandlerPattern+": no issuer-policy is stored — this registry is curated-only "+
+			"(§6a.8); "+op+" is not served. Arm it with "+OpSetIssuerPolicy+".")
+}
+
+// SeedPolicy writes the out-of-band-armed policy (WithSeedPolicy) into the
+// tree at types.IssuerPolicyStoragePath, satisfying §6a.9.2's store-first
+// MUST. Call once post-Build, alongside SetupAuthority.
+//
+// Seeding does NOT overwrite: an operator who has already authored a policy
+// entity — or set one via set-issuer-policy on a previous run against a
+// persistent store — outranks a flag. The flag arms an unarmed registry; it
+// does not silently revert one. No-op when WithSeedPolicy was not used.
+func (i *Issuer) SeedPolicy(cs store.ContentStore, li store.LocationIndex) error {
+	i.mu.Lock()
+	seed := i.seedPolicy
+	i.mu.Unlock()
+	if seed == nil {
+		return nil
+	}
+	if _, exists := li.Get(types.IssuerPolicyStoragePath); exists {
+		return nil
+	}
+	ent, err := seed.ToEntity()
+	if err != nil {
+		return fmt.Errorf("peerissued.SeedPolicy: encode issuer-policy: %w", err)
+	}
+	if _, err := cs.Put(ent); err != nil {
+		return fmt.Errorf("peerissued.SeedPolicy: store issuer-policy: %w", err)
+	}
+	if err := li.Set(types.IssuerPolicyStoragePath, ent.ContentHash); err != nil {
+		return fmt.Errorf("peerissued.SeedPolicy: bind issuer-policy: %w", err)
+	}
+	return nil
 }
 
 // issueBinding is the §6a.8 internal sign+publish act, identical in shape to
@@ -659,7 +857,7 @@ func (i *Issuer) handleRenewRequest(_ context.Context, req *handler.Request) (*h
 	if body.TTL != nil {
 		t := *body.TTL
 		ttlPtr = &t
-	} else if p := i.loadPolicy(hctx); p.DefaultTTL != nil {
+	} else if p, armed := i.loadPolicy(hctx); armed && p.DefaultTTL != nil {
 		t := *p.DefaultTTL
 		ttlPtr = &t
 	}

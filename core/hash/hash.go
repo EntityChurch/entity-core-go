@@ -54,6 +54,17 @@ func DigestLen(alg byte) int {
 	}
 }
 
+// Algorithms returns every content_hash_format code this build can verify, in
+// allocation order.
+//
+// Exported so the format axis is *enumerable* rather than assumed. A harness
+// that hard-codes one format cannot tell "this peer is conformant under every
+// format" from "we only ever ran one" — GUIDE-CONFORMANCE §5.2b: a
+// configuration axis is covered only when the suite exercises it per value.
+func Algorithms() []byte {
+	return []byte{AlgorithmSHA256, AlgorithmSHA384}
+}
+
 // HashWireSize returns the on-wire size (algorithm + digest) for the given
 // content_hash_format code.
 func HashWireSize(alg byte) int {
@@ -118,13 +129,26 @@ func ComputeFormat(alg byte, entityType string, data cbor.RawMessage) (Hash, err
 	if err != nil {
 		return Hash{}, fmt.Errorf("hash compute: %w", err)
 	}
+	return OfBytes(alg, encoded)
+}
+
+// OfBytes returns the content hash of already-encoded bytes under the given
+// content_hash_format.
+//
+// This is the "Mechanism A" pure-body rehash a consumer performs on a
+// CONTENT_GET body (EXTENSION-NETWORK §6.5.3), generalized to any allocated
+// format: the digest algorithm follows the format code, so nothing here
+// assumes SHA-256. Callers verifying a served body MUST rehash under the
+// *served hash's own* algorithm — rehashing under SHA-256 unconditionally
+// fails every conformant peer whose home format is not SHA-256.
+func OfBytes(alg byte, body []byte) (Hash, error) {
 	out := Hash{Algorithm: alg}
 	switch alg {
 	case AlgorithmSHA256:
-		d := sha256.Sum256(encoded)
+		d := sha256.Sum256(body)
 		copy(out.Digest[:], d[:])
 	case AlgorithmSHA384:
-		d := sha512.Sum384(encoded)
+		d := sha512.Sum384(body)
 		copy(out.Digest[:], d[:])
 	default:
 		return Hash{}, fmt.Errorf("%w: format-code 0x%02x not supported", ErrUnsupportedContentHashFormat, alg)
@@ -181,6 +205,28 @@ func FromBytes(b []byte) (Hash, error) {
 	h.Algorithm = alg
 	copy(h.Digest[:n], b[1:])
 	return h, nil
+}
+
+// ParseHex parses the lowercase-hex wire form of a content hash — the full
+// form with the format-code byte included (ENTITY-CORE-PROTOCOL §3.5), NOT the
+// digest-only form.
+//
+// The expected length is the one the leading format byte implies and is never
+// assumed — 66 chars under ECFv1-SHA-256 (`0x00`), 98 under ECFv1-SHA-384
+// (`0x01`), and so on for any allocated code (SPECIFICATION-FORMAT §8.4.5;
+// EXTENSION-NETWORK §6.5.3.1 as corrected 2026-08-10). A string whose length
+// disagrees with its **own** format byte is rejected, which rejects both the
+// 64-char digest-only form (no allocated format implies a 32-byte wire hash)
+// and a 98-char string claiming `0x00`. An algorithm byte this build cannot
+// verify is rejected fail-closed.
+//
+// Callers serving HTTP map every error here to 400.
+func ParseHex(s string) (Hash, error) {
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return Hash{}, fmt.Errorf("%w: not hex", ErrInvalidHash)
+	}
+	return FromBytes(b)
 }
 
 // IsZero returns true if the hash is the zero value.

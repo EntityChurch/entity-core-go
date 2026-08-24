@@ -119,6 +119,9 @@ func runLocalFiles(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("v2_watcher_fires_on_disk_edit", "DOMAIN-LOCAL-FILES v1.3 §10.5 V2 + §10.1 MUST-iff-declared")
 	r.Declare("v3_descriptor_publish_exercised", "DOMAIN-LOCAL-FILES v1.3 §10.5 V3")
 	r.Declare("v4_leaf_symlink_rejected", "DOMAIN-LOCAL-FILES v1.3 §10.5 V4 + §8.3 MUST + §865 error-code pin")
+	r.Declare("v4a_list_symlinked_dir_rejected", "DOMAIN-LOCAL-FILES §8.3 — `list` through a symlinked DIRECTORY escaping the root MUST be 403 path_traversal_rejected. Not a variation on V4: the escape is a directory, which a leaf-only defense passes straight through. This is the literal original finding.")
+	r.Declare("v4b_write_leaf_symlink_rejected", "DOMAIN-LOCAL-FILES §8.3 — `write` through a leaf symlink MUST be 403 path_traversal_rejected (following it clobbers a file outside the sandbox)")
+	r.Declare("v4c_delete_leaf_symlink_rejected", "DOMAIN-LOCAL-FILES §8.3 — `delete` through a leaf symlink MUST be 403 path_traversal_rejected (following it unlinks the target, not the link)")
 
 	// --- Step 1: Handler manifest ---
 
@@ -1027,6 +1030,46 @@ func runLocalFiles(ctx context.Context, client *PeerClient) []CheckResult {
 		return PassCheck("§10.5 V4: leaf-symlink rejected with 403 path_traversal_rejected (§8.3 MUST + §865 error-code pin)")
 	})
 
+	// V4a-c: the SAME defense at the other wire callsites §8.3 enumerates.
+	//
+	// §8.3 binds "read, write, list, delete, the watcher's debounce-flush
+	// ingest, and the reverse-write / reverse-delete handlers" — six by name.
+	// V4 above probes exactly one of them. Per GUIDE-CONFORMANCE §5.2b, a MUST
+	// that enumerates N callsites is covered only when the suite exercises it
+	// per callsite; one probe against one arm is a SAMPLE, not coverage, and
+	// MUST NOT be recorded as closing it.
+	//
+	// `list` is the one that matters most and it is NOT a variation on V4: the
+	// escape is a symlinked DIRECTORY, not a symlinked file. A leaf-only
+	// defense refuses the file case and waves the directory case straight
+	// through — which is the literal original finding (a symlinked directory
+	// escaping the peer root returned 200 with the outside directory's
+	// contents). A read-only leaf probe structurally cannot see it.
+	r.Run("v4a_list_symlinked_dir_rejected", func() CheckOutcome {
+		return localFilesSymlinkEscapeProbe(ctx, client, symlinkEscapeCase{
+			op:      "list",
+			dirLink: true,
+			label:   "V4a",
+			why:     "a symlinked DIRECTORY inside the root; a leaf-only defense passes it through and `list` returns the outside directory's contents",
+		})
+	})
+
+	r.Run("v4b_write_leaf_symlink_rejected", func() CheckOutcome {
+		return localFilesSymlinkEscapeProbe(ctx, client, symlinkEscapeCase{
+			op:    "write",
+			label: "V4b",
+			why:   "write is the more critical direction — following the link CLOBBERS a file outside the sandbox rather than merely disclosing one",
+		})
+	})
+
+	r.Run("v4c_delete_leaf_symlink_rejected", func() CheckOutcome {
+		return localFilesSymlinkEscapeProbe(ctx, client, symlinkEscapeCase{
+			op:    "delete",
+			label: "V4c",
+			why:   "delete through a leaf symlink unlinks the TARGET outside the sandbox, not the link",
+		})
+	})
+
 	return r.Results()
 }
 
@@ -1228,4 +1271,80 @@ func localFilesExecuteSimple(ctx context.Context, client *PeerClient, operation,
 		return types.ExecuteResponseData{}, entity.Envelope{}, fmt.Errorf("decode response: %w", err)
 	}
 	return respData, env, nil
+}
+
+// symlinkEscapeCase describes one §8.3 containment probe: plant a symlink
+// escaping the peer root and drive one operation at it.
+type symlinkEscapeCase struct {
+	op      string // local/files operation to drive
+	dirLink bool   // link to a DIRECTORY (list) rather than a file
+	label   string // vector label for messages
+	why     string // why this callsite matters, quoted on failure
+}
+
+// localFilesSymlinkEscapeProbe plants a symlink inside the peer's --files root
+// that points outside it, drives `c.op` at the symlink's tree path, and
+// requires 403 `path_traversal_rejected` per DOMAIN-LOCAL-FILES §8.3 + §865.
+//
+// Shared rather than copied per operation because the ONLY thing that varies
+// is the operation and whether the escape is a file or a directory — and the
+// six-callsite MUST is going to grow more arms, not fewer.
+func localFilesSymlinkEscapeProbe(ctx context.Context, client *PeerClient, c symlinkEscapeCase) CheckOutcome {
+	_, fsRoot, treePrefix, ok := discoverLocalFilesRoot(ctx, client)
+	if !ok {
+		return WarnCheck(fmt.Sprintf("§10.5 %s: no peer root accessible from validator (requires local FS access to the peer's --files mount)", c.label))
+	}
+
+	stamp := time.Now().UnixNano()
+	var outsidePath string
+	if c.dirLink {
+		outsidePath = filepath.Join(os.TempDir(), fmt.Sprintf("%s-outside-dir-%d", c.label, stamp))
+		if err := os.MkdirAll(outsidePath, 0o755); err != nil {
+			return WarnCheck(fmt.Sprintf("§10.5 %s: cannot stage outside directory: %v", c.label, err))
+		}
+		// A marker inside it, so a failing impl returns something recognizable
+		// rather than an empty listing that could be mistaken for containment.
+		marker := filepath.Join(outsidePath, "outside-marker.txt")
+		if err := os.WriteFile(marker, []byte("outside the sandbox\n"), 0o644); err != nil {
+			return WarnCheck(fmt.Sprintf("§10.5 %s: cannot stage marker: %v", c.label, err))
+		}
+		defer os.RemoveAll(outsidePath)
+	} else {
+		outsidePath = filepath.Join(os.TempDir(), fmt.Sprintf("%s-outside-%d.txt", c.label, stamp))
+		if err := os.WriteFile(outsidePath, []byte("outside the sandbox\n"), 0o644); err != nil {
+			return WarnCheck(fmt.Sprintf("§10.5 %s: cannot stage outside file: %v", c.label, err))
+		}
+		defer os.Remove(outsidePath)
+	}
+
+	linkName := fmt.Sprintf("%s-escape-%d", c.label, stamp)
+	linkFSPath := filepath.Join(fsRoot, linkName)
+	if err := os.Symlink(outsidePath, linkFSPath); err != nil {
+		return WarnCheck(fmt.Sprintf("§10.5 %s: cannot plant symlink in peer root (filesystem may not support symlinks): %v", c.label, err))
+	}
+	defer os.Remove(linkFSPath)
+
+	treePath := treePrefix + linkName
+	respData, _, err := localFilesExecuteSimple(ctx, client, c.op, treePath)
+	if err != nil {
+		return FailCheck(fmt.Sprintf("§10.5 %s: %s errored at wire layer: %v", c.label, c.op, err))
+	}
+	if respData.Status >= 200 && respData.Status < 300 {
+		return FailCheck(fmt.Sprintf(
+			"§10.5 %s: %s through a symlink escaping the root returned %d, expected 403 path_traversal_rejected (§8.3 MUST). %s",
+			c.label, c.op, respData.Status, c.why))
+	}
+	if respData.Status != 403 {
+		return FailCheck(fmt.Sprintf(
+			"§10.5 %s: %s returned %d; §8.3/§865 pin 403 path_traversal_rejected (rejected for an unrelated reason — confirm the containment defense is the source)",
+			c.label, c.op, respData.Status))
+	}
+	code, codeErr := decodeResultErrorCode(respData)
+	if codeErr != nil {
+		return FailCheck(fmt.Sprintf("§10.5 %s: 403 returned but error code unreadable: %v (§865 requires path_traversal_rejected)", c.label, codeErr))
+	}
+	if code != "path_traversal_rejected" {
+		return FailCheck(fmt.Sprintf("§10.5 %s: 403 returned with code=%q; §865 pins path_traversal_rejected", c.label, code))
+	}
+	return PassCheck(fmt.Sprintf("§10.5 %s: %s through an escaping symlink rejected 403 path_traversal_rejected", c.label, c.op))
 }

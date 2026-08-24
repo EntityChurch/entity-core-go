@@ -2,6 +2,7 @@ package validate
 
 import (
 	"fmt"
+	"strings"
 
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
@@ -12,6 +13,49 @@ import (
 )
 
 const catEncoding = "encoding"
+
+// hashWireCandidate reports whether raw[i:] begins a CBOR byte string sized
+// like a content hash under *some* allocated content_hash_format, returning
+// its format byte and its declared length.
+//
+// Candidacy is decided by the declared length alone — deliberately, so that a
+// byte string sized like a hash but carrying an unallocated format byte is
+// still surfaced (and then failed by the caller) rather than skipped as "not a
+// hash." Scanning instead for a literal 0x5821 prefix, as this did until
+// 2026-08-10, cannot see a SHA-384 hash at all (49 bytes → 0x5831): the check
+// WARNed, `hash_algorithm_byte` SKIPped behind it, and an entire format went
+// unmeasured while the scoreboard read covered.
+func hashWireCandidate(raw []byte, i int) (alg byte, declared int, ok bool) {
+	if i+2 >= len(raw) || raw[i] != 0x58 {
+		return 0, 0, false
+	}
+	declared = int(raw[i+1])
+	if i+2+declared > len(raw) {
+		return 0, 0, false
+	}
+	sized := false
+	for _, a := range hash.Algorithms() {
+		if hash.HashWireSize(a) == declared {
+			sized = true
+			break
+		}
+	}
+	if !sized {
+		return 0, 0, false
+	}
+	return raw[i+2], declared, true
+}
+
+// appendFormatOnce records an observed content_hash_format for reporting.
+func appendFormatOnce(seen []string, alg byte) []string {
+	label := fmt.Sprintf("0x%02x", alg)
+	for _, s := range seen {
+		if s == label {
+			return seen
+		}
+	}
+	return append(seen, label)
+}
 
 // runEncoding performs encoding validation checks on raw bytes from the connect handshake.
 func runEncoding(client *PeerClient) []CheckResult {
@@ -50,57 +94,68 @@ func runEncoding(client *PeerClient) []CheckResult {
 	r.Run("hash_wire_format", func() CheckOutcome {
 		found := false
 		valid := true
+		var seen []string
 		for _, raw := range allRawFrames {
 			for i := 0; i < len(raw)-2; i++ {
-				if raw[i] == 0x58 && raw[i+1] == 0x21 && i+2+33 <= len(raw) {
-					algByte := raw[i+2]
-					if algByte == hash.AlgorithmSHA256 {
-						found = true
-					} else {
-						valid = false
-					}
+				alg, declared, ok := hashWireCandidate(raw, i)
+				if !ok {
+					continue
+				}
+				if hash.HashWireSize(alg) == declared {
+					found = true
+					seen = appendFormatOnce(seen, alg)
+				} else {
+					// A byte string sized like a hash whose leading
+					// format byte implies a different size — the exact
+					// shape §8.4.5 exists to catch.
+					valid = false
 				}
 			}
 		}
 		if found && valid {
 			r.Store("hash_wire_ok", true)
-			return PassCheck("hashes are 33-byte CBOR byte strings (0x5821 prefix)")
+			return PassCheck(fmt.Sprintf(
+				"hashes are CBOR byte strings whose declared length matches their own format byte (observed: %s)",
+				strings.Join(seen, ", ")))
 		}
 		if !found {
-			return WarnCheck("could not locate 33-byte hash byte strings in raw CBOR")
+			return WarnCheck("could not locate hash byte strings in raw CBOR")
 		}
-		if valid {
-			r.Store("hash_wire_ok", true)
-			return PassCheck("hashes are 33-byte CBOR byte strings")
-		}
-		return FailCheck("hash wire format invalid")
+		return FailCheck("hash wire format invalid: a hash-sized byte string disagrees with its own format byte")
 	})
 
 	r.Run("hash_algorithm_byte", func() CheckOutcome {
 		if !r.OK("hash_wire_format") {
 			return SkipCheck("skipped: no hashes found in raw bytes")
 		}
-		// If hash_wire_format passed with found=true, we stored hash_wire_ok.
-		// If it was a warn (not found), we get here only if OK (warn is OK).
-		// But warn means not found, so skip.
 		if r.Load("hash_wire_ok") == nil {
 			return SkipCheck("skipped: no hashes found in raw bytes")
 		}
-		// Re-scan for algorithm byte validation.
+		// The algorithm byte MUST be an allocated content_hash_format code.
+		// It is NOT required to be 0x00: a peer running a SHA-384 home format
+		// emits 0x01 and is fully conformant (ENTITY-CORE-PROTOCOL §1.2;
+		// SPECIFICATION-FORMAT §8.4.5). Asserting 0x00 here measured the
+		// harness's assumption, not the peer.
 		allGood := true
+		var seen []string
 		for _, raw := range allRawFrames {
 			for i := 0; i < len(raw)-2; i++ {
-				if raw[i] == 0x58 && raw[i+1] == 0x21 && i+2+33 <= len(raw) {
-					if raw[i+2] != hash.AlgorithmSHA256 {
-						allGood = false
-					}
+				alg, declared, ok := hashWireCandidate(raw, i)
+				if !ok {
+					continue
 				}
+				if hash.HashWireSize(alg) != declared {
+					allGood = false
+					continue
+				}
+				seen = appendFormatOnce(seen, alg)
 			}
 		}
 		if allGood {
-			return PassCheck("hash algorithm byte is 0x00 (SHA256)")
+			return PassCheck(fmt.Sprintf("hash algorithm byte is an allocated content_hash_format (observed: %s)",
+				strings.Join(seen, ", ")))
 		}
-		return FailCheck("hash algorithm byte is not 0x00 (SHA256)")
+		return FailCheck("hash algorithm byte is not an allocated content_hash_format")
 	})
 
 	r.Run("entity_hash_valid", func() CheckOutcome {

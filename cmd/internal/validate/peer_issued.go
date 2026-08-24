@@ -258,8 +258,8 @@ func hasPeerIssuedChainEntry(ctx context.Context, client *PeerClient, registryPe
 // writes for every vector, so each run's live vectors start cold:
 //
 //	system/registry/binding/by-name/{name}   — the entry point
-//	system/signature/{hex33(binding_hash)}   — the cached signature
-//	system/registry/binding/{hex33(bh)}      — the cached body
+//	system/signature/{hex(binding_hash)}   — the cached signature
+//	system/registry/binding/{hex(bh)}      — the cached body
 //
 // Errors and 404s are ignored on purpose: "already absent" is the desired
 // state, and a peer that declines the removal will be caught by the vector
@@ -274,7 +274,7 @@ func clearPeerIssuedCache(ctx context.Context, client *PeerClient, fx *peerIssue
 		if v.BindingHash == "" {
 			continue
 		}
-		bh, err := parseHash33(v.BindingHash)
+		bh, err := parseBundleHash(v.BindingHash)
 		if err != nil {
 			continue
 		}
@@ -345,7 +345,7 @@ func runPeerIssuedResolve(ctx context.Context, client *PeerClient, fx *peerIssue
 	if res.Binding == nil {
 		return FailCheck("resolved but binding is nil — §2.1 step 6 MUST surface the binding hash")
 	}
-	wantBinding, err := parseHash33(v.Expected.Binding)
+	wantBinding, err := parseBundleHash(v.Expected.Binding)
 	if err != nil {
 		return FailCheck("bundle expected.binding: " + err.Error())
 	}
@@ -394,7 +394,7 @@ func runPeerIssuedVerifyFail(ctx context.Context, client *PeerClient, fx *peerIs
 			"the peer never fetched the by-name pointer %s — the backend was not consulted, so this vector "+
 				"proves nothing about signature verification. Fixture saw: %v", byNamePath, fetched))
 	}
-	bindingHash, err := parseHash33(v.BindingHash)
+	bindingHash, err := parseBundleHash(v.BindingHash)
 	if err != nil {
 		return FailCheck("bundle binding_hash: " + err.Error())
 	}
@@ -437,7 +437,7 @@ func runPeerIssuedRevoked(ctx context.Context, client *PeerClient, fx *peerIssue
 		return FailCheck(fmt.Sprintf("resolve status %d, want 200", status))
 	}
 
-	bindingHash, err := parseHash33(v.BindingHash)
+	bindingHash, err := parseBundleHash(v.BindingHash)
 	if err != nil {
 		return FailCheck("bundle binding_hash: " + err.Error())
 	}
@@ -486,7 +486,7 @@ func runPeerIssuedExpired(ctx context.Context, client *PeerClient, fx *peerIssue
 		return FailCheck(fmt.Sprintf("resolve status %d, want 200", status))
 	}
 
-	bindingHash, err := parseHash33(v.BindingHash)
+	bindingHash, err := parseBundleHash(v.BindingHash)
 	if err != nil {
 		return FailCheck("bundle binding_hash: " + err.Error())
 	}

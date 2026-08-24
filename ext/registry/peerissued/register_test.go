@@ -251,6 +251,7 @@ func TestRegister_ReplayDetected_SameNonceTwice(t *testing.T) {
 	clk := uint64(1_000_000)
 	iss, hctx := newIssuer(t, registryKP,
 		WithIssuerClock(func() uint64 { return clk }))
+	installPolicy(t, hctx, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen})
 
 	publisher, _ := crypto.Generate()
 	body := types.RegistryRegisterRequestData{
@@ -315,7 +316,10 @@ func TestRegister_OpenMode_HappyPath(t *testing.T) {
 	iss, hctx := newIssuer(t, registryKP,
 		WithIssuerClock(func() uint64 { return 1_000_000 }))
 
-	// No policy entity installed → defaults to open.
+	// §6a.9.2: the policy entity is the ONLY source. An unarmed registry is
+	// curated-only, not implicitly open — so open mode must be armed.
+	installPolicy(t, hctx, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen})
+
 	publisher, _ := crypto.Generate()
 	body := types.RegistryRegisterRequestData{
 		Name:         "billslab.com",
@@ -341,6 +345,8 @@ func TestRenew_ReplayDetected_SameNonceTwice(t *testing.T) {
 	clk := uint64(1_000_000)
 	iss, hctx := newIssuer(t, registryKP,
 		WithIssuerClock(func() uint64 { return clk }))
+
+	installPolicy(t, hctx, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen})
 
 	// Establish a binding to renew.
 	publisher, _ := crypto.Generate()
@@ -420,6 +426,8 @@ func TestRegister_NameTaken(t *testing.T) {
 	registryKP, _, _ := newRegistry(t)
 	iss, hctx := newIssuer(t, registryKP,
 		WithIssuerClock(func() uint64 { return 1_000_000 }))
+
+	installPolicy(t, hctx, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen})
 
 	first, _ := crypto.Generate()
 	resp := dispatchRegister(t, iss, hctx, stageRequest(t, hctx, first, types.RegistryRegisterRequestData{

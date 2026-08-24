@@ -74,6 +74,8 @@ func runDiscovery(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("v5_scan_invocation_handler_live", "DISCOVERY §3 — :scan against mdns returns 200 + ScanResult shape (snapshot list may be empty on quiet net)")
 	r.Declare("v6_scan_unknown_backend", "DISCOVERY §3.3 (Ruling-5 erratum) — :scan against unregistered backend MUST return 400 + code `unknown_backend` (V7 §3.3 unknown enum class)")
 	r.Declare("v7_announce_stop_idempotent", "DISCOVERY §3, §8.1 — :announce-stop on never-announced profile returns 200 (idempotent symmetric lifecycle)")
+	r.Declare("v7a_announce_lifecycle", "DISCOVERY §3, §8.1 — the POSITIVE arm: :announce then :announce-stop on the SAME profile. v7 only ever stops a never-announced profile, so :announce itself had no check and the stop path never ran against announced state.")
+	r.Declare("v7b_announce_unknown_profile_ref", "DISCOVERY §3.3 (Ruling-5 erratum) — :announce with a profile_ref the backend does not serve MUST return 400, not 500: an unknown parameter VALUE is a caller error, exactly as for an unknown `backend`")
 	r.DeclareSelf("v8_watchable_prefix_storage_path", "DISCOVERY §3.0 — CandidateStoragePath helper round-trips, watchable prefix matches `system/discovery/candidate/{backend}/`")
 	r.DeclareSelf("v9_successor_pattern_supersedes", "DISCOVERY §2.2 — successor candidate carries PeerID + Supersedes hash; original left immutable")
 	r.DeclareSelf("v10_dnssd_wire_pin", "DISCOVERY §3.2 PIN — ServiceType + {version, peer_id_hint, profile_ref} TXT keys MUST be exact strings (cohort's silent-divergence anchor)")
@@ -85,6 +87,8 @@ func runDiscovery(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Run("v5_scan_invocation_handler_live", func() CheckOutcome { return runDiscScanInvocationLive(ctx, client) })
 	r.Run("v6_scan_unknown_backend", func() CheckOutcome { return runDiscScanUnknownBackend(ctx, client) })
 	r.Run("v7_announce_stop_idempotent", func() CheckOutcome { return runDiscAnnounceStopIdempotent(ctx, client) })
+	r.Run("v7a_announce_lifecycle", func() CheckOutcome { return runDiscAnnounceLifecycle(ctx, client) })
+	r.Run("v7b_announce_unknown_profile_ref", func() CheckOutcome { return runDiscAnnounceUnknownProfileRef(ctx, client) })
 	r.Run("v8_watchable_prefix_storage_path", runDiscWatchablePrefixStoragePath)
 	r.Run("v9_successor_pattern_supersedes", runDiscSuccessorPatternSupersedes)
 	r.Run("v10_dnssd_wire_pin", runDiscDNSSDWirePin)
@@ -356,6 +360,97 @@ func runDiscAnnounceStopIdempotent(ctx context.Context, client *PeerClient) Chec
 	return PassCheck("announce-stop is idempotent on never-announced profile (200)")
 }
 
+// runDiscAnnounceLifecycle drives the POSITIVE announce arm — `:announce`
+// itself, which had no check at all.
+//
+// v7 covered `announce-stop` on a NEVER-ANNOUNCED profile, which exercises the
+// idempotent no-op branch and never once calls `:announce`. So the operation
+// that actually publishes this peer on the discovery substrate was reachable,
+// registered, capability-gated and completely unmeasured — the same
+// built-but-unreached shape as §6a.9 live registration and the SHA-384 format
+// axis (GUIDE-CONFORMANCE §5.2b). Found by diffing entity-peer's flags against
+// peer-manager's passthroughs.
+//
+// The assertion is the LIFECYCLE (§3, §8.1 symmetric announce/announce-stop),
+// deliberately not "a peer appears on the network": mDNS reachability depends
+// on the host's network posture, and v5 already establishes that a quiet
+// network is conformant. Announcing and then stopping the SAME profile is
+// environment-independent and is what the symmetric lifecycle claims.
+func runDiscAnnounceLifecycle(ctx context.Context, client *PeerClient) CheckOutcome {
+	// `tcp` is the transport profile every peer-manager-started peer has
+	// (peer-manager always passes -addr). The mDNS v1 backend resolves
+	// profile_ref against the peer's OWN published transport profiles, so a
+	// synthetic name cannot work here — the ref names something real to
+	// advertise, not a label for this announcement.
+	const profile = "tcp"
+
+	annEnt, err := types.AnnounceRequestData{
+		Backend:    types.DiscoveryBackendMDNS,
+		ProfileRef: profile,
+	}.ToEntity()
+	if err != nil {
+		return FailCheck("build announce request: " + err.Error())
+	}
+	status, annResult, err := discExecute(ctx, client, "announce", annEnt)
+	if err != nil {
+		return FailCheck("announce dispatch: " + err.Error())
+	}
+	if status != 200 {
+		return FailCheck(fmt.Sprintf("§3: :announce on the mdns backend → %d, want 200 (%s)", status, discErrDetail(annResult)))
+	}
+
+	// Symmetric half: stopping a profile that WAS announced must also succeed.
+	// v7 only ever stops one that never was, so this is the first time the
+	// stop path runs against real announced state.
+	stopEnt, err := types.AnnounceStopRequestData{
+		Backend:    types.DiscoveryBackendMDNS,
+		ProfileRef: profile,
+	}.ToEntity()
+	if err != nil {
+		return FailCheck("build announce-stop request: " + err.Error())
+	}
+	stopStatus, _, err := discExecute(ctx, client, "announce-stop", stopEnt)
+	if err != nil {
+		return FailCheck("announce-stop dispatch: " + err.Error())
+	}
+	if stopStatus != 200 {
+		return FailCheck(fmt.Sprintf("§8.1 symmetric lifecycle: announce-stop on an ANNOUNCED profile → %d, want 200", stopStatus))
+	}
+	return PassCheck("announce → announce-stop lifecycle completes (§3, §8.1 symmetry, announced state)")
+}
+
+// runDiscAnnounceUnknownProfileRef pins the ERROR CLASS for a profile_ref the
+// backend does not serve: 400, not 500.
+//
+// Same reasoning the cohort already ratified for an unknown `backend` (§3.3,
+// arch Ruling-5 erratum — V7 §3.3 maps an unknown enum VALUE to 400 because it
+// is a parameter value, not a resource path). `profile_ref` is the same kind
+// of value, and this handler answers 400 for `backend` two lines away. It
+// returned `500 backend_error`, which additionally tells a caller to retry
+// something that can never succeed.
+func runDiscAnnounceUnknownProfileRef(ctx context.Context, client *PeerClient) CheckOutcome {
+	ent, err := types.AnnounceRequestData{
+		Backend:    types.DiscoveryBackendMDNS,
+		ProfileRef: "no-such-transport-profile",
+	}.ToEntity()
+	if err != nil {
+		return FailCheck("build announce request: " + err.Error())
+	}
+	status, result, err := discExecute(ctx, client, "announce", ent)
+	if err != nil {
+		return FailCheck("announce dispatch: " + err.Error())
+	}
+	if status == 500 {
+		return FailCheck(fmt.Sprintf(
+			"unknown profile_ref → 500, want 400: an unrecognized parameter VALUE is a caller error (§3.3 / Ruling-5, the same rule this handler applies to an unknown `backend`), and a 500 invites a retry that can never succeed (%s)",
+			discErrDetail(result)))
+	}
+	if status != 400 {
+		return FailCheck(fmt.Sprintf("unknown profile_ref → %d, want 400 (%s)", status, discErrDetail(result)))
+	}
+	return PassCheck("unknown profile_ref → 400 (caller error, not backend failure)")
+}
+
 func runDiscWatchablePrefixStoragePath() CheckOutcome {
 	h := discFakeHash(0xAB)
 	got := types.CandidateStoragePath(types.DiscoveryBackendMDNS, h)
@@ -433,4 +528,19 @@ func runDiscDNSSDWirePin() CheckOutcome {
 	}
 	return PassCheck(fmt.Sprintf("§3.2 PIN intact: %s + {%s, %s, %s} TXT keys; CurrentVersion=%s",
 		mdns.ServiceType, mdns.TXTKeyVersion, mdns.TXTKeyPeerIDHint, mdns.TXTKeyProfileRef, mdns.CurrentVersion))
+}
+
+// discErrDetail renders an error entity's code + message for a failure
+// string. A bare status hides which of several 400/500 branches fired, and
+// that is the difference between "the harness sent a bad request" and "the
+// backend broke".
+func discErrDetail(result entity.Entity) string {
+	if result.Type == "" {
+		return "no error body"
+	}
+	var errData types.ErrorData
+	if err := ecf.Decode(result.Data, &errData); err != nil {
+		return "undecodable error body"
+	}
+	return fmt.Sprintf("code=%q message=%q", errData.Code, errData.Message)
 }

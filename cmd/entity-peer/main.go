@@ -362,13 +362,13 @@ func main() {
 		if err != nil {
 			log.Fatalf("--issuer-policy-mode: %v", err)
 		}
-		peerIssuedIssuer = peerissued.NewIssuerForSetup(peerissued.WithFallbackPolicy(policy))
+		// §6a.9.2 store-first [MUST]: the flag is a SEED for the
+		// system/registry/issuer-policy entity, not a parallel source read at
+		// request time. SeedPolicy writes it post-Build (below), so
+		// get-issuer-policy reports the mode this peer is actually running.
+		peerIssuedIssuer = peerissued.NewIssuerForSetup(peerissued.WithSeedPolicy(policy))
 
-		// §6a.9 closing paragraph: "register-request is the external surface,
-		// gated by registry-request-binding (open → granted broadly;
-		// allowlist → narrow)." Translate the policy mode into seed-policy
-		// entries so the handler is actually reachable from outside.
-		grants := peerissued.RequestBindingSeedGrants()
+		grants := issuerSeedGrants(*openAccess)
 		switch policy.Mode {
 		case types.IssuerPolicyModeOpen, types.IssuerPolicyModeManual:
 			entry := peer.SeedPolicyDefault(grants)
@@ -633,6 +633,12 @@ func main() {
 		if err := peerIssuedIssuer.SetupAuthority(p.Keypair()); err != nil {
 			log.Fatalf("peerissued.SetupAuthority: %v", err)
 		}
+		// §6a.9.2: arm the registry by writing the policy entity. Does not
+		// overwrite an operator-authored or previously-set policy — a flag
+		// arms an unarmed registry, it does not silently revert one.
+		if err := peerIssuedIssuer.SeedPolicy(p.Store(), p.LocationIndex()); err != nil {
+			log.Fatalf("peerissued.SeedPolicy: %v", err)
+		}
 		log.Printf("EXTENSION-REGISTRY §6a.9: peer-issued live registration ACTIVE (mode=%s)", *issuerPolicyMode)
 	}
 
@@ -672,7 +678,19 @@ func main() {
 			relaypeer.NewTreeInboxRelayResolver(p),
 		))
 	}
-	mdnsResolver := makeMDNSProfileResolver(*addr, *httpAddr)
+	// The TCP addr is resolved LAZILY, at announce time, because the
+	// configured value may be a wildcard port. `--addr 127.0.0.1:0` is the
+	// norm (peer-manager always uses it), and capturing that string here
+	// announced "port 0" over mDNS — an advertisement no peer can dial.
+	// p.Addr() carries the actually-bound address, but only after the
+	// listener is up; the resolver runs long after, so reading it here is
+	// both correct and the only reachable moment.
+	mdnsResolver := makeMDNSProfileResolver(func() string {
+		if a := p.Addr(); a != nil {
+			return a.String()
+		}
+		return *addr
+	}, *httpAddr)
 	mdnsBackend := discoverymdns.New(string(p.PeerID()), mdnsResolver)
 	discoveryH.RegisterBackend(mdnsBackend)
 
@@ -1160,11 +1178,11 @@ func runHTTPListener(ctx context.Context, addr string, handler http.Handler, lab
 // resolution at peer-startup time; once the peer's persistence has its
 // own system/peer/transport/{peer}/{profile-id} bindings, a future
 // resolver can read those directly.
-func makeMDNSProfileResolver(tcpAddr, httpAddr string) discoverymdns.ProfileResolver {
+func makeMDNSProfileResolver(tcpAddr func() string, httpAddr string) discoverymdns.ProfileResolver {
 	return func(profileRef string) (int, []string, error) {
 		switch profileRef {
 		case "tcp":
-			port, err := portFromAddr(tcpAddr)
+			port, err := portFromAddr(tcpAddr())
 			if err != nil {
 				return 0, nil, fmt.Errorf("mdns profile tcp: %w", err)
 			}
@@ -1179,7 +1197,7 @@ func makeMDNSProfileResolver(tcpAddr, httpAddr string) discoverymdns.ProfileReso
 			}
 			return port, []string{"http-poll"}, nil
 		default:
-			return 0, nil, fmt.Errorf("mdns: unknown profile_ref %q (v1 backend supports: tcp, http-poll)", profileRef)
+			return 0, nil, fmt.Errorf("mdns: %w %q (v1 backend supports: tcp, http-poll)", discovery.ErrUnknownProfileRef, profileRef)
 		}
 	}
 }
@@ -1358,6 +1376,36 @@ func wirePeerIssuedRegistries(spec string, allowHTTP bool, registryH *registry.H
 		log.Printf("peer-issued registry %s pinned at %s", pidStr, urlPrefix)
 	}
 	return nil
+}
+
+// issuerSeedGrants returns the grants carried by the seed-policy entry that
+// makes EXTENSION-REGISTRY §6a.9 `register-request` reachable from outside
+// ("open → granted broadly; allowlist → narrow").
+//
+// It takes openAccess because a policy entry is a CEILING, not an addition
+// (V7 v7.62 §4; ext/capability handleRequest step 2 subset-validates the
+// request against the matched entry, and skips the ceiling entirely when no
+// entry matches). That made two flags that each GRANT combine to grant LESS
+// than either alone: --open-access hands a connecting peer `*` at handshake,
+// and then the issuer's narrow entry at `default` capped every subsequent
+// system/capability:request to register-request. Measured before the fix, on
+// one peer, purely from adding --issuer-policy-mode: six `capability` checks
+// went 403 and two `authz` ones skipped. Nothing was denied that the operator
+// asked to deny — the register-request grant simply landed at the pattern that
+// also decides everyone's ceiling.
+//
+// Unioning rather than displacing makes the combination monotone: whatever
+// each flag grants alone, both together grant at least that. This is the CLI's
+// composition to get right. The builder's handshake assembly already unions
+// (ConnectHandler.AssembleInboundGrants); it is only the request-time ceiling
+// that reads a single entry, which is why the two flags disagreed about what
+// they had granted.
+func issuerSeedGrants(openAccess bool) []types.GrantEntry {
+	grants := peerissued.RequestBindingSeedGrants()
+	if !openAccess {
+		return grants
+	}
+	return append(append([]types.GrantEntry(nil), peer.OpenAccessGrants()...), grants...)
 }
 
 // buildIssuerPolicy translates the --issuer-policy-* CLI flags into a

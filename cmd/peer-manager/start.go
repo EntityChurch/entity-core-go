@@ -52,6 +52,11 @@ func cmdStart(args []string) {
 	publishPrefix := fs.String("publish-prefix", "", "EXTENSION-TREE §3.3a: the subtree --publish-root commits to, and the `prefix` the published root declares (e.g. system/content/ to publish only shareable content, or / for the universal tree). Empty keeps the peer's own default. This is how a peer publishes a SUBSET of its tree — the common deployment — rather than everything under system/. Go-only as of 2026-08-08: verified absent from rust f561493 and python e60c822 CLIs by reading both worktrees, so it is dropped with a warning for those types rather than passed and rejected.")
 	publishDescriptors := fs.Bool("publish-descriptors", false, "DOMAIN-LOCAL-FILES v1.3 §10.5 V3: configure the --files root with publish_descriptors=true so file reads write `system/content/descriptor/{hash}` entities into the tree. Arms local_files.v3_descriptor_publish_exercised. Honored by all three impls: Go, Rust (3e9c9fc), Python (2026-08-08).")
 	keepalive := fs.String("keepalive", "", "EXTENSION-NETWORK §2.3 keepalive override as interval_ms,timeout_ms,max_missed (e.g. 1500,800,2) so the §5.4 escalation is observable in seconds — pair with validate-peer -keepalive-envelope-ms for the liveness harness. A field may be empty to keep its spec default. Honored by all three impls: Go (-keepalive-*-ms), Python (--keepalive-*-ms, 0a0eb48), Rust (--keepalive-*-ms, 99ff398).")
+	discoveryAnnounce := fs.String("discovery-announce", "", "EXTENSION-DISCOVERY §3 — announce this peer on the mDNS backend at startup. Value is the transport profile_ref to advertise; the v1 mDNS backend serves `tcp` and `http-poll`. Requires the matching listener (--addr is always set by peer-manager; `http-poll` additionally needs --http-addr). Empty disables. Go-only: neither sibling exposes a CLI flag for it (rust b8e0ae2, python e60c822 — both have the announce capability and the `:announce` operation, just no startup flag), so it is dropped with a warning for those types. The OPERATION itself is covered cross-impl by discovery.v7a_announce_lifecycle, which needs no flag.")
+	issuerPolicyMode := fs.String("issuer-policy-mode", "", "EXTENSION-REGISTRY §6a.9 — run this peer as a peer-issued LIVE registry, accepting `register-request` / `revoke-request` / `renew-request`. Value is the issuer-policy mode: `open`, `allowlist` (needs --issuer-policy-allowlist), or `manual` (requests queue as 202 pending_review). Empty disables. ARMING DIVERGES ACROSS THE COHORT and this flag is Go's mechanism only: Go gates handler *registration* on this flag (cmd/entity-peer --issuer-policy-mode); Python always registers the handler and arms it over the wire via a `set-issuer-policy` operation (packages/entity-handlers/.../registry.py, py e60c822); Rust registers the three ops but exposes no CLI arming flag found at b8e0ae2. The spec names a `system/capability/registry-manage-issuer-policy` capability for editing the policy but defines no operation — routed as a spec gap. Forwarded to Go peers only; dropped with a warning otherwise.")
+	issuerPolicyAllowlist := fs.String("issuer-policy-allowlist", "", "EXTENSION-REGISTRY §6a.9.1 — comma-separated target_peer_ids permitted to register when --issuer-policy-mode=allowlist. Ignored in other modes. Go-only, see --issuer-policy-mode.")
+	issuerPolicyNameConstraints := fs.String("issuer-policy-name-constraints", "", "EXTENSION-REGISTRY §6a.9.1 — POSIX glob narrowing which names this registry will issue (e.g. \"*.lab\"); a non-matching name is rejected 403 not_entitled. Empty = no constraint. Go-only, see --issuer-policy-mode.")
+	issuerPolicyDefaultTTL := fs.String("issuer-policy-default-ttl", "", "EXTENSION-REGISTRY §6a.9.1 — Go duration (e.g. 1h) the registry signs when register-request omits requested_ttl. Empty/zero = no expiry. Go-only, see --issuer-policy-mode.")
 	fs.Parse(args)
 
 	if *name == "" {
@@ -96,6 +101,12 @@ func cmdStart(args []string) {
 		publishPrefix:       *publishPrefix,
 		peerIssuedRegistry:  *peerIssuedRegistry,
 		substituteAllowHTTP: *peerIssuedRegistry != "" && strings.Contains(*peerIssuedRegistry, "http://"),
+
+		discoveryAnnounce:           *discoveryAnnounce,
+		issuerPolicyMode:            *issuerPolicyMode,
+		issuerPolicyAllowlist:       *issuerPolicyAllowlist,
+		issuerPolicyNameConstraints: *issuerPolicyNameConstraints,
+		issuerPolicyDefaultTTL:      *issuerPolicyDefaultTTL,
 	}
 
 	// Resolve --inbox-relay-registry peer-names → peer-ids from state.
@@ -193,6 +204,24 @@ type chunkEFlags struct {
 	// --inbox-relay-registry there is no name→id translation to do.
 	peerIssuedRegistry  string
 	substituteAllowHTTP bool
+
+	// discoveryAnnounce is the EXTENSION-DISCOVERY §3 startup announce —
+	// the transport profile_ref to advertise on mDNS.
+	discoveryAnnounce string
+
+	// issuerPolicy* arm the EXTENSION-REGISTRY §6a.9 LIVE-registration
+	// surface — the write side of peer-issued (`register-request` /
+	// `revoke-request` / `renew-request`), as distinct from
+	// peerIssuedRegistry above, which pins a registry to READ from.
+	//
+	// Go arms this at construction: the handler is not registered at all
+	// unless issuerPolicyMode is set, which is why the surface had zero
+	// validator coverage until this passthrough existed — the suite could
+	// not start it (GUIDE-CONFORMANCE §5.2b).
+	issuerPolicyMode            string
+	issuerPolicyAllowlist       string
+	issuerPolicyNameConstraints string
+	issuerPolicyDefaultTTL      string
 }
 
 // enabled reports whether serving-mode was requested.
@@ -340,6 +369,21 @@ func startGoPeer(name, addr string, debug, openAccess bool, files, history, stor
 	}
 	if poll.publishDescriptors {
 		cmdArgs = append(cmdArgs, "-publish-descriptors")
+	}
+	if poll.discoveryAnnounce != "" {
+		cmdArgs = append(cmdArgs, "-discovery-announce", poll.discoveryAnnounce)
+	}
+	if poll.issuerPolicyMode != "" {
+		cmdArgs = append(cmdArgs, "-issuer-policy-mode", poll.issuerPolicyMode)
+		if poll.issuerPolicyAllowlist != "" {
+			cmdArgs = append(cmdArgs, "-issuer-policy-allowlist", poll.issuerPolicyAllowlist)
+		}
+		if poll.issuerPolicyNameConstraints != "" {
+			cmdArgs = append(cmdArgs, "-issuer-policy-name-constraints", poll.issuerPolicyNameConstraints)
+		}
+		if poll.issuerPolicyDefaultTTL != "" {
+			cmdArgs = append(cmdArgs, "-issuer-policy-default-ttl", poll.issuerPolicyDefaultTTL)
+		}
 	}
 	if poll.peerIssuedRegistry != "" {
 		cmdArgs = append(cmdArgs, "-peer-issued-registry", poll.peerIssuedRegistry)
@@ -557,6 +601,19 @@ func startRustPeer(name, addr string, debug bool, storage, history, files, httpA
 		// peer's default subtree while the operator believed it had narrowed.
 		fmt.Fprintf(os.Stderr, "Warning: --publish-prefix ignored for this peer type (Go-only; the peer publishes its own default subtree)\n")
 	}
+	if poll.discoveryAnnounce != "" {
+		fmt.Fprintf(os.Stderr, "Warning: --discovery-announce ignored for this peer type (Go-only startup flag; the `:announce` operation itself is cross-impl and covered by discovery.v7a_announce_lifecycle)\n")
+	}
+	if poll.issuerPolicyMode != "" {
+		// The §6a.9 handler exists in all three (rust
+		// extensions/registry/src/registration.rs @ b8e0ae2, python
+		// packages/entity-handlers/.../registry.py @ e60c822) — what differs is
+		// how it is ARMED. Neither sibling exposes a CLI flag for it; python
+		// arms over the wire via a `set-issuer-policy` operation that go and
+		// rust do not implement. Dropping silently would start a peer with no
+		// issuer and score its absent registrations as peer failures.
+		fmt.Fprintf(os.Stderr, "Warning: --issuer-policy-mode ignored for this peer type (Go arming mechanism; python arms via the set-issuer-policy operation, rust exposes no CLI arming flag)\n")
+	}
 	// §2.3 keepalive overrides (Rust 99ff398 — same flag names as Go and
 	// Python in clap's double-dash dialect; omitted fields keep spec defaults).
 	cmdArgs = append(cmdArgs, keepalive.args("--")...)
@@ -762,6 +819,19 @@ func startPythonPeer(name, addr string, debug, openAccess bool, history, files, 
 		// drop it and SAY SO — a silently dropped scope flag would publish the
 		// peer's default subtree while the operator believed it had narrowed.
 		fmt.Fprintf(os.Stderr, "Warning: --publish-prefix ignored for this peer type (Go-only; the peer publishes its own default subtree)\n")
+	}
+	if poll.discoveryAnnounce != "" {
+		fmt.Fprintf(os.Stderr, "Warning: --discovery-announce ignored for this peer type (Go-only startup flag; the `:announce` operation itself is cross-impl and covered by discovery.v7a_announce_lifecycle)\n")
+	}
+	if poll.issuerPolicyMode != "" {
+		// The §6a.9 handler exists in all three (rust
+		// extensions/registry/src/registration.rs @ b8e0ae2, python
+		// packages/entity-handlers/.../registry.py @ e60c822) — what differs is
+		// how it is ARMED. Neither sibling exposes a CLI flag for it; python
+		// arms over the wire via a `set-issuer-policy` operation that go and
+		// rust do not implement. Dropping silently would start a peer with no
+		// issuer and score its absent registrations as peer failures.
+		fmt.Fprintf(os.Stderr, "Warning: --issuer-policy-mode ignored for this peer type (Go arming mechanism; python arms via the set-issuer-policy operation, rust exposes no CLI arming flag)\n")
 	}
 	// §2.3 keepalive overrides (Python 0a0eb48 — same flag names as the Go
 	// peer in argparse's double-dash dialect; omitted fields keep spec defaults).

@@ -54,7 +54,7 @@ const DefaultTreeListingSuffix = ".list"
 //     {tree_url_prefix}/{peer_id}{tree_listing_suffix}         ⇒ peer-root listing
 //     {tree_url_prefix}/peers{tree_listing_suffix}             ⇒ all-peers listing
 //   - ContentURLPrefix is consulted for content-hash-keyed URLs:
-//     {content_url_prefix}/{layout-path}/{hex33(H)}.
+//     {content_url_prefix}/{layout-path}/{hex(H)}.
 //   - ManifestURLPrefix is the singular signed manifest URL:
 //     {manifest_url_prefix} (terminal; no suffix, no trailing slash).
 //   - ContentLayout selects the layout-path shape per the constants above.

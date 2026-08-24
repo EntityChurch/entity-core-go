@@ -203,7 +203,7 @@ const PeerIssuedByNamePrefix = "system/registry/binding/by-name/"
 
 // PeerIssuedRevocationByTargetPath returns the v1 cohort revocation index
 // path the peer-issued backend reads to check whether a given binding has
-// been revoked: `system/registry/revocation/by-target/{hex33(bindingHash)}`.
+// been revoked: `system/registry/revocation/by-target/{hex(bindingHash)}`.
 // One round-trip vs. scanning the whole revocation prefix. The path is the
 // peer-issued backend's read-side convention; revocation entities still
 // live at the §3.1 universal location and carry the same signature shape.

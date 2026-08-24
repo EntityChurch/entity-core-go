@@ -58,6 +58,7 @@ func AllCategories() []string {
 		catQuorum,
 		catReachability,
 		catRegistry,
+		catRegistryIssuer,
 		catRelay,
 		catRelayMultiPeer,
 		catRelayMultiPrincipal,

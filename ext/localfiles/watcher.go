@@ -269,19 +269,22 @@ func (w *watcher) flush() {
 
 		fsPath := filepath.Join(w.root.FSRoot, relPath)
 
-		// Lstat first: refuse to follow leaf symlinks. An attacker who can
-		// write into the watched root could plant a symlink to a path
-		// outside the root; without this check, the watcher would ingest
-		// that file's contents into the content store + tree and propagate
-		// them cross-peer. Convergent with the resolveFSPath leaf-symlink
-		// check on the EXECUTE side.
-		linfo, err := os.Lstat(fsPath)
-		if err != nil {
-			// File may have been deleted between event and flush.
+		// Apply BOTH §8.3 defenses — the same enforceContainment the EXECUTE
+		// side runs, not a local approximation of half of it.
+		//
+		// This used to Lstat the leaf only. That refuses a symlinked FILE but
+		// not a symlinked PARENT DIRECTORY: a file appearing under a planted
+		// directory symlink Lstats as an ordinary file, so the watcher ingested
+		// content from outside the root into the content store and the tree and
+		// propagated it cross-peer. §8.3 names the watcher's debounce-flush
+		// ingest as one of the six callsites that MUST apply both, and it was
+		// applying one.
+		if err := enforceContainment(w.root, fsPath, relPath); err != nil {
+			w.logf("localfiles: watcher refusing %s: %v", fsPath, err)
 			continue
 		}
-		if linfo.Mode()&os.ModeSymlink != 0 {
-			w.logf("localfiles: watcher refusing leaf symlink at %s", fsPath)
+		if _, err := os.Lstat(fsPath); err != nil {
+			// File may have been deleted between event and flush.
 			continue
 		}
 

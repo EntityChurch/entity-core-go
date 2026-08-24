@@ -3,7 +3,6 @@ package validate
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -34,7 +33,7 @@ const (
 //
 // Amendment 5 URL shapes:
 //
-//	GET {pollURL}/content/{hex33(H)}                  CONTENT_GET
+//	GET {pollURL}/content/{hex(H)}                  CONTENT_GET
 //	GET {pollURL}/manifest                            MANIFEST_GET (terminal)
 //	GET {pollURL}/peers.list                          universal-tree-root listing
 //	GET {pollURL}/{peer_id}.list                      peer-root listing
@@ -46,7 +45,7 @@ const (
 // is the tree signal; tree has no reserved word (§6.5.6 demux Option B).
 //
 // Seed: `system/tree:put` a chunk entity at
-// `/{peer_id}/system/content/public/{hex33(H)}` — the §6.4.2 Hash Tree
+// `/{peer_id}/system/content/public/{hex(H)}` — the §6.4.2 Hash Tree
 // Presence binding NamespaceScope checks AND the path Amendment 5's
 // CapTokenScope check resolves against. A second chunk at a different
 // non-namespace path is the out-of-scope probe.
@@ -91,10 +90,17 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 	r.Declare("content_get_not_held_404", "Amendment 5 §6.5.3.1 — unknown hash")
 	r.Declare("content_get_t4_oracle_identity", "Amendment 5 §6.5.6 T4 — identical 404 byte-for-byte")
 
-	r.Declare("content_get_strict66_rejects_64char", "Amendment 4 §7 / V7 §3.5 — strict-66")
-	r.Declare("content_get_strict66_rejects_unknown_algo", "Amendment 4 §7 — unknown algorithm byte → 400")
-	r.Declare("content_get_strict66_rejects_sha384_fwd", "Amendment 4 §7 — reserved algo byte → 400")
-	r.Declare("content_get_strict66_rejects_non_hex", "Amendment 4 §6.5.3.1 — invalid hex → 400")
+	// Hex strictness is length-against-the-string's-OWN-format-byte, never
+	// against a constant (§6.5.3.1 as corrected 2026-08-10;
+	// SPECIFICATION-FORMAT §8.4.5). These were named `strict66` and asserted
+	// "reserved algo byte → 400" — a rule that has been overruled. The 0x01
+	// case still expects 400, but now for the correct reason: 66 chars
+	// disagrees with the 98 its own format byte implies.
+	r.Declare("content_get_hex_strictness_rejects_64char", "Amendment 4 §7 / V7 §3.5 — digest-only form (no format byte) → 400")
+	r.Declare("content_get_hex_strictness_rejects_unknown_algo", "Amendment 4 §7 — unallocated algorithm byte → 400 (fail-closed)")
+	r.Declare("content_get_hex_strictness_rejects_sha384_width_mismatch", "§6.5.3.1 (corrected 2026-08-10) — 66 hex chars claiming format 0x01 → 400: the length disagrees with its OWN format byte, which implies 98. NOT because SHA-384 is reserved — it is not.")
+	r.Declare("content_get_hex_strictness_rejects_sha256_width_mismatch", "§6.5.3.1 (corrected 2026-08-10) — 98 hex chars claiming format 0x00 → 400: the mirror case, which a fixed-66 length gate accepts nothing of and a format-blind decoder waves through")
+	r.Declare("content_get_hex_strictness_rejects_non_hex", "Amendment 4 §6.5.3.1 — invalid hex → 400")
 
 	r.Declare("content_get_method_post_405", "Amendment 5 status table — GET only")
 	r.Declare("content_get_method_allow_header", "Amendment 5 status table — Allow: GET")
@@ -103,14 +109,14 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 
 	// TREE_GET leaf (Amendment 5 demux + Amendment 6 body: /{peer_id}/{path}.bin
 	// returns the BOUND HASH as a system/hash 2-key pointer, NOT the dereferenced
-	// entity. Consumer second-hops via /content/{hex33(H)} for the bytes.
+	// entity. Consumer second-hops via /content/{hex(H)} for the bytes.
 	// Per V7 §1.7 dedup invariant: tree holds path→hash; content store holds
 	// hash→bytes once; one-hop materializes N copies on a static CDN.)
 	r.Declare("tree_entity_status", "Amendment 5 §6.5.3.1 — .bin → 200")
 	r.Declare("tree_entity_content_type", "Amendment 5 §6.5.3.1")
 	r.Declare("tree_entity_body_is_hash_pointer", "Amendment 6 §6.5.3.1 — body is `system/hash` 2-key pointer ECF({type, data}); NOT the dereferenced wire entity (V7 §1.7 dedup invariant)")
 	r.Declare("tree_entity_pointer_data_matches_bound_hash", "Amendment 6 — pointer's `data` MUST equal the bound hash H (the path's resolution)")
-	r.Declare("tree_entity_second_hop_dereferences", "Amendment 6 — CONTENT_GET /content/{hex33(H)} for H from the pointer MUST round-trip the entity bytes")
+	r.Declare("tree_entity_second_hop_dereferences", "Amendment 6 — CONTENT_GET /content/{hex(H)} for H from the pointer MUST round-trip the entity bytes")
 	r.Declare("tree_entity_etag", "Amendment 5 §6.5.3.1 + Amendment 6 polish — ETag = 66-hex BOUND hash (not pointer self-hash; changes on rebind = correct mutable cache key)")
 	r.Declare("tree_entity_no_immutable", "Amendment 4 §6.5.3.1 — bindings mutable; MUST NOT mark immutable")
 	r.Declare("tree_entity_out_of_scope_404", "Amendment 5 §6.5.6 T4")
@@ -286,7 +292,7 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 			return FailCheck(fmt.Sprintf("status %d, want 200", resp.StatusCode))
 		}
 		r.Store("content_in_scope_response", resp)
-		return PassCheck("GET /content/{hex33(H)} → 200")
+		return PassCheck("GET /content/{hex(H)} → 200")
 	})
 
 	r.Run("content_get_in_scope_content_type", func() CheckOutcome {
@@ -345,12 +351,21 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 		}
 		resp := r.Load("content_in_scope_response").(*storedResponse)
 		ent := r.Load("in_scope_entity").(entity.Entity)
-		got := sha256.Sum256(resp.Body)
-		if !bytes.Equal(got[:], ent.ContentHash.EffectiveDigest()) {
-			return FailCheck(fmt.Sprintf(
-				"SHA-256(body) = %x, want %x — pure-body-rehash broken", got, ent.ContentHash.EffectiveDigest()))
+		// Rehash under the served hash's own format (§8.4.5) — the
+		// expectation was already format-aware (EffectiveDigest), so
+		// computing with SHA-256 unconditionally compared a 32-byte digest
+		// against a 48-byte one and failed every conformant SHA-384 peer.
+		alg := ent.ContentHash.Algorithm
+		got, err := hash.OfBytes(alg, resp.Body)
+		if err != nil {
+			return FailCheck(fmt.Sprintf("cannot rehash under format 0x%02x: %v", alg, err))
 		}
-		return PassCheck("SHA-256(body) == URL.hash.digest")
+		if !bytes.Equal(got.EffectiveDigest(), ent.ContentHash.EffectiveDigest()) {
+			return FailCheck(fmt.Sprintf(
+				"rehash(body) under format 0x%02x = %x, want %x — pure-body-rehash broken",
+				alg, got.EffectiveDigest(), ent.ContentHash.EffectiveDigest()))
+		}
+		return PassCheck(fmt.Sprintf("rehash(body) under format 0x%02x == URL.hash.digest", alg))
 	})
 
 	r.Run("content_get_in_scope_body_shape_two_key", func() CheckOutcome {
@@ -422,7 +437,7 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 
 	// --- CONTENT_GET strict-66 ---
 
-	r.Run("content_get_strict66_rejects_64char", func() CheckOutcome {
+	r.Run("content_get_hex_strictness_rejects_64char", func() CheckOutcome {
 		bad := strings.Repeat("ab", 32)
 		resp, _, err := httpGet(ctx, urlContent(bad))
 		if err != nil {
@@ -434,7 +449,7 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 		return PassCheck("64-char → 400")
 	})
 
-	r.Run("content_get_strict66_rejects_unknown_algo", func() CheckOutcome {
+	r.Run("content_get_hex_strictness_rejects_unknown_algo", func() CheckOutcome {
 		bad := "ff" + strings.Repeat("ab", 32)
 		resp, _, err := httpGet(ctx, urlContent(bad))
 		if err != nil {
@@ -446,7 +461,8 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 		return PassCheck("unknown algo (0xff) → 400")
 	})
 
-	r.Run("content_get_strict66_rejects_sha384_fwd", func() CheckOutcome {
+	r.Run("content_get_hex_strictness_rejects_sha384_width_mismatch", func() CheckOutcome {
+		// 66 chars claiming 0x01, which implies 98.
 		bad := "01" + strings.Repeat("ab", 32)
 		resp, _, err := httpGet(ctx, urlContent(bad))
 		if err != nil {
@@ -455,10 +471,25 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 		if resp.StatusCode != http.StatusBadRequest {
 			return FailCheck(fmt.Sprintf("returned %d, want 400", resp.StatusCode))
 		}
-		return PassCheck("reserved algo (0x01) → 400")
+		return PassCheck("66 hex claiming format 0x01 (implies 98) → 400")
 	})
 
-	r.Run("content_get_strict66_rejects_non_hex", func() CheckOutcome {
+	r.Run("content_get_hex_strictness_rejects_sha256_width_mismatch", func() CheckOutcome {
+		// 98 chars claiming 0x00, which implies 66. The mirror of the case
+		// above, and the one a peer that dropped its length gate without
+		// re-deriving the length from the format byte would wrongly accept.
+		bad := "00" + strings.Repeat("ab", 48)
+		resp, _, err := httpGet(ctx, urlContent(bad))
+		if err != nil {
+			return FailCheck("GET 00...(98): " + err.Error())
+		}
+		if resp.StatusCode != http.StatusBadRequest {
+			return FailCheck(fmt.Sprintf("returned %d, want 400 — 98 hex chars claiming format 0x00 is malformed; its own format byte implies 66", resp.StatusCode))
+		}
+		return PassCheck("98 hex claiming format 0x00 (implies 66) → 400")
+	})
+
+	r.Run("content_get_hex_strictness_rejects_non_hex", func() CheckOutcome {
 		bad := strings.Repeat("zz", 33)
 		resp, _, err := httpGet(ctx, urlContent(bad))
 		if err != nil {
@@ -590,11 +621,20 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 		if err := ecf.Decode(decoded["data"], &pointerData); err != nil {
 			return FailCheck("decode data field as bytes: " + err.Error())
 		}
-		if len(pointerData) != 33 {
-			return FailCheck(fmt.Sprintf("pointer data is %d bytes, want 33 (V7 §3.5 hex33: 1 algorithm byte + 32 digest)", len(pointerData)))
+		// The pointer's length follows its OWN format byte and is never
+		// assumed (SPECIFICATION-FORMAT §8.4.5). A literal 33 here failed all
+		// three peers under SHA-384 — each emitting the correct 49-byte
+		// pointer for its home format — so the harness, not the peers, was
+		// non-conformant. hash.FromBytes derives the expected length from the
+		// format byte and rejects an unallocated one.
+		pointerHash, err := hash.FromBytes(pointerData)
+		if err != nil {
+			return FailCheck(fmt.Sprintf("pointer data (%d bytes) is not a well-formed system/hash: %v", len(pointerData), err))
 		}
 		r.Store("tree_entity_pointer_data", pointerData)
-		return PassCheck(fmt.Sprintf("body is system/hash 2-key pointer (33-byte hash, hex33=%s)", hex.EncodeToString(pointerData)))
+		r.Store("tree_entity_pointer_hash", pointerHash)
+		return PassCheck(fmt.Sprintf("body is system/hash 2-key pointer (format 0x%02x, %d bytes, hex=%s)",
+			pointerHash.Algorithm, len(pointerData), hex.EncodeToString(pointerData)))
 	})
 
 	r.Run("tree_entity_pointer_data_matches_bound_hash", func() CheckOutcome {
@@ -611,7 +651,7 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 	})
 
 	// Amendment 6: the second hop. Take H from the pointer, do
-	// CONTENT_GET /content/{hex33(H)}, assert the dereferenced body round-trips
+	// CONTENT_GET /content/{hex(H)}, assert the dereferenced body round-trips
 	// the entity bytes. This is the *consumer flow* — the path→hash→bytes
 	// pipeline §6.5.3 step 5 describes.
 	r.Run("tree_entity_second_hop_dereferences", func() CheckOutcome {
@@ -627,13 +667,17 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 		if resp.StatusCode != http.StatusOK {
 			return FailCheck(fmt.Sprintf("CONTENT_GET %s → %d, want 200 (universal-tree dereference path broken)", contentURL, resp.StatusCode))
 		}
-		// Body must pure-body-rehash to H per §6.5.3.1 CONTENT_GET rule.
-		computed := sha256.Sum256(resp.Body)
-		var expected [33]byte
-		copy(expected[1:], computed[:])
-		// expected[0] = 0x00 (ECFv1-SHA-256 algorithm byte)
-		if !bytes.Equal(pointerData, expected[:]) {
-			return FailCheck(fmt.Sprintf("CONTENT_GET body rehashes to %s, expected pointer hash %s (Mechanism A pure-body-rehash failed — peer's content store ≠ tree binding)", hex.EncodeToString(expected[:]), hex.EncodeToString(pointerData)))
+		// Body must pure-body-rehash to H per §6.5.3.1 CONTENT_GET rule —
+		// under the POINTER'S OWN algorithm, not SHA-256. Rehashing with
+		// sha256 unconditionally made this oracle report a mismatch for every
+		// correctly-served SHA-384 body.
+		pointerHash := r.Load("tree_entity_pointer_hash").(hash.Hash)
+		expected, err := hash.OfBytes(pointerHash.Algorithm, resp.Body)
+		if err != nil {
+			return FailCheck(fmt.Sprintf("cannot rehash under pointer format 0x%02x: %v", pointerHash.Algorithm, err))
+		}
+		if !bytes.Equal(pointerData, expected.Bytes()) {
+			return FailCheck(fmt.Sprintf("CONTENT_GET body rehashes to %s, expected pointer hash %s (Mechanism A pure-body-rehash failed — peer's content store ≠ tree binding)", hex.EncodeToString(expected.Bytes()), hex.EncodeToString(pointerData)))
 		}
 		return PassCheck(fmt.Sprintf("path→hash→bytes round-trip OK (%d bytes content)", len(resp.Body)))
 	})
@@ -1101,16 +1145,17 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 		if resp.StatusCode != http.StatusOK {
 			return FailCheck(fmt.Sprintf("re-fetch status %d, want 200", resp.StatusCode))
 		}
-		raw, err := hex.DecodeString(etag)
-		if err != nil {
-			return FailCheck("decode ETag hex: " + err.Error())
-		}
-		H, err := hash.FromBytes(raw)
+		// ParseHex derives the expected hex length from the ETag's own format
+		// byte — a fixed 66 here would reject a conformant SHA-384 ETag.
+		H, err := hash.ParseHex(etag)
 		if err != nil {
 			return FailCheck("Hash from ETag: " + err.Error())
 		}
-		got := sha256.Sum256(resp.Body)
-		if !bytes.Equal(got[:], H.EffectiveDigest()) {
+		got, err := hash.OfBytes(H.Algorithm, resp.Body)
+		if err != nil {
+			return FailCheck(fmt.Sprintf("cannot rehash under ETag format 0x%02x: %v", H.Algorithm, err))
+		}
+		if !bytes.Equal(got.EffectiveDigest(), H.EffectiveDigest()) {
 			return FailCheck("re-fetched body doesn't rehash to tree ETag")
 		}
 		return PassCheck("tree ETag round-trips through /content")

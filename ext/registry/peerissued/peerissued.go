@@ -393,7 +393,7 @@ func (b *Backend) verifyBinding(bindingHash hash.Hash, sigEnt entity.Entity) err
 	if sd.Target != bindingHash {
 		return fmt.Errorf("signature target %s ≠ binding hash %s", sd.Target, bindingHash)
 	}
-	if sd.Signer != b.registryPeerHash {
+	if !b.signerMatchesPinned(sd.Signer) {
 		return fmt.Errorf("signature signer %s ≠ pinned registry identity %s",
 			sd.Signer, b.registryPeerHash)
 	}
@@ -401,6 +401,35 @@ func (b *Backend) verifyBinding(bindingHash hash.Hash, sigEnt entity.Entity) err
 		return fmt.Errorf("signature does not verify under pinned registry key")
 	}
 	return nil
+}
+
+// signerMatchesPinned reports whether `signer` references this backend's
+// pinned registry identity.
+//
+// The comparison is made under the SIGNER REFERENCE'S OWN
+// content_hash_format, not this peer's home format. The registry authored its
+// identity — and the signature pointing at it — under whatever format the
+// registry runs. A pinning peer, however, reconstructs that identity locally
+// from the pinned peer-id (`--peer-issued-registry` builds a
+// `system/peer` entity from the public key), so `registryPeer.ContentHash` is
+// computed under the LOCAL authoring format. Comparing the two directly makes
+// a SHA-384-home peer reject every SHA-256-authored registry and vice versa —
+// a home-format incompatibility reported as a trust failure, which is both
+// wrong and very hard to read from the error.
+//
+// Re-deriving the pinned identity's hash under the reference's own format is
+// what makes a pin portable across formats (SPECIFICATION-FORMAT §8.4.5). The
+// trust decision is unchanged: it still verifies that the signer names THIS
+// identity's bytes, just addressed in the format the signer used.
+func (b *Backend) signerMatchesPinned(signer hash.Hash) bool {
+	if signer == b.registryPeerHash {
+		return true
+	}
+	want, err := hash.ComputeFormat(signer.Algorithm, b.registryPeer.Type, b.registryPeer.Data)
+	if err != nil {
+		return false
+	}
+	return signer == want
 }
 
 // checkRevoked reads the registry's by-target revocation index for this

@@ -59,12 +59,23 @@ const (
 //                        the issued_at window.
 //   - signature_invalid: layer-1 ownership-proof failed (signature not by
 //                        target_peer_id, or signature missing).
+//   - unsupported_mode:  set-issuer-policy was handed a mode this
+//                        implementation cannot enforce (§6a.9.2 — today only
+//                        the deferred `domain-control`). Distinct from the
+//                        501 the register path returns for an already-stored
+//                        domain-control policy: this one refuses to store it.
+//   - not_found:         get-issuer-policy with no policy entity stored.
+//                        "Unset is not a mode" (§6a.9.2) — the registry is
+//                        curated-only, and a synthesized `open` default here
+//                        would silently make it first-come-first-serve.
 const (
 	RegistryErrNameTaken        = "name_taken"        // 409
 	RegistryErrNotEntitled      = "not_entitled"      // 403
 	RegistryErrPolicyRejected   = "policy_rejected"   // 403
 	RegistryErrReplayDetected   = "replay_detected"   // 409
 	RegistryErrSignatureInvalid = "signature_invalid" // 401
+	RegistryErrUnsupportedMode  = "unsupported_mode"  // 400
+	RegistryErrNotFound         = "not_found"         // 404
 )
 
 // IssuerPolicyStoragePath is the canonical path for the singleton

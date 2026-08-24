@@ -13,7 +13,10 @@ type hashRef struct {
 }
 
 // extractHashRefs walks CBOR-encoded entity data and extracts all values that
-// look like content hashes (33-byte byte strings with algorithm byte 0x00).
+// decode as a content hash under any allocated content_hash_format. The width
+// is never assumed (SPECIFICATION-FORMAT §8.4.5) — hash.FromBytes reads the
+// leading format byte and requires the digest length that byte implies, so a
+// SHA-384 reference (49 bytes, `01`) is indexed exactly like a SHA-256 one.
 //
 // The data is a CBOR map. Top-level field names are tracked so the reverse
 // index knows which field contains each reference. For nested references, the
@@ -43,9 +46,9 @@ func extractHashRefs(data cbor.RawMessage) []hashRef {
 	return refs
 }
 
-// walkCBOR recursively walks a CBOR value looking for byte strings that match
-// the hash format (33 bytes, algorithm 0x00). Each found hash is reported with
-// the given field name.
+// walkCBOR recursively walks a CBOR value looking for byte strings that parse
+// as a content hash under their own format byte. Each found hash is reported
+// with the given field name.
 func walkCBOR(raw cbor.RawMessage, fieldName string, fn func(hash.Hash, string)) {
 	if len(raw) == 0 {
 		return

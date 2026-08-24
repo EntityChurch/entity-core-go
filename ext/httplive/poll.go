@@ -5,7 +5,7 @@
 // static CDNs per the index-document + slash-normalization hazards the spec
 // works through).
 //
-//	GET /content/{hex33(H)}                    CONTENT_GET   — content-by-hash
+//	GET /content/{hex(H)}                    CONTENT_GET   — content-by-hash
 //	GET /manifest                              MANIFEST_GET  — singular, terminal
 //	GET /peers{tree_listing_suffix}            TREE_GET      — universal-tree-root listing
 //	GET /{peer_id}{tree_listing_suffix}        TREE_GET      — peer-root listing
@@ -78,7 +78,7 @@ const peerIDMinLength = 46
 // 404 to not-held (Amendment 4 §1.3 T4 — no presence oracle).
 //
 // Two methods because Amendment 5 has two axes of address:
-//   - InScope(h)      — content-keyed. /content/{hex33(H)} hits this.
+//   - InScope(h)      — content-keyed. /content/{hex(H)} hits this.
 //   - InScopePath(p)  — path-keyed. /{peer_id}/{path}.bin|.list hit this
 //     for entity resolution + per-child listing filtering.
 //
@@ -95,7 +95,7 @@ type ScopePredicate interface {
 }
 
 // NamespaceScope serves H iff the local tree binds an entity at
-// `{namespace}/{hex33(H)}`. Per CONTENT §6.4.2 Hash Tree Presence.
+// `{namespace}/{hex(H)}`. Per CONTENT §6.4.2 Hash Tree Presence.
 //
 // **Second ACL machinery warning (Amendment 5):** this predicate is its own
 // ACL surface separate from the live-EXECUTE cap evaluator. Drift between
@@ -106,7 +106,7 @@ type NamespaceScope struct {
 	Namespace string // e.g. "system/content/public"
 }
 
-// InScope returns true iff a tree binding exists at Namespace/{hex33(H)}.
+// InScope returns true iff a tree binding exists at Namespace/{hex(H)}.
 func (s NamespaceScope) InScope(_ context.Context, h hash.Hash) (bool, error) {
 	if s.Namespace == "" {
 		return false, fmt.Errorf("namespace scope: empty namespace")
@@ -285,7 +285,7 @@ func (h *PollHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Amendment 5 §6.5.6 demux — literal-or-peer-id-parse:
 	switch {
 	case first == "content":
-		// CONTENT_GET — `content/{hex33}` only. Anything else → 404.
+		// CONTENT_GET — `content/{hex(H)}` only. Anything else → 404.
 		if !hasRest || rest == "" {
 			http.NotFound(w, r)
 			return
@@ -420,16 +420,15 @@ func (h *PollHandler) serveContent(w http.ResponseWriter, r *http.Request, hexHa
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if len(hexHash) != hex.EncodedLen(hash.HashSize) {
-		http.Error(w, "invalid hash: wrong length (expected 66 hex chars)", http.StatusBadRequest)
-		return
-	}
-	raw, err := hex.DecodeString(hexHash)
-	if err != nil {
-		http.Error(w, "invalid hash: not hex", http.StatusBadRequest)
-		return
-	}
-	H, err := hash.FromBytes(raw)
+	// The hex length is the one this hash's OWN format byte implies — never a
+	// constant (EXTENSION-NETWORK §6.5.3.1 as corrected 2026-08-10;
+	// SPECIFICATION-FORMAT §8.4.5). A fixed 66-char gate here reserved a
+	// partition the very next bullet promised to open: it returned 400 for a
+	// perfectly well-formed 98-char SHA-384 hash. ParseHex rejects any hex
+	// whose length disagrees with its format byte, which is strictly stronger
+	// — it still rejects the 64-char digest-only form and additionally
+	// rejects a 98-char string claiming `00`.
+	H, err := hash.ParseHex(hexHash)
 	if err != nil {
 		http.Error(w, "invalid hash: "+err.Error(), http.StatusBadRequest)
 		return
@@ -467,7 +466,7 @@ func (h *PollHandler) serveContent(w http.ResponseWriter, r *http.Request, hexHa
 // **bound hash** as a `system/hash` 2-key bare pointer
 // `ECF({type:"system/hash", data: H})`, NOT the dereferenced entity. This is
 // exactly `tree:get mode:"hash"` (V7 §1.7) exposed over HTTP — the consumer
-// reads `H` from `data` and second-hops `CONTENT_GET /content/{hex33(H)}` for
+// reads `H` from `data` and second-hops `CONTENT_GET /content/{hex(H)}` for
 // the entity bytes.
 //
 // Why the pointer (not the dereferenced entity): returning the entity at

@@ -8,6 +8,7 @@ package httplive_test
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"io"
 	"net/http"
@@ -65,6 +66,30 @@ func putChunk(t *testing.T, cs store.ContentStore, payload []byte) hash.Hash {
 	h, err := cs.Put(ent)
 	if err != nil {
 		t.Fatalf("store.Put: %v", err)
+	}
+	return h
+}
+
+// putChunkFormat is putChunk under an explicit content_hash_format. The
+// content stores recompute under the entity's *claimed* Algorithm, so setting
+// it before Put is what makes the entity land under that format.
+func putChunkFormat(t *testing.T, cs store.ContentStore, payload []byte, alg byte) hash.Hash {
+	t.Helper()
+	ent, err := types.ContentChunkData{Payload: payload}.ToEntity()
+	if err != nil {
+		t.Fatalf("ContentChunkData.ToEntity: %v", err)
+	}
+	ch, err := hash.ComputeFormat(alg, ent.Type, ent.Data)
+	if err != nil {
+		t.Fatalf("ComputeFormat(0x%02x): %v", alg, err)
+	}
+	ent.ContentHash = ch
+	h, err := cs.Put(ent)
+	if err != nil {
+		t.Fatalf("store.Put: %v", err)
+	}
+	if h.Algorithm != alg {
+		t.Fatalf("stored under format 0x%02x, want 0x%02x", h.Algorithm, alg)
 	}
 	return h
 }
@@ -128,6 +153,50 @@ func TestPoll_ContentGet_NamespaceScope_HitReturnsHashableBytes(t *testing.T) {
 	}
 }
 
+// TestPoll_ContentGet_SHA384_98HexServes is the positive half of the
+// EXTENSION-NETWORK §6.5.3.1 correction (2026-08-10): an in-scope SHA-384
+// hash arrives as 98 hex chars and MUST be served. Under the previous fixed
+// 66-char gate this returned 400 — the measured cohort split (go + rust 400,
+// python 200) that the ruling resolved in python's favour.
+//
+// This is the check that had no way to exist before: nothing in the suite's
+// history produced a hash that was not 66 chars, so the width lock was
+// invisible rather than untested.
+func TestPoll_ContentGet_SHA384_98HexServes(t *testing.T) {
+	const ns = "system/content/public"
+	fx := newPollFixture(t, "", func(idx store.LocationIndex) httplive.ScopePredicate {
+		return httplive.NamespaceScope{Index: idx, Namespace: ns}
+	})
+
+	payload := []byte("hello from a SHA-384 home format")
+	h := putChunkFormat(t, fx.store, payload, hash.AlgorithmSHA384)
+	bindNamespace(t, fx.index, ns, h)
+
+	hexH := hex.EncodeToString(h.Bytes())
+	if len(hexH) != 98 {
+		t.Fatalf("fixture: SHA-384 wire hex is %d chars, want 98", len(hexH))
+	}
+
+	resp, err := http.Get(fx.url + "/content/" + hexH)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200 — a 98-char SHA-384 hash is well-formed, not malformed", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	// Pure-body rehash under the hash's OWN algorithm, not SHA-256.
+	if sum := sha512.Sum384(body); !bytes.Equal(sum[:], h.EffectiveDigest()) {
+		t.Errorf("SHA-384(body) != H.digest — pure-body-rehash invariant broken under SHA-384")
+	}
+}
+
 func TestPoll_ContentGet_OutOfScope_404(t *testing.T) {
 	const ns = "system/content/public"
 	fx := newPollFixture(t, "", func(idx store.LocationIndex) httplive.ScopePredicate {
@@ -156,6 +225,18 @@ func TestPoll_ContentGet_MalformedHashReturns400(t *testing.T) {
 		{"too long", strings.Repeat("aa", hash.HashSize+1)},
 		{"not hex", strings.Repeat("zz", hash.HashSize)},
 		{"unknown algorithm byte", "ff" + strings.Repeat("aa", hash.DigestSize)},
+
+		// The strictness test is *length against the string's own format
+		// byte*, not against a constant (EXTENSION-NETWORK §6.5.3.1 as
+		// corrected 2026-08-10; SPECIFICATION-FORMAT §8.4.5). These four
+		// distinguish that rule from the fixed-66 gate it replaced: the two
+		// digest-only cases were already rejected by the old gate, but the
+		// two mismatch cases are ones a width-pinned reader gets wrong in
+		// one direction or the other.
+		{"digest-only 64 claiming sha256", "00" + strings.Repeat("aa", hash.DigestSize-1)},
+		{"sha384 width claiming sha256", "00" + strings.Repeat("aa", hash.SHA384DigestSize)},
+		{"sha256 width claiming sha384", "01" + strings.Repeat("aa", hash.SHA256DigestSize)},
+		{"sha384 digest-only 96", strings.Repeat("aa", hash.SHA384DigestSize)},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

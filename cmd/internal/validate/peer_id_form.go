@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
+	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/types"
 )
 
@@ -104,11 +105,25 @@ func runPeerIDForm(ctx context.Context, client *PeerClient) []CheckResult {
 		if err != nil {
 			return FailCheck(fmt.Sprintf("ComputePeerIdentityHash: %v", err))
 		}
+		// The hex is the full wire form and its length is implied by its own
+		// leading format byte — never a constant (SPECIFICATION-FORMAT §8.4.5;
+		// EXTENSION-NETWORK §6.5.3.1 as ruled 2026-08-10). This asserted 66,
+		// which is the SHA-256 value, so it FAILED on a conformant SHA-384-home
+		// peer with "canonical hex length is 98". ParseHex is the ruled
+		// strictness test itself — it rejects any hex whose length disagrees
+		// with its own format byte — so round-tripping through it is a
+		// STRONGER assertion than the constant was, not a weaker one: it also
+		// rejects a 98-char string claiming `00`.
 		canonicalHex := hex.EncodeToString(canonicalFromIdentity.Bytes())
-		if len(canonicalHex) != 66 {
-			return FailCheck(fmt.Sprintf("canonical hex length is %d, expected 66 chars", len(canonicalHex)))
+		reparsed, err := hash.ParseHex(canonicalHex)
+		if err != nil {
+			return FailCheck(fmt.Sprintf("canonical hex %q is not a well-formed content_hash wire form: %v", canonicalHex, err))
 		}
-		return PassCheck(fmt.Sprintf("v7.65 §5 canonicalize-on-storage: canonical content_hash invariant under wire-form (hash=%s)", canonicalHex[:10]+"…"))
+		if reparsed != canonicalFromIdentity {
+			return FailCheck("canonical hex does not round-trip back to the same content_hash")
+		}
+		return PassCheck(fmt.Sprintf("v7.65 §5 canonicalize-on-storage: canonical content_hash invariant under wire-form (hash=%s, %d hex chars under format 0x%02x)",
+			canonicalHex[:10]+"…", len(canonicalHex), canonicalFromIdentity.Algorithm))
 	})
 
 	r.Run("pim_default_mint_is_canonical_form", func() CheckOutcome {

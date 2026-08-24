@@ -47,7 +47,7 @@ func runConvergentMirror(ctx context.Context, clients []*PeerClient) []CheckResu
 	r.Declare("recipe_subscribe", "EXTENSION-SUBSCRIPTION §2.3 v3.14")
 	r.Declare("writes_driven", "PROPOSAL-CONVERGENT-MIRRORING §5")
 	r.Declare("converges_to_latest", "PROPOSAL-CONVERGENT-MIRRORING §2.2")
-	r.Declare("entity_fidelity", "ENTITY-CORE-MACHINE-SPEC §1.8 (mirror preserves hash)")
+	r.Declare("entity_fidelity", "ENTITY-CBOR-ENCODING §5.4 (mirror preserves hash)")
 	r.Declare("bounded_amplification", "PROPOSAL-CONVERGENT-MIRRORING §5 (≤ 1.5 × N)")
 
 	if len(clients) < 2 {

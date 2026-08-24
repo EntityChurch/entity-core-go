@@ -157,11 +157,7 @@ func FormatInlineValue(b *strings.Builder, v interface{}) {
 	case nil:
 		fmt.Fprint(b, "null")
 	case []byte:
-		if len(val) == 33 && val[0] == 0x00 {
-			fmt.Fprintf(b, "hash(ecf-sha256:%s)", hex.EncodeToString(val[1:]))
-		} else {
-			fmt.Fprintf(b, "bytes(%d):%s", len(val), hex.EncodeToString(val))
-		}
+		fmt.Fprint(b, formatBytes(val))
 	case map[interface{}]interface{}:
 		fmt.Fprint(b, "{")
 		first := true
@@ -188,16 +184,31 @@ func FormatInlineValue(b *strings.Builder, v interface{}) {
 	}
 }
 
+// formatBytes renders a CBOR byte string for human reading, recognising the
+// content_hash wire form and labelling it with its actual algorithm.
+//
+// It used to test `len(val) == 33 && val[0] == 0x00`, so on a SHA-384-home peer
+// every hash in a diagnostic dump printed as `bytes(49):01…` — raw, unlabelled,
+// and indistinguishable from an opaque blob. That matters more than it looks:
+// USING-DIAGNOSTICS makes trace output the FIRST thing to reach for when
+// something fails, so a formatter that stops recognising hashes under a
+// non-default format degrades exactly when the unfamiliar configuration is what
+// is being debugged. hash.FromBytes decides by the leading format byte, which
+// is what the byte is for.
+func formatBytes(val []byte) string {
+	if h, err := hash.FromBytes(val); err == nil {
+		return fmt.Sprintf("hash(%s)", h)
+	}
+	return fmt.Sprintf("bytes(%d):%s", len(val), hex.EncodeToString(val))
+}
+
 // FormatSingleValue returns a string representation of a single CBOR value.
 func FormatSingleValue(v interface{}) string {
 	switch val := v.(type) {
 	case nil:
 		return "null"
 	case []byte:
-		if len(val) == 33 && val[0] == 0x00 {
-			return fmt.Sprintf("hash(ecf-sha256:%s)", hex.EncodeToString(val[1:]))
-		}
-		return fmt.Sprintf("bytes(%d):%s", len(val), hex.EncodeToString(val))
+		return formatBytes(val)
 	case string:
 		return fmt.Sprintf("%q", val)
 	default:

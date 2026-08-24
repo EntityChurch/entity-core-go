@@ -308,7 +308,7 @@ func TestIngestEntity_WritesHashTreePresenceBinding(t *testing.T) {
 				t.Fatalf("decode result: %v", err)
 			}
 
-			// Expect the §6.4.2 binding at {namespace}/{hex33(H)} → H
+			// Expect the §6.4.2 binding at {namespace}/{hex(H)} → H
 			// per V7 §3.5 — 66 hex chars including the algorithm byte.
 			wantPath := c.namespace + "/" + hex.EncodeToString(result.RootHash.Bytes())
 			got, ok := env.nsLI.Get(wantPath)
@@ -319,7 +319,7 @@ func TestIngestEntity_WritesHashTreePresenceBinding(t *testing.T) {
 				t.Errorf("binding at %q resolves to %s, want %s", wantPath, got, result.RootHash)
 			}
 			if len(hex.EncodeToString(result.RootHash.Bytes())) != 66 {
-				t.Errorf("hex33(H) wrong length: got %d, want 66", len(hex.EncodeToString(result.RootHash.Bytes())))
+				t.Errorf("hex(H) wrong length: got %d, want 66", len(hex.EncodeToString(result.RootHash.Bytes())))
 			}
 		})
 	}

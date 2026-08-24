@@ -11,7 +11,7 @@ import (
 // Delivery, inbox, and subscription type constants.
 const (
 	TypeDeliverySpec         = "system/delivery-spec"
-	TypeInboxDelivery        = "system/protocol/inbox/delivery"
+	TypeInboxDelivery        = "system/inbox/delivery"
 	TypeInboxNotification    = "system/protocol/inbox/notification"
 	TypeSubscription         = "system/subscription"
 	TypeSubscriptionRequest  = "system/subscription/request"
@@ -26,14 +26,14 @@ type DeliverySpec struct {
 	Operation string `cbor:"operation"`
 }
 
-// InboxDeliveryData is the data payload for system/protocol/inbox/delivery.
+// InboxDeliveryData is the data payload for system/inbox/delivery.
 type InboxDeliveryData struct {
 	OriginalRequestID string          `cbor:"original_request_id"`
 	Status            uint            `cbor:"status"`
 	Result            cbor.RawMessage `cbor:"result"`
 }
 
-// ToEntity creates a system/protocol/inbox/delivery entity.
+// ToEntity creates a system/inbox/delivery entity.
 func (d InboxDeliveryData) ToEntity() (entity.Entity, error) {
 	raw, err := ecf.Encode(d)
 	if err != nil {

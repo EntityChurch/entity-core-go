@@ -7,6 +7,7 @@ import (
 	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
+	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/types"
 )
 
@@ -118,12 +119,24 @@ const SigningDomain = "entity:sigblob:v1"
 // This is the same lesson as the peer-id derivation directly below: do not carry
 // a value on the wire that you must remember to validate.
 //
-// Both payload halves are FIXED length, so the concatenation after the tag is
-// unambiguous without length prefixes.
+// The concatenation after the tag is unambiguous without length prefixes
+// because the ONE variable-length component is LAST: tag (17) ‖ SEP (1) ‖
+// rendezvous key (33, pinned) ‖ content hash (remainder).
+//
+// The content hash's length follows its OWN format byte and is never assumed
+// (EXTENSION-SIGNALING §6.3 as corrected 2026-08-10; SPECIFICATION-FORMAT
+// §8.4.5): 33 bytes under ECFv1-SHA-256, 49 under ECFv1-SHA-384. It is
+// AUTHORED CONTENT, so it follows the signing peer's home format. The
+// rendezvous key beside it stays pinned at 33 and that is NOT an exception —
+// §3.1 pins its digest *format* to the SHA-256 floor because a rendezvous key
+// is a lookup token two independent parties must reproduce, not authored
+// content, and the width follows from that pin. Authored content vs.
+// reproduced lookup token is the whole distinction, and it is why the same
+// document is right about one field and was wrong about its neighbour.
 func signingInput(contentHash []byte, rendezvousKey []byte) ([]byte, error) {
-	if len(contentHash) != 33 {
-		return nil, fmt.Errorf("%w: content_hash is %d bytes, want the 33-byte wire form (format ‖ digest)",
-			ErrUnusableKey, len(contentHash))
+	if _, err := hash.FromBytes(contentHash); err != nil {
+		return nil, fmt.Errorf("%w: content_hash is not a well-formed wire hash (format ‖ digest): %v",
+			ErrUnusableKey, err)
 	}
 	if len(rendezvousKey) != RendezvousKeyLen {
 		return nil, fmt.Errorf("%w: rendezvous key is %d bytes, want %d",
@@ -137,9 +150,20 @@ func signingInput(contentHash []byte, rendezvousKey []byte) ([]byte, error) {
 	return msg, nil
 }
 
-// SigningInputLen is the total byte length of a coordination signing input:
-// 17 (domain) + 1 (SEP) + 33 (rendezvous key) + 33 (content hash) = 84.
-const SigningInputLen = len(SigningDomain) + 1 + RendezvousKeyLen + 33
+// SigningInputLen returns the total byte length of a coordination signing
+// input for a content hash of the given content_hash_format:
+// 17 (domain) + 1 (SEP) + 33 (rendezvous key) + hash wire size.
+//
+// 84 under ECFv1-SHA-256, 100 under ECFv1-SHA-384. This was a const pinned at
+// 84 — a width lock that made the signing input unrepresentable for any peer
+// whose home format is not SHA-256. Returns 0 for an unallocated format.
+func SigningInputLen(alg byte) int {
+	n := hash.HashWireSize(alg)
+	if n == 0 {
+		return 0
+	}
+	return len(SigningDomain) + 1 + RendezvousKeyLen + n
+}
 
 // RendezvousKeyLen is the length of a §3.1 rendezvous key: 33 bytes, the
 // algorithm‖digest wire form at the SHA-256 floor (see key.go's Derive).

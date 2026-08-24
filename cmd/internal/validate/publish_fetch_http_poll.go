@@ -10,7 +10,7 @@
 // full read flow:
 //
 //	resolve → MANIFEST_GET → signature verify → TREE_GET (system/hash
-//	pointer per Amendment 6) → CONTENT_GET /content/{hex33(H)} → re-hash
+//	pointer per Amendment 6) → CONTENT_GET /content/{hex(H)} → re-hash
 //	→ ingest → byte-equality assertion against publisher originals.
 //
 // This is **Mechanism A** (NETWORK §6.5.3.1 — HTTP-as-storage-transport),
@@ -87,7 +87,7 @@ func runPublishFetchHTTPPoll(ctx context.Context) []CheckResult {
 	r.Declare("v1_publish_manifest_served", "PROPOSAL-PEER-MANIFEST-STATIC-HANDSHAKE §4 + NETWORK §6.5.3.1 — publisher mints a system/peer/published-root and PollHandler MANIFEST_GET serves it (Tier-1 end-to-end first step)")
 	r.Declare("v2_manifest_signature_verified", "V7 §5.2 / PEER-MANIFEST §4 — Outbound with pinned identity walks the invariant-pointer signature carriage and reaches Verified=true")
 	r.Declare("v3_tree_leaf_pointer_resolves", "NETWORK §6.5.3.1 Amendment 6 — TREE_GET for each authored peer-relative path returns the bound system/hash pointer at that leaf")
-	r.Declare("v4_content_fetch_hash_verified", "NETWORK §6.5.3.1 — CONTENT_GET /content/{hex33(H)} returns byte-equal entity that re-hashes to the requested hash (Mechanism A trust gate fires positively)")
+	r.Declare("v4_content_fetch_hash_verified", "NETWORK §6.5.3.1 — CONTENT_GET /content/{hex(H)} returns byte-equal entity that re-hashes to the requested hash (Mechanism A trust gate fires positively)")
 	r.Declare("v5_ingest_byte_equality", "End-to-end gate: every consumer-ingested entity's .data is byte-equal to the publisher's original (ECF byte-stability across the wire round-trip)")
 	r.Declare("v6_host_bytes_distrust", "NETWORK §1.1 threat-model gate — a swap-bytes static origin is rejected by the connector's CONTENT_GET hash check, applied to the blog-entity shape (proves the gate is shape-agnostic)")
 

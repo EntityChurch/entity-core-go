@@ -339,23 +339,44 @@ func TestVerifierCatchesWrongContainerSignerAndInnerBlob(t *testing.T) {
 // The signing input is the one thing that must match byte-for-byte across impls,
 // and it is the cohort-agreed layout rather than whatever this package happens
 // to do. Re-derived here independently of ext/signaling for that reason.
+// Run per content_hash_format: the layout claim is that the ONE variable
+// component is last, so it must hold for every allocated format, not just the
+// one this cohort happens to run (EXTENSION-SIGNALING §6.3 as corrected
+// 2026-08-10; GUIDE-CONFORMANCE §5.2b — a configuration axis is covered only
+// when the suite exercises it per value). The rendezvous key stays 33 in both
+// rows: §3.1 pins its format to the SHA-256 floor deliberately.
 func TestTheSigningInputIsTheCohortAgreedBytes(t *testing.T) {
-	key := make([]byte, 33)
-	hash := make([]byte, 33)
-	for i := range key {
-		key[i] = byte(i)
-		hash[i] = byte(0x80 + i)
-	}
-	got := coordinationSigningInput(key, hash)
+	for _, tc := range []struct {
+		name     string
+		alg      byte
+		hashSize int
+	}{
+		{"sha256-home", 0x00, 33},
+		{"sha384-home", 0x01, 49},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := make([]byte, 33)
+			for i := range key {
+				key[i] = byte(i)
+			}
+			hash := make([]byte, tc.hashSize)
+			hash[0] = tc.alg
+			for i := 1; i < len(hash); i++ {
+				hash[i] = byte(0x80 + i)
+			}
+			got := coordinationSigningInput(key, hash)
 
-	want := append([]byte("entity:sigblob:v1"), 0x1F)
-	want = append(want, key...)
-	want = append(want, hash...)
-	if string(got) != string(want) {
-		t.Fatalf("signing input diverged from the routed layout\n got %x\nwant %x", got, want)
-	}
-	if len(got) != signaling.SigningInputLen {
-		t.Errorf("signing input is %d bytes, package says %d", len(got), signaling.SigningInputLen)
+			want := append([]byte("entity:sigblob:v1"), 0x1F)
+			want = append(want, key...)
+			want = append(want, hash...)
+			if string(got) != string(want) {
+				t.Fatalf("signing input diverged from the routed layout\n got %x\nwant %x", got, want)
+			}
+			// The expected length follows the content hash's own format byte.
+			if wantLen := signaling.SigningInputLen(tc.alg); len(got) != wantLen {
+				t.Errorf("signing input is %d bytes, package says %d (format 0x%02x)", len(got), wantLen, tc.alg)
+			}
+		})
 	}
 }
 

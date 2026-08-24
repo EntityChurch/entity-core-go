@@ -202,7 +202,7 @@ func (h *Handler) handleReceive(ctx context.Context, req *handler.Request) (*han
 }
 
 // unwrapDeliveryResult extracts the result and status from an inbox message entity
-// per EXTENSION-INBOX §3.2. If the message is a delivery (system/protocol/inbox/delivery),
+// per EXTENSION-INBOX §3.2. If the message is a delivery (system/inbox/delivery),
 // returns data.result and data.status. Otherwise returns the raw entity data and status 200.
 func unwrapDeliveryResult(msg entity.Entity) (cbor.RawMessage, *uint) {
 	if msg.Type == types.TypeInboxDelivery {

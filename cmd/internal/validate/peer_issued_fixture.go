@@ -151,10 +151,13 @@ func (f *peerIssuedFixture) close() {
 
 // decodeHashableEntity reconstructs an Entity from the bundle's `.cbor`
 // bytes, which are `ecf.EncodeHashable(type, data)` — the same 2-key
-// {data, type} body a CONTENT_GET returns on the wire. Rebuilding through
-// entity.NewEntity recomputes the content hash, so a corrupted fixture is
-// caught here rather than surfacing as a mysterious resolve failure.
-func decodeHashableEntity(b []byte) (entity.Entity, error) {
+// {data, type} body a CONTENT_GET returns on the wire. Rebuilding recomputes
+// the content hash, so a corrupted fixture is caught here rather than
+// surfacing as a mysterious resolve failure.
+//
+// The hash is computed under `alg` — the format the BUNDLE was authored in,
+// not the format this validator process happens to be authoring in.
+func decodeHashableEntity(b []byte, alg byte) (entity.Entity, error) {
 	var raw struct {
 		Type string          `cbor:"type"`
 		Data cbor.RawMessage `cbor:"data"`
@@ -165,24 +168,20 @@ func decodeHashableEntity(b []byte) (entity.Entity, error) {
 	if raw.Type == "" {
 		return entity.Entity{}, fmt.Errorf("decoded entity has empty type")
 	}
-	return entity.NewEntity(raw.Type, raw.Data)
+	return entity.NewEntityFormat(alg, raw.Type, raw.Data)
 }
 
-// parseHash33 parses the bundle's 66-char hex hashes — the invariant-pointer
-// form WITH the format byte. The 64-char digest-only form is rejected
-// outright: accepting it here would let a bundle that used the wrong form
-// still load, and that is exactly the class of bug the 66-char convention
-// exists to make loud.
-func parseHash33(s string) (hash.Hash, error) {
-	s = strings.TrimSpace(s)
-	if len(s) != 66 {
-		return hash.Hash{}, fmt.Errorf("hash %q is %d hex chars, want 66 (33-byte algorithm||digest form)", s, len(s))
-	}
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		return hash.Hash{}, fmt.Errorf("hash %q: %w", s, err)
-	}
-	return hash.FromBytes(b)
+// parseBundleHash parses the bundle's hex hashes — the invariant-pointer form
+// WITH the format byte. The digest-only form is rejected outright: accepting
+// it here would let a bundle that used the wrong form still load, and that is
+// exactly the class of bug the format-included convention exists to make loud.
+//
+// The expected length follows the string's own format byte and is never
+// assumed (SPECIFICATION-FORMAT §8.4.5) — 66 chars under ECFv1-SHA-256, 98
+// under ECFv1-SHA-384. This was pinned at 66, which would have rejected a
+// SHA-384-authored bundle outright.
+func parseBundleHash(s string) (hash.Hash, error) {
+	return hash.ParseHex(strings.TrimSpace(s))
 }
 
 // loadPeerIssuedFixture reads the bundle at `dir`, loads every vector's
@@ -193,9 +192,9 @@ func parseHash33(s string) (hash.Hash, error) {
 // PROPOSAL-PEER-ISSUED-REGISTRY-BACKEND §2.2:
 //
 //	system/registry/binding/by-name/{nfc(name)}          → binding hash
-//	system/signature/{hex33(binding_hash)}               → signature hash
-//	system/registry/revocation/by-target/{hex33(bh)}     → revocation hash
-//	system/signature/{hex33(revocation_hash)}            → revocation sig hash
+//	system/signature/{hex(binding_hash)}               → signature hash
+//	system/registry/revocation/by-target/{hex(bh)}     → revocation hash
+//	system/signature/{hex(revocation_hash)}            → revocation sig hash
 //
 // plus the universal §3 binding storage path, and the registry identity
 // itself (which the backend fetches to derive the pinned key).
@@ -234,12 +233,30 @@ func loadPeerIssuedFixture(dir, addr string) (*peerIssuedFixture, error) {
 		names[v.Name] = v.ID
 	}
 
+	// A fixture bundle is AUTHORED CONTENT: its entities were hashed once, by
+	// whoever generated it, under one content_hash_format, and MANIFEST.json
+	// pins the result. The run's ambient authoring format (--hash-type, which
+	// sets the process-global entity.SetDefaultHashAlgorithm) MUST NOT
+	// retroactively re-author it — doing so recomputed identity.cbor under
+	// SHA-384, disagreed with the manifest's SHA-256 pin, and failed all six
+	// vectors as "bundle is inconsistent" when the bundle was fine.
+	//
+	// The bundle's own format is the one its manifest declares.
+	bundleAlg := hash.AlgorithmSHA256
+	if declared := strings.TrimSpace(m.RegistryIdentityHash); declared != "" {
+		want, err := parseBundleHash(declared)
+		if err != nil {
+			return nil, fmt.Errorf("manifest registry_identity_hash: %w", err)
+		}
+		bundleAlg = want.Algorithm
+	}
+
 	cs := store.NewMemoryContentStore()
 	li := store.NewMemoryLocationIndex()
 	nli := store.NewNamespacedIndex(li, m.RegistryPeerID)
 
 	put := func(path string, b []byte) (hash.Hash, error) {
-		ent, err := decodeHashableEntity(b)
+		ent, err := decodeHashableEntity(b, bundleAlg)
 		if err != nil {
 			return hash.Hash{}, fmt.Errorf("%s: %w", path, err)
 		}
@@ -261,7 +278,7 @@ func loadPeerIssuedFixture(dir, addr string) (*peerIssuedFixture, error) {
 		return nil, err
 	}
 	if declared := strings.TrimSpace(m.RegistryIdentityHash); declared != "" {
-		want, err := parseHash33(declared)
+		want, err := parseBundleHash(declared)
 		if err != nil {
 			return nil, fmt.Errorf("manifest registry_identity_hash: %w", err)
 		}
@@ -305,7 +322,7 @@ func loadPeerIssuedFixture(dir, addr string) (*peerIssuedFixture, error) {
 		// A mismatch means the .cbor and MANIFEST.json disagree — load-time
 		// failure beats a resolve that fails for an unexplained reason.
 		if declared := v.BindingHash; declared != "" {
-			want, err := parseHash33(declared)
+			want, err := parseBundleHash(declared)
 			if err != nil {
 				return nil, fmt.Errorf("%s binding_hash: %w", v.ID, err)
 			}
@@ -377,7 +394,7 @@ func (f *peerIssuedFixture) treeLeafPath(peerRelative string) string {
 	return "/" + f.manifest.RegistryPeerID + "/" + peerRelative + httplive.DefaultLeafSuffix
 }
 
-// contentPath is the Amendment 5 CONTENT_GET URL for a hash: /content/{hex33}
+// contentPath is the Amendment 5 CONTENT_GET URL for a hash: /content/{hex(H)}
 func contentPath(h hash.Hash) string {
 	return "/content/" + hex.EncodeToString(h.Bytes())
 }

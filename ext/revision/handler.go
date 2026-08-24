@@ -245,7 +245,22 @@ func remotePath(ph, remoteName string) string {
 }
 
 // isRevisionConfigPath checks whether a bare path matches the
-// system/revision/{66-hex}/config pattern for hot-reload detection.
+// system/revision/{H}/config pattern for hot-reload detection, where {H} is a
+// prefix_hash — the lowercase hex of a full content_hash wire form.
+//
+// The width of {H} is the one its own format byte implies and is never a
+// constant: REVISION §3.1 spells this out ("66 chars under ECFv1-SHA-256 `00`,
+// 98 under ECFv1-SHA-384 `01`; never assumed"), under the corpus-wide rule
+// SPECIFICATION-FORMAT §8.4.5. This tested `len(mid) == 66`.
+//
+// Nothing failed today, because PrefixHash pins SHA-256 and 66 is its value —
+// the two SHA-256 assumptions agreed. That agreement is the hazard: the moment
+// prefix_hash follows the peer's home format (which is the reading §3.1's
+// own wording invites, and is unruled — see
+// docs/validation/spec-issues/2026-08-10-b-*), a SHA-384 peer's config path is
+// 98 hex and this returns false. Hot reload would then stop firing SILENTLY —
+// no error, no log, just a config that never reloads. Deriving the answer from
+// the format byte removes the coupling instead of documenting it.
 func isRevisionConfigPath(path string) bool {
 	const prefix = "system/revision/"
 	const suffix = "/config"
@@ -253,7 +268,14 @@ func isRevisionConfigPath(path string) bool {
 		return false
 	}
 	mid := path[len(prefix) : len(path)-len(suffix)]
-	return len(mid) == 66 && isHex(mid)
+	if !isHex(mid) {
+		return false
+	}
+	// ParseHex accepts only a hex string whose length matches the width its
+	// leading format byte implies, so this is a width check that stays correct
+	// under every allocated content_hash_format.
+	_, err := hash.ParseHex(mid)
+	return err == nil
 }
 
 func isHex(s string) bool {

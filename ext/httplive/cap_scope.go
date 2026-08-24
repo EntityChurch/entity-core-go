@@ -90,8 +90,8 @@ func (s CapTokenScope) contentNamespace() string {
 }
 
 // InScope evaluates the content-route hash-keyed face. The URL on
-// /content/{hex33(H)} carries only the hash; the cap operates on paths. So
-// we derive the §6.4.2 binding path `{namespace}/{hex33(H)}` from H, confirm
+// /content/{hex(H)} carries only the hash; the cap operates on paths. So
+// we derive the §6.4.2 binding path `{namespace}/{hex(H)}` from H, confirm
 // the substrate binding exists in the index (Hash Tree Presence — the
 // publisher has actually published this hash), then ask the same evaluator
 // whether the cap permits get on that path.

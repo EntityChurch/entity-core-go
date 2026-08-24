@@ -552,6 +552,23 @@ func (s *ValidationSuite) Run(ctx context.Context) (*Report, error) {
 	// cross-NAT gate is beyond a single-target run.
 	runCat(catReachability, func() []CheckResult { return runReachability(ctx, client) })
 
+	// Category 28e: V7 v7.65 §1.5 PeerID canonical-form mandate + §5
+	// wire-acceptance carve-out.
+	//
+	// This and catPolicyDualForm below were registered in AllCategories, given
+	// a RunCategory case, and listed by -list-categories — and never called
+	// from here, so nine checks sat outside every number this project has ever
+	// published. Reachable only by naming them with -category, which nothing
+	// did. That is GUIDE-CONFORMANCE §5.2b in its purest form: the surface is
+	// built and correct, and the harness has no way to turn it on.
+	// TestEveryCategoryIsReachable now fails the build on a repeat.
+	runCat(catPeerIDForm, func() []CheckResult { return runPeerIDForm(ctx, client) })
+
+	// Category 28f: V7 §3.6 v7.65 dual-form peer_pattern in policy entities —
+	// canonical hex accepted, Base58 lazy-canon mint for an unknown peer,
+	// `default` literal, garbage and globs rejected.
+	runCat(catPolicyDualForm, func() []CheckResult { return runPolicyDualForm(ctx, client) })
+
 	// Category 29: V7 v7.65 peer entity canonicalization conformance vectors
 	// (PROPOSAL-V7-PEER-ENTITY-CANONICALIZATION-AND-V1-CONTRACT §13).
 	// Seven vectors: PEER-CANON-1/2, PEER-PATTERN-1/2, PEER-MUT-1/2,
@@ -619,6 +636,12 @@ func (s *ValidationSuite) Run(ctx context.Context) (*Report, error) {
 	// require the system/discovery handler reachable; under --open-access
 	// the validator picks up the wildcard grant.
 	runCat(catDiscovery, func() []CheckResult { return runDiscovery(ctx, client) })
+
+	// EXTENSION-REGISTRY §6a.9 — the peer-issued WRITE surface (live
+	// registration). Counterpart to catPeerIssued's read path. Skips cleanly
+	// when the target peer was not started with an issuer policy; the gate
+	// always arms one, so a skip here means the harness lost its reach.
+	runCat(catRegistryIssuer, func() []CheckResult { return runRegistryIssuer(ctx, client) })
 
 	// Category 37: EXTENSION-RELAY v1.0 — 13 vectors covering Mode F +
 	// Mode S surfaces (post-Go-pre-impl-review at arch 54e5373 + 15b30d0).
@@ -917,6 +940,8 @@ func (s *ValidationSuite) RunCategory(ctx context.Context, category string) (*Re
 		report.AddAll(runRegistry(ctx, client))
 	case catDiscovery:
 		report.AddAll(runDiscovery(ctx, client))
+	case catRegistryIssuer:
+		report.AddAll(runRegistryIssuer(ctx, client))
 	case catRelay:
 		report.AddAll(runRelay(ctx, client))
 	case catPublishFetchHTTPPoll:

@@ -584,13 +584,19 @@ func addRoleStage2_EncodingConsistency(r *CheckRunner, ctx context.Context, a *P
 		if selfInfo.Role != daveInfo.Role {
 			return FailCheck(fmt.Sprintf("role names differ: self=%q dave=%q", selfInfo.Role, daveInfo.Role))
 		}
-		// PeerHashHex MUST be 66 lowercase hex chars (33 bytes: algorithm
-		// + digest), per tv_rd_6 / SI-1.
-		for label, hex := range map[string]string{"self": selfInfo.PeerHashHex(), "dave": daveInfo.PeerHashHex()} {
-			if len(hex) != 66 {
-				return FailCheck(fmt.Sprintf("%s peer_hash_hex length = %d, expected 66 (SI-1)", label, len(hex)))
+		// PeerHashHex MUST be the lowercase hex of the FULL content_hash wire
+		// form (algorithm byte + digest) per tv_rd_6 / SI-1. The width is the
+		// one its own format byte implies and is never a constant
+		// (SPECIFICATION-FORMAT §8.4.5) — 66 under `00`, 98 under `01`. This
+		// asserted 66 outright, which reads as conformance and is a SHA-256
+		// lock-in; ParseHex is the ruled strictness test and is strictly
+		// stronger. Lowercase is checked separately: hex decoding accepts
+		// uppercase and SI-1 does not.
+		for label, hexSeg := range map[string]string{"self": selfInfo.PeerHashHex(), "dave": daveInfo.PeerHashHex()} {
+			if _, err := hash.ParseHex(hexSeg); err != nil {
+				return FailCheck(fmt.Sprintf("%s peer_hash_hex %q is not a well-formed content_hash wire form (SI-1): %v", label, hexSeg, err))
 			}
-			for _, c := range hex {
+			for _, c := range hexSeg {
 				if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
 					return FailCheck(fmt.Sprintf("%s peer_hash_hex has non-lowercase-hex char %q (SI-1)", label, c))
 				}

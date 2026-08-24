@@ -2,6 +2,7 @@ package revision
 
 import (
 	"context"
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -916,6 +917,34 @@ func TestIsRevisionConfigPath(t *testing.T) {
 	}
 	if isRevisionConfigPath("system/revision/head") {
 		t.Fatal("should not match non-config metadata")
+	}
+}
+
+// The detector must follow the format byte, not a width. Driven per allocated
+// content_hash_format rather than at the one PrefixHash happens to emit today
+// (GUIDE-CONFORMANCE §5.2b: a configuration axis is covered only when the suite
+// exercises it per value). The 98-hex arm is the one a `len(mid) == 66` test
+// silently dropped, and dropping it stops hot reload with no error at all.
+func TestIsRevisionConfigPathAcrossHashFormats(t *testing.T) {
+	for _, alg := range hash.Algorithms() {
+		h, err := hash.OfBytes(alg, []byte("/testpeer/data/"))
+		if err != nil {
+			t.Fatalf("OfBytes(0x%02x): %v", alg, err)
+		}
+		ph := hex.EncodeToString(h.Bytes())
+		if want := 2 * hash.HashWireSize(alg); len(ph) != want {
+			t.Fatalf("format 0x%02x: fixture is %d hex chars, want %d", alg, len(ph), want)
+		}
+		if !isRevisionConfigPath("system/revision/" + ph + "/config") {
+			t.Errorf("format 0x%02x (%d hex chars): config path not detected — hot reload would silently stop firing", alg, len(ph))
+		}
+	}
+
+	// A hex string whose length disagrees with its own format byte is not a
+	// prefix_hash. `00` (SHA-256) declares 66; hand it 98.
+	bogus := "00" + strings.Repeat("ab", 48)
+	if isRevisionConfigPath("system/revision/" + bogus + "/config") {
+		t.Error("a 98-char hex claiming format 0x00 must not be accepted as a prefix_hash")
 	}
 }
 

@@ -87,14 +87,37 @@ func (h *Handler) findRootMapping(treePath string) *RootMapping {
 func resolveFSPath(root *RootMapping, treePath string) (string, string, error) {
 	relativePath := strings.TrimPrefix(treePath, root.Prefix)
 	fsPath := filepath.Join(root.FSRoot, relativePath)
+	if err := enforceContainment(root, fsPath, treePath); err != nil {
+		return "", "", err
+	}
+	return fsPath, relativePath, nil
+}
 
+// enforceContainment applies BOTH §8.3 defenses to a filesystem path already
+// joined under root.FSRoot: parent-traversal (canonicalize the parent and
+// require it under the canonical root) and leaf-symlink (Lstat the leaf and
+// refuse a symlink).
+//
+// It exists as its own function because DOMAIN-LOCAL-FILES §8.3 requires both
+// defenses at EVERY path-resolving callsite, and the watcher's debounce-flush
+// ingest — one of the six the spec enumerates by name — applied only the leaf
+// half. It joined its path bare and Lstat'ed the leaf, which refuses a
+// symlinked FILE but not a symlinked PARENT DIRECTORY: a file appearing under
+// a planted directory symlink Lstats as an ordinary file, so the watcher would
+// ingest content from outside the root into the content store and the tree and
+// propagate it cross-peer. That is the publishing direction of the same defect
+// meta found on `list`, and it is worse than the reading one.
+//
+// `label` is what appears in the error — a tree path on the EXECUTE side, a
+// relative path on the watcher side.
+func enforceContainment(root *RootMapping, fsPath, label string) error {
 	// Path traversal prevention: resolve symlinks and verify containment.
 	canonical, err := filepath.EvalSymlinks(root.FSRoot)
 	if err != nil {
 		// If root doesn't exist yet, use Abs instead.
 		canonical, err = filepath.Abs(root.FSRoot)
 		if err != nil {
-			return "", "", fmt.Errorf("resolve root: %w", err)
+			return fmt.Errorf("resolve root: %w", err)
 		}
 	}
 
@@ -105,13 +128,13 @@ func resolveFSPath(root *RootMapping, treePath string) (string, string, error) {
 		// Parent may not exist either (e.g., create_dirs). Check what we can.
 		canonicalParent, err = filepath.Abs(parentDir)
 		if err != nil {
-			return "", "", fmt.Errorf("resolve path: %w", err)
+			return fmt.Errorf("resolve path: %w", err)
 		}
 	}
 	resolvedPath := filepath.Join(canonicalParent, filepath.Base(fsPath))
 
 	if !strings.HasPrefix(resolvedPath, canonical) {
-		return "", "", fmt.Errorf("path traversal rejected: %q escapes root %q", treePath, root.FSRoot)
+		return fmt.Errorf("path traversal rejected: %q escapes root %q", label, root.FSRoot)
 	}
 
 	// Leaf-symlink rejection. The EvalSymlinks(parentDir) above defends
@@ -126,11 +149,11 @@ func resolveFSPath(root *RootMapping, treePath string) (string, string, error) {
 	// openat2(RESOLVE_BENEATH) is RECOMMENDED for production deployments.
 	if info, lerr := os.Lstat(resolvedPath); lerr == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
-			return "", "", fmt.Errorf("path traversal rejected: leaf symlink at %q refused", treePath)
+			return fmt.Errorf("path traversal rejected: leaf symlink at %q refused", label)
 		}
 	}
 
-	return fsPath, relativePath, nil
+	return nil
 }
 
 // matchesExclude checks if a filename matches any of the exclude glob patterns.
