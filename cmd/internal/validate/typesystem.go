@@ -73,6 +73,11 @@ func runTypeSystem(ctx context.Context, client *PeerClient) []CheckResult {
 	presentCount := 0
 	missingNames := []string{}
 	provisionalMissing := []string{}
+	// Absent types nobody owes. Tracked separately from provisionalMissing
+	// so the summary can report "not owed" distinctly from "owed, deferred"
+	// — collapsing them is what makes a conformance count stop meaning what
+	// it says (ruled 2026-08-09, arch a19234e).
+	notOwedAbsent := []string{}
 
 	for _, localDef := range allLocalTypes {
 		localDef := localDef
@@ -81,13 +86,20 @@ func runTypeSystem(ctx context.Context, client *PeerClient) []CheckResult {
 		// core floor are treated as provisional (matched-if-present,
 		// not-a-FAIL-if-absent). Same precedent shape as the
 		// system/substitute/* family — see isProvisionalType.
-		// §6.7 is OPTIONAL as a whole (§12.3) and, per the 2026-08-07 ruling
-		// (arch `c78b3dc`, MUST), a peer that declines it does not owe its
-		// types. Same carve-out shape, different reason: these are ratified,
-		// not proposal-stage.
+		// Three distinct not-a-FAIL states, and the ruling of 2026-08-09
+		// (arch `a19234e`) is that they must not be collapsed:
+		//
+		//   optionalSection      — §6.7 is OPTIONAL as a whole (§12.3); a
+		//                          peer declining it owes NOTHING, so its
+		//                          absence is a PASS, not a warning.
+		//   optionalDeferredImpl — the type IS owed; the spec deferred only
+		//                          WHEN. Absence warns.
+		//   provisional / non-floor — proposal-stage or outside the §9.5
+		//                          core floor. Absence warns.
 		optionalSection := section67TypesOnly([]string{localDef.Name})
-		provisional := isProvisionalType(localDef.Name) || optionalSection ||
-			(coreOnly && !inCoreTypeFloor(localDef.Name))
+		optionalDeferredImpl := isOptionalDeferredImplType(localDef.Name)
+		provisional := isProvisionalType(localDef.Name) ||
+			optionalDeferredImpl || (coreOnly && !inCoreTypeFloor(localDef.Name))
 
 		r.Run(prefix+"_fetch", func() CheckOutcome {
 			path := localDef.TreePath()
@@ -98,17 +110,27 @@ func runTypeSystem(ctx context.Context, client *PeerClient) []CheckResult {
 				// durability). Under --profile core (v7.72 §9.5) the 97
 				// extension types are likewise matched-if-present, not-a-
 				// FAIL-if-absent. Surface as WARN, keep out of the floor.
+				// NOT-OWED vs OWED-BUT-DEFERRED are different states and
+				// must not share an outcome (ruled 2026-08-09, arch
+				// `a19234e`). A type belonging to a section the peer may
+				// decline outright is owed by NOBODY — warning about it
+				// makes "conformance-complete" quietly stop meaning what
+				// it says, because a fully conformant peer accumulates
+				// warnings for surfaces it correctly does not offer. A
+				// deferred-impl type IS owed; the spec has only deferred
+				// when. That one warns.
+				if optionalSection {
+					notOwedAbsent = append(notOwedAbsent, localDef.Name)
+					return PassCheck(fmt.Sprintf(
+						"%s absent — EXTENSION-NETWORK §6.7 (reachability facts) is OPTIONAL as a whole (§12.3) and a peer that declines the section does not owe its types (ruled 2026-08-07, arch c78b3dc, MUST: a type is owed by the surface that uses it). NOT OWED — conformant, and not a warning, because nothing is outstanding. "+
+							"NOTE the limit: this check cannot see whether the peer actually OFFERS §6.7; a peer shipping the operations while omitting their types is under-reported here, and the `reachability` category is where that surfaces",
+						localDef.Name))
+				}
 				if provisional {
 					provisionalMissing = append(provisionalMissing, localDef.Name)
 					reason := "provisional (proposal-stage) type — conformant; not part of ratified-core floor (R1)"
-					if optionalSection {
-						// NOTE the limit of this check: it cannot see whether the
-						// peer actually OFFERS §6.7. A peer that ships the
-						// operations but omits their types is under-reported here.
-						// The operations themselves are scored by the
-						// `reachability` category, which is where offering-without-
-						// vocabulary would surface.
-						reason = "EXTENSION-NETWORK §6.7 (reachability facts) is OPTIONAL as a whole (§12.3), and a peer that declines the section does not owe its types — ruled 2026-08-07 (arch c78b3dc, MUST): a type is owed by the surface that uses it. Absence here is conformant, not a gap"
+					if optionalDeferredImpl {
+						reason = "the surface is OPTIONAL and its implementation explicitly deferred by the spec that pins the format (EXTENSION-REGISTRY §6a.7, the analog of SUBSTITUTE §2.4) — the format is pinned so no implementation invents its own, NOT so every implementation must ship it. Absence is conformant. Go leads here; this is downstream feedback, not a gap owed"
 					}
 					if coreOnly && !inCoreTypeFloor(localDef.Name) {
 						reason = "outside V7 v7.72 §9.5 Core Type Floor — matched-if-present under --profile core, not-a-FAIL-if-absent"
@@ -145,6 +167,9 @@ func runTypeSystem(ctx context.Context, client *PeerClient) []CheckResult {
 				// must follow — Require() passes through on Warn deps, so
 				// without this branch we'd FAIL what _fetch already excused.
 				// Surfaced by keystone C# core peer (F21).
+				if optionalSection {
+					return PassCheck("remote type definition not available — §6.7 is OPTIONAL as a whole and the peer does not owe its types; nothing to compare, nothing outstanding")
+				}
 				if provisional {
 					reason := "provisional (proposal-stage, not ratified-core floor per R1)"
 					if coreOnly && !inCoreTypeFloor(localDef.Name) {
@@ -178,6 +203,10 @@ func runTypeSystem(ctx context.Context, client *PeerClient) []CheckResult {
 				tag = "provisional + non-§9.5-floor (matched-if-present)"
 			}
 			note = fmt.Sprintf(" (+%d %s types absent, not counted: %v)", len(provisionalMissing), tag, provisionalMissing)
+		}
+		if len(notOwedAbsent) > 0 {
+			note += fmt.Sprintf(" (+%d NOT-OWED types absent — optional sections the peer declines, conformant and not warned: %v)",
+				len(notOwedAbsent), notOwedAbsent)
 		}
 		floorTag := "ratified-core"
 		if coreOnly {
@@ -229,6 +258,25 @@ func runTypeSystem(ctx context.Context, client *PeerClient) []CheckResult {
 // promote to ratified-core FAIL behavior.
 func isProvisionalType(name string) bool {
 	return strings.HasPrefix(name, "system/substitute/")
+}
+
+// isOptionalDeferredImplType names types that are RATIFIED and pinned but
+// whose implementation the spec explicitly defers — so a peer that has not
+// built the surface does not owe the vocabulary.
+//
+// This is a narrower thing than `isProvisionalType` (proposal-stage) and
+// than the §6.7 carve-out (a whole optional section). It is the shape
+// where a spec pins a format precisely SO THAT no implementation invents
+// its own, while saying the implementation itself is optional — §6a.7's
+// "its format is pinned here so no registry invents its own; its
+// implementation is deferred", mirroring SUBSTITUTE §2.4.
+//
+// Keep this list tiny and cite the sentence that authorizes each entry. A
+// type belongs here only when the SPEC defers the implementation — never
+// merely because a sibling has not caught up. That distinction is the
+// whole difference between a carve-out and an allowlisted failure.
+func isOptionalDeferredImplType(name string) bool {
+	return name == types.TypeRegistryBindingManifest
 }
 
 // compareTypeDefsOutcome compares a local and remote TypeDefinition.

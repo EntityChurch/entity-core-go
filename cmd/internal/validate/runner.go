@@ -20,11 +20,12 @@ var progressOut = os.Stderr
 // This eliminates silent check skipping from early returns. Every
 // declared check always produces a result in the report.
 type CheckRunner struct {
-	category string
-	declared []string
-	specRefs map[string]string
-	results  map[string]CheckResult
-	data     map[string]any
+	category   string
+	declared   []string
+	specRefs   map[string]string
+	selfChecks map[string]bool
+	results    map[string]CheckResult
+	data       map[string]any
 }
 
 // CheckOutcome is returned by check functions to indicate the result.
@@ -34,13 +35,19 @@ type CheckOutcome struct {
 	details  any
 }
 
+// Severity exposes the outcome's severity so a caller that wraps a check
+// can branch on the result — e.g. recording state for a later check only
+// when the earlier one actually passed.
+func (o CheckOutcome) Severity() Severity { return o.severity }
+
 // NewCheckRunner creates a runner for the given validation category.
 func NewCheckRunner(category string) *CheckRunner {
 	return &CheckRunner{
-		category: category,
-		specRefs: make(map[string]string),
-		results:  make(map[string]CheckResult),
-		data:     make(map[string]any),
+		category:   category,
+		specRefs:   make(map[string]string),
+		selfChecks: make(map[string]bool),
+		results:    make(map[string]CheckResult),
+		data:       make(map[string]any),
 	}
 }
 
@@ -53,6 +60,19 @@ func (r *CheckRunner) Declare(name, specRef string) {
 	}
 	r.declared = append(r.declared, name)
 	r.specRefs[name] = specRef
+}
+
+// DeclareSelf registers a check that never contacts the peer under test —
+// an offline KAT, a pure ordering rule, a round-trip through our own codec.
+//
+// Use it for any check whose function does not take the peer client. The
+// result still counts exactly as before; what changes is that the report can
+// say whose code it measured. A self-check PASS in a run against rust is a
+// statement about core-go, and until it is labelled, nothing in the output
+// distinguishes it from a probe that actually reached the peer.
+func (r *CheckRunner) DeclareSelf(name, specRef string) {
+	r.Declare(name, specRef)
+	r.selfChecks[name] = true
 }
 
 // Run executes a named check. The check must have been declared.
@@ -90,6 +110,7 @@ func (r *CheckRunner) Run(name string, fn func() CheckOutcome) {
 		SpecRef:   specRef,
 		Details:   outcome.details,
 		ElapsedMs: elapsed.Milliseconds(),
+		SelfCheck: r.selfChecks[name],
 	}
 }
 
@@ -148,11 +169,12 @@ func (r *CheckRunner) Results() []CheckResult {
 			out = append(out, result)
 		} else {
 			out = append(out, CheckResult{
-				Category: r.category,
-				Name:     name,
-				Severity: Fail,
-				SpecRef:  r.specRefs[name],
-				Message:  "not reached (check was declared but never run)",
+				Category:  r.category,
+				Name:      name,
+				Severity:  Fail,
+				SpecRef:   r.specRefs[name],
+				SelfCheck: r.selfChecks[name],
+				Message:   "not reached (check was declared but never run)",
 			})
 		}
 	}

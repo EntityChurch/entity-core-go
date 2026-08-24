@@ -35,6 +35,21 @@ type CheckResult struct {
 	SpecRef   string   `json:"spec_ref"`
 	Details   any      `json:"details,omitempty"`
 	ElapsedMs int64    `json:"elapsed_ms"`
+
+	// SelfCheck marks a check that never contacts the peer under test — it
+	// exercises THIS validator's own library in-process.
+	//
+	// Such checks are legitimate (an offline KAT, a pure ordering rule), but
+	// their result says nothing about the peer named in the report. Unmarked,
+	// they are indistinguishable from probes, so a run against rust or python
+	// lands ~29 passes in that peer's row that measured core-go's code. That is
+	// how "three-way green" can be one implementation counted three times.
+	//
+	// Marked rather than removed from the totals: the suite total is a
+	// cross-repo number that arch and both siblings quote, and moving it
+	// unilaterally would break comparisons to make a labelling point. Whether
+	// self-checks should be scored per-peer at all is routed to arch.
+	SelfCheck bool `json:"self_check,omitempty"`
 }
 
 // Summary counts check outcomes.
@@ -59,6 +74,11 @@ type Summary struct {
 	Failed    int   `json:"failed"`
 	Skipped   int   `json:"skipped"`
 	ElapsedMs int64 `json:"elapsed_ms"`
+
+	// SelfChecks counts results that never contacted the peer (CheckResult
+	// .SelfCheck). Total minus this is the peer-attributable count — the
+	// number a reader comparing two implementations actually wants.
+	SelfChecks int `json:"self_checks"`
 }
 
 // RuntimeBudgetMs is the soft ceiling on total per-check wall-clock for a
@@ -111,6 +131,9 @@ func (r *Report) Add(c CheckResult) {
 	r.Checks = append(r.Checks, c)
 	r.Summary.Total++
 	r.Summary.ElapsedMs += c.ElapsedMs
+	if c.SelfCheck {
+		r.Summary.SelfChecks++
+	}
 	switch c.Severity {
 	case Pass:
 		r.Summary.Passed++
@@ -223,21 +246,20 @@ func (r *Report) ExcludeCategories(sel map[string]bool) {
 			filtered = append(filtered, c)
 		}
 	}
-	r.Checks = filtered
+	// Re-sum through Add rather than inline, so there is exactly ONE place
+	// that knows how to count a CheckResult.
+	//
+	// This was an inline copy of Add's switch, and it bit immediately: adding
+	// Summary.SelfChecks updated Add and left this copy behind, so a plain
+	// `-category` run reported the self-check count and a full run — which
+	// passes -exclude and therefore lands here — silently reported zero. The
+	// per-check [self] markers still printed, so the output looked complete
+	// while the roll-up was missing. A second summation path is a place for
+	// every future field to be forgotten.
 	r.Summary = Summary{}
-	for _, c := range r.Checks {
-		r.Summary.Total++
-		r.Summary.ElapsedMs += c.ElapsedMs
-		switch c.Severity {
-		case Pass:
-			r.Summary.Passed++
-		case Warn:
-			r.Summary.Warned++
-		case Fail:
-			r.Summary.Failed++
-		case Skip:
-			r.Summary.Skipped++
-		}
+	r.Checks = nil
+	for _, c := range filtered {
+		r.Add(c)
 	}
 	// Budget warning is recomputed here so an exclude doesn't leave a stale
 	// warning attached when the excluded category was the cause.
@@ -314,7 +336,11 @@ func (r *Report) WriteText(w io.Writer, failuresOnly bool) {
 		fmt.Fprintf(w, "[%s]\n", cat)
 		for _, c := range visible {
 			icon := severityIcon(c.Severity)
-			fmt.Fprintf(w, "  %s %-50s %s\n", icon, c.Name, c.SpecRef)
+			name := c.Name
+			if c.SelfCheck {
+				name += " [self]"
+			}
+			fmt.Fprintf(w, "  %s %-50s %s\n", icon, name, c.SpecRef)
 			if c.Severity != Pass {
 				fmt.Fprintf(w, "    %s\n", c.Message)
 			}
@@ -377,6 +403,17 @@ func (r *Report) WriteText(w io.Writer, failuresOnly bool) {
 	fmt.Fprintf(w, "Summary: %d total, %d passed, %d warned, %d failed, %d skipped (elapsed %s)\n",
 		r.Summary.Total, r.Summary.Passed, r.Summary.Warned, r.Summary.Failed, r.Summary.Skipped,
 		(time.Duration(r.Summary.ElapsedMs) * time.Millisecond).Truncate(time.Millisecond))
+
+	// Self-checks, said out loud. Without this line a reader comparing two
+	// peers' totals is silently comparing a number that includes ~29 results
+	// produced by the same core-go library in both runs.
+	if r.Summary.SelfChecks > 0 {
+		fmt.Fprintf(w, "         %d are SELF-CHECKS [self] — run in-process against this validator's own\n",
+			r.Summary.SelfChecks)
+		fmt.Fprintf(w, "         library; they never contacted %s. Peer-attributable: %d of %d.\n",
+			r.PeerAddr, r.Summary.Total-r.Summary.SelfChecks, r.Summary.Total)
+		fmt.Fprintf(w, "         A self-check PASS is evidence about core-go, not about this peer.\n")
+	}
 
 	if unallowedSkip > 0 {
 		fmt.Fprintf(w, "         %d skip(s) count as FAIL — an unexercised surface is an UNTESTED surface\n", unallowedSkip)

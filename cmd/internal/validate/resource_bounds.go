@@ -428,4 +428,3 @@ func extractErrorCode(result []byte) (string, error) {
 	}
 	return "", nil
 }
-

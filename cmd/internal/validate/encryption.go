@@ -16,6 +16,14 @@
 //   aad_tamper_peer                   — §16 ENC-AAD-1 for peer mode
 //   resource_bounds_group             — §16 ENC-RESOURCE-BOUNDS-1 (>256 wraps → reject)
 //   cert_lifecycle_tier_a             — §16 ENC-CERT-LIFECYCLE-1 at Tier A (over wire)
+//   cert_lifecycle_tier_b             — §16 ENC-CERT-LIFECYCLE-1 at Tier B (+ATTESTATION)
+//   cert_lifecycle_tier_c             — §16 ENC-CERT-LIFECYCLE-1 at Tier C (+IDENTITY)
+//   tier_interop                      — §16 ENC-TIER-INTEROP-1 (F2-3 byte-identical inner pubkey)
+//   roundtrip_format                  — §16 ENC-ROUNDTRIP-FORMAT-1 (cross-format reference; encryption_format.go)
+//
+// §16 requires ENC-CERT-LIFECYCLE-1 at every tier the peer claims, so
+// the three tier checks are one vector at three configurations, not
+// three vectors. Tiers B and C live in encryption_tiers.go.
 //
 // Cohort byte-pin KATs (§16.5 lock) run as ext/encryption package tests at v1
 // baseline Argon2id (64 MiB / t=3); they emit the reference hex the cohort
@@ -70,17 +78,23 @@ func runEncryption(ctx context.Context, client *PeerClient) []CheckResult {
 	for _, ty := range encryptionTypes {
 		r.Declare("type_"+ty.short, "ENCRYPTION §4 / §5 / §10 / §11 — entity type registered")
 	}
-	r.Declare("self_kat_roundtrip", "ENCRYPTION §6 — self-mode encrypt/decrypt round-trip")
-	r.Declare("peer_kat_roundtrip", "ENCRYPTION §7 — peer-mode encrypt/decrypt round-trip")
-	r.Declare("group_kat_roundtrip", "ENCRYPTION §8 — group-mode 3-member encrypt/decrypt round-trip")
-	r.Declare("group_commit_rejects_equivocation", "ENCRYPTION §16 ENC-GROUP-COMMIT-1 — F2-1 key-commitment rejects equivocation")
-	r.Declare("aad_tamper_self", "ENCRYPTION §16 ENC-AAD-1 — tampering self-mode AAD-bound field MUST fail")
-	r.Declare("aad_tamper_peer", "ENCRYPTION §16 ENC-AAD-1 — tampering peer-mode AAD-bound field MUST fail")
-	r.Declare("resource_bounds_group", "ENCRYPTION §16 ENC-RESOURCE-BOUNDS-1 — >256 wrapped_keys → encryption_wrapped_keys_too_many")
+	r.DeclareSelf("self_kat_roundtrip", "ENCRYPTION §6 — self-mode encrypt/decrypt round-trip")
+	r.DeclareSelf("peer_kat_roundtrip", "ENCRYPTION §7 — peer-mode encrypt/decrypt round-trip")
+	r.DeclareSelf("group_kat_roundtrip", "ENCRYPTION §8 — group-mode 3-member encrypt/decrypt round-trip")
+	r.DeclareSelf("group_commit_rejects_equivocation", "ENCRYPTION §16 ENC-GROUP-COMMIT-1 — F2-1 key-commitment rejects equivocation")
+	r.DeclareSelf("aad_tamper_self", "ENCRYPTION §16 ENC-AAD-1 — tampering self-mode AAD-bound field MUST fail")
+	r.DeclareSelf("aad_tamper_peer", "ENCRYPTION §16 ENC-AAD-1 — tampering peer-mode AAD-bound field MUST fail")
+	r.DeclareSelf("resource_bounds_group", "ENCRYPTION §16 ENC-RESOURCE-BOUNDS-1 — >256 wrapped_keys → encryption_wrapped_keys_too_many")
 	r.Declare("cert_lifecycle_tier_a", "ENCRYPTION §16 ENC-CERT-LIFECYCLE-1 — Tier-A publish/rotate/revoke over the wire")
 	r.Declare("key_separation", "ENCRYPTION §16 ENC-KEY-SEPARATION-1 — encryption pubkey MUST be independent of identity key (R6)")
 	r.Declare("sender_auth_peer", "ENCRYPTION §7.4 / §7.5 — recipient-side sender-auth via invariant-pointer signature (B1-7)")
-	r.Declare("group_add_rekey", "ENCRYPTION §8.5 — group lifecycle: add (same key) + re-key (fresh key, B1-3)")
+	r.DeclareSelf("group_add_rekey", "ENCRYPTION §8.5 — group lifecycle: add (same key) + re-key (fresh key, B1-3)")
+	r.Declare("cert_lifecycle_tier_b", "ENCRYPTION §16 ENC-CERT-LIFECYCLE-1 — Tier-B (+ATTESTATION) publish/supersede/revoke")
+	r.Declare("cert_lifecycle_tier_c", "ENCRYPTION §16 ENC-CERT-LIFECYCLE-1 — Tier-C (+IDENTITY) identity-cert publish/rotate/revoke")
+	r.DeclareSelf("tier_c_resolution", "ENCRYPTION §4.4 — the pinned ENC-RESOLVE-ORDER rows (tier ladder + total order)")
+	r.Declare("multi_device_tier_c", "ENCRYPTION §4.4 multi-device — two agents under one identity; the tie-break selects WHICH device receives")
+	r.Declare("tier_interop", "ENCRYPTION §16 ENC-TIER-INTEROP-1 — one authored pubkey binds byte-equal recipient_key across tiers (F2-3)")
+	r.Declare("roundtrip_format", "ENCRYPTION §16 ENC-ROUNDTRIP-FORMAT-1 — a reference is the recipient's AUTHORED content_hash, never re-derived under the sender's home format (V7 §1.8 / v7.69 §4.5a)")
 
 	for _, ty := range encryptionTypes {
 		ty := ty
@@ -100,15 +114,51 @@ func runEncryption(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Run("aad_tamper_peer", runEncAADTamperPeer)
 	r.Run("resource_bounds_group", runEncResourceBoundsGroup)
 	r.Run("cert_lifecycle_tier_a", func() CheckOutcome {
-		return runEncCertLifecycleTierA(ctx, client)
+		out := runEncCertLifecycleTierA(ctx, client)
+		// Tier A publishes two pubkeys at the §4.2.a path and confirms
+		// both readable. key_separation's remote scan runs next and
+		// lists that same prefix, so it now has a known-present floor
+		// to check itself against — the non-vacuity guarantee for a
+		// scan that would otherwise pass on an empty listing.
+		if out.Severity() == Pass {
+			r.Store("tier_a_published_pubkeys", 2)
+		}
+		return out
 	})
 	r.Run("key_separation", func() CheckOutcome {
-		return runEncKeySeparation(ctx, client)
+		expectPublished := 0
+		if v := r.Load("tier_a_published_pubkeys"); v != nil {
+			expectPublished, _ = v.(int)
+		}
+		return runEncKeySeparation(ctx, client, expectPublished)
 	})
 	r.Run("sender_auth_peer", func() CheckOutcome {
 		return runEncSenderAuthPeer(ctx, client)
 	})
 	r.Run("group_add_rekey", runEncGroupAddRekey)
+	r.Run("cert_lifecycle_tier_b", func() CheckOutcome {
+		return runEncCertLifecycleTierB(ctx, client)
+	})
+	r.Run("cert_lifecycle_tier_c", func() CheckOutcome {
+		return runEncCertLifecycleTierC(ctx, client)
+	})
+	r.Run("tier_c_resolution", runEncTierCResolution)
+	// Depends on cert_lifecycle_tier_c having brought identity up (quorum →
+	// controller cert → configure): a Tier-C claim is only real with identity
+	// configured, and configuring twice in one run is not the thing under
+	// test. A skipped prerequisite propagates as a skip, not a failure.
+	r.Run("multi_device_tier_c", func() CheckOutcome {
+		if out, ok := r.Require("cert_lifecycle_tier_c"); !ok {
+			return out
+		}
+		return runEncMultiDeviceTierC(ctx, client)
+	})
+	r.Run("tier_interop", func() CheckOutcome {
+		return runEncTierInterop(ctx, client)
+	})
+	r.Run("roundtrip_format", func() CheckOutcome {
+		return runEncRoundtripFormat(ctx, client)
+	})
 
 	return r.Results()
 }
@@ -365,7 +415,7 @@ func runEncCertLifecycleTierA(ctx context.Context, client *PeerClient) CheckOutc
 		return FailCheck("build pubkey entity: " + err.Error())
 	}
 	pkHash := pkEnt.ContentHash
-	pkPath := "system/encryption/pubkey/" + hex.EncodeToString(pkHash.Bytes())
+	pkPath := "system/encryption-pubkey/" + hex.EncodeToString(pkHash.Bytes())
 	if _, err := client.TreePut(ctx, pkPath, pkEnt); err != nil {
 		return FailCheck("publish pubkey at " + pkPath + ": " + err.Error())
 	}
@@ -397,7 +447,7 @@ func runEncCertLifecycleTierA(ctx context.Context, client *PeerClient) CheckOutc
 	if err != nil {
 		return FailCheck("build new pubkey: " + err.Error())
 	}
-	newPath := "system/encryption/pubkey/" + hex.EncodeToString(newPubEnt.ContentHash.Bytes())
+	newPath := "system/encryption-pubkey/" + hex.EncodeToString(newPubEnt.ContentHash.Bytes())
 	if _, err := client.TreePut(ctx, newPath, newPubEnt); err != nil {
 		return FailCheck("publish new pubkey: " + err.Error())
 	}

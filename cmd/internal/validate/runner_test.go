@@ -286,6 +286,37 @@ func TestReport_ExcludeCheckLevelSelectorKeepsSiblingsScored(t *testing.T) {
 	}
 }
 
+// ExcludeCategories re-sums the report, and it used to do so with an inline
+// copy of Add's switch. Summary.SelfChecks was added to Add and not to the
+// copy, so a `-category` run reported the self-check roll-up and a full run —
+// which passes -exclude — reported zero, with the per-check [self] markers
+// still printing so the output looked complete.
+//
+// The assertion is deliberately "every counter survives", not "SelfChecks
+// survives": the defect is a second summation path, and the next field added
+// would be dropped the same way.
+func TestReport_ExcludeKeepsEveryCounter(t *testing.T) {
+	r := NewReport("test:0")
+	r.Add(CheckResult{Category: "keep", Name: "a", Severity: Pass, SelfCheck: true, ElapsedMs: 1})
+	r.Add(CheckResult{Category: "keep", Name: "b", Severity: Warn, ElapsedMs: 2})
+	r.Add(CheckResult{Category: "keep", Name: "c", Severity: Fail, ElapsedMs: 3})
+	r.Add(CheckResult{Category: "keep", Name: "d", Severity: Skip, ElapsedMs: 4})
+	r.Add(CheckResult{Category: "drop", Name: "e", Severity: Pass, SelfCheck: true, ElapsedMs: 5})
+	r.Finalize()
+
+	before := r.Summary
+	r.ExcludeCategories(map[string]bool{"drop": true})
+
+	want := Summary{
+		Total: 4, Passed: 1, Warned: 1, Failed: 1, Skipped: 1,
+		SelfChecks: 1, ElapsedMs: 10,
+	}
+	if r.Summary != want {
+		t.Errorf("summary after exclude = %+v, want %+v (before exclude it was %+v)",
+			r.Summary, want, before)
+	}
+}
+
 func TestCheckRunner_RecordsElapsed(t *testing.T) {
 	r := NewCheckRunner("test")
 	r.Declare("timed", "§1")

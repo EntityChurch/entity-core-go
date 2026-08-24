@@ -263,4 +263,3 @@ func isKnownTypeRef(typeRef string) bool {
 	}
 	return false
 }
-

@@ -46,11 +46,11 @@ const catRelay = "relay"
 func runRelay(ctx context.Context, client *PeerClient) []CheckResult {
 	r := NewCheckRunner(catRelay)
 
-	r.Declare("v1_forward_request_round_trip", "RELAY §3.1 — system/relay/forward-request ECF round-trip; envelope_inner is a bare system/hash field, NOT a refs block")
-	r.Declare("v2_store_entry_round_trip", "RELAY §3.2 — system/relay/store-entry ECF round-trip; put_by Base58 PeerID + envelope_inner in data")
-	r.Declare("v3_advertise_no_refs_block", "RELAY §4.1, §3.0 — advertise signature carriage at V7 §5.2 invariant pointer; NO refs:{signature} block")
-	r.Declare("v4_forward_result_flat_shape", "RELAY §4.2 — forward-result is a flat entity, NOT system/protocol/status-wrapped (Ruling-3 generalizes)")
-	r.Declare("v5_storage_path_helpers", "RELAY §3.2, §4.1 — RelayStorePath / RelayAdvertisePath helpers + §3.2 path shape (system/relay/store/{namespace}/{hex})")
+	r.DeclareSelf("v1_forward_request_round_trip", "RELAY §3.1 — system/relay/forward-request ECF round-trip; envelope_inner is a bare system/hash field, NOT a refs block")
+	r.DeclareSelf("v2_store_entry_round_trip", "RELAY §3.2 — system/relay/store-entry ECF round-trip; put_by Base58 PeerID + envelope_inner in data")
+	r.DeclareSelf("v3_advertise_no_refs_block", "RELAY §4.1, §3.0 — advertise signature carriage at V7 §5.2 invariant pointer; NO refs:{signature} block")
+	r.DeclareSelf("v4_forward_result_flat_shape", "RELAY §4.2 — forward-result is a flat entity, NOT system/protocol/status-wrapped (Ruling-3 generalizes)")
+	r.DeclareSelf("v5_storage_path_helpers", "RELAY §3.2, §4.1 — RelayStorePath / RelayAdvertisePath helpers + §3.2 path shape (system/relay/store/{namespace}/{hex})")
 	r.Declare("v6_advertise_invocation_live", "RELAY §4.1 — :advertise binds the advertise entity at system/relay/advertise/{relay_peer_id}")
 	r.Declare("v7_put_returns_stored_live", "RELAY §4.2 — :put with valid store-entry + inner envelope in included set returns put-result{status: stored}")
 	r.Declare("v8_put_by_mismatch_live", "RELAY §3.2 (Q1 absorption) — :put with put_by != authenticated caller MUST return 400 + code `put_by_mismatch`")
@@ -59,8 +59,8 @@ func runRelay(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("v11_forward_ttl_exhausted_live", "RELAY §3.1, §4.3 — :forward with ttl_hops=0 MUST return 400 + code `ttl_exhausted` (fail-closed)")
 	r.Declare("v12_forward_no_route_live", "RELAY §13 Q3, §4.3 — :forward without next_hop MUST return 502 + code `no_route` (v1 has no implicit routing)")
 	r.Declare("v13_expired_on_arrival_live", "RELAY §4.3 — :put with a past expires_at MUST return 400 + code `expired_on_arrival` (creation-side dead-on-arrival per post-Go-review rationale, NOT 410 Gone)")
-	r.Declare("v14_inbox_relay_round_trip", "RELAY §3.5 (R6/R7 fold at arch faf3fa9) — system/peer/inbox-relay declaration ECF round-trip + Base58 peer-id on entries + supersede-grounded hash distinctness")
-	r.Declare("v15_inbox_relay_storage_path", "RELAY §3.5 — InboxRelayStoragePath canonical form system/peer/inbox-relay/{peer_id} (REGISTRY-served per §3.5)")
+	r.DeclareSelf("v14_inbox_relay_round_trip", "RELAY §3.5 (R6/R7 fold at arch faf3fa9) — system/peer/inbox-relay declaration ECF round-trip + Base58 peer-id on entries + supersede-grounded hash distinctness")
+	r.DeclareSelf("v15_inbox_relay_storage_path", "RELAY §3.5 — InboxRelayStoragePath canonical form system/peer/inbox-relay/{peer_id} (REGISTRY-served per §3.5)")
 
 	r.Run("v1_forward_request_round_trip", runRelayForwardRequestRoundTrip)
 	r.Run("v2_store_entry_round_trip", runRelayStoreEntryRoundTrip)

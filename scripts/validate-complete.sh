@@ -32,6 +32,32 @@
 # Env:
 #   KEEP=1     leave the peers running afterwards (default: stop them)
 #   EXTRA=...  extra flags appended to validate-peer
+#   HASH_TYPE=sha384
+#              run the whole thing on a SHA-384 home content_hash_format
+#              (V7 §1.2). Sets --hash-type on EVERY peer and -hash-format on
+#              the validator, because §1.2a makes a single-format network the
+#              supported deployment and a mix of homes the experimental
+#              two-address-space mode — starting one peer SHA-384 and leaving
+#              the rest SHA-256 would be testing the non-v1 case by accident.
+#
+#              Worth running, not decorative: `--hash-type sha384` shipped in
+#              all three implementations long before anything ever set it, and
+#              the first run under it found ComputePubkeyHash authoring pubkey
+#              hashes under SHA-256 on a SHA-384 peer. Everything a default run
+#              exercises, it exercises under exactly one format.
+#
+#              IT DOES NOT PASS TODAY, AND THAT IS THE FINDING — not a reason
+#              to skip it. 2026-08-10 at 502ac9c: 27 F + 1 S in pass 1, 13 F in
+#              pass 2, and 30 of the 31 distinct failures are ONE spec rule.
+#              EXTENSION-NETWORK §6.5.3.1 pins the served hash hex at 66 chars
+#              while justifying the format byte as crypto-agility, so a
+#              SHA-384 peer's own 98-char hashes 400 on its own content route;
+#              EXTENSION-SIGNALING §6.3 pins the signing input's
+#              inner_content_hash at 33. Both are arch's, both are filed:
+#              docs/validation/spec-issues/2026-08-10-the-33-byte-hash-*.md.
+#              So this is a DIAGNOSTIC, not a gate — the gate is the default
+#              SHA-256 run. Do not "fix" the failures locally; a unilateral
+#              change here breaks URL⇄binding parity with rust and python.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -44,6 +70,16 @@ FILES_DIR="$(mktemp -d)"
 POLL_PORT="${POLL_PORT:-9451}"
 PI_DIR="$(mktemp -d)"
 PI_PORT="${PI_PORT:-9401}"
+
+# Home content_hash_format for every peer, and the matching validator
+# advertisement. Empty (the default) leaves both alone so the SHA-256 path is
+# byte-for-byte what it always was.
+HASH_ARGS_PEER=()
+HASH_ARGS_VALIDATE=()
+if [ -n "${HASH_TYPE:-}" ]; then
+    HASH_ARGS_PEER=(--hash-type "$HASH_TYPE")
+    HASH_ARGS_VALIDATE=(-hash-format "$HASH_TYPE")
+fi
 
 cleanup() {
     if [ "${KEEP:-0}" != "1" ]; then
@@ -99,6 +135,7 @@ fi
 
 echo "==> reference peer (origination / A-role target)"
 REF_ADDR=$(go run ./cmd/peer-manager start --name "$REF" --type go --debug \
+    "${HASH_ARGS_PEER[@]}" \
     | sed -n 's/.*addr=\([^ ]*\).*/\1/p')
 echo "    $REF_ADDR"
 
@@ -141,6 +178,7 @@ TARGET_ADDR=$(go run ./cmd/peer-manager start --name "$TARGET" --type "$TYPE" --
     --files "docs:${FILES_DIR}/docs:local/files/docs/" \
     --publish-descriptors \
     "${PI_ARGS_PEER[@]}" \
+    "${HASH_ARGS_PEER[@]}" \
     --keepalive 2000,1000,2 \
     | sed -n 's/.*addr=\([^ ]*\).*/\1/p')
 echo "    $TARGET_ADDR"
@@ -170,6 +208,7 @@ go run ./cmd/validate-peer \
     -reference-peer "$REF_ADDR" \
     -poll-url "http://127.0.0.1:${POLL_PORT}" \
     "${PI_ARGS_VALIDATE[@]}" \
+    "${HASH_ARGS_VALIDATE[@]}" \
     -keepalive-envelope-ms 6000 \
     -exclude "$T4_UNSATISFIABLE" \
     ${EXTRA:-}
@@ -201,11 +240,13 @@ NS_PORT=$((POLL_PORT + 1))
 NS_ADDR=$(go run ./cmd/peer-manager start --name "$NS_TARGET" --type "$TYPE" --debug \
     --http-poll-addr "127.0.0.1:${NS_PORT}" \
     --serve-namespace system/content/public \
+    "${HASH_ARGS_PEER[@]}" \
     | sed -n 's/.*addr=\([^ ]*\).*/\1/p')
 set +e
 go run ./cmd/validate-peer \
     -addr "$NS_ADDR" \
     -poll-url "http://127.0.0.1:${NS_PORT}" \
+    "${HASH_ARGS_VALIDATE[@]}" \
     -category serving_mode
 RC2=$?
 set -e

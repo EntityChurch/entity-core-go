@@ -118,6 +118,11 @@ type Backend struct {
 	negTTL *uint64
 
 	cacheOnResolve bool
+
+	// manifests caches the §6a.7 signed binding-manifest, when one has
+	// been loaded. Never required: resolution works identically without
+	// it, one pointer fetch at a time.
+	manifests manifestCache
 }
 
 // New constructs a Backend bound to one pinned registry identity.
@@ -212,13 +217,49 @@ func (b *Backend) Resolve(hctx *handler.HandlerContext, name string) (types.Reso
 	}
 	ctx := context.Background() // Backend interface carries no ctx in v1.
 
-	// Step 1+2 — locate the binding (offline first, then live).
-	bindingHash, bindingEnt, fromCache, err := b.lookupBinding(ctx, hctx, normalized)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
+	// Step 1+2 — locate the binding.
+	//
+	// §6a.7: a signature-valid, fresh manifest can answer the LOOKUP in
+	// place of the per-name pointer. It cannot answer anything else —
+	// what it yields is the same binding hash the pointer holds, and the
+	// signature / revocation / TTL steps below run identically either
+	// way. If it has no usable answer we fall through, which is the
+	// spec's instruction for every manifest failure mode.
+	var (
+		bindingHash hash.Hash
+		bindingEnt  entity.Entity
+		fromCache   bool
+		err2        error
+	)
+	if h, hit, authoritativeAbsent := b.manifestLookup(normalized); authoritativeAbsent {
+		// coverage="complete" — the registry has SIGNED a statement that
+		// it serves no such name. This is the one place the manifest
+		// speaks negatively, and it is only sound because the signature
+		// was verified against the pinned key before admission.
+		return b.notFoundResult(), nil
+	} else if hit {
+		bindingEnt, err2 = b.fetchBindingBody(ctx, hctx, h)
+		if err2 != nil {
+			if errors.Is(err2, ErrNotFound) {
+				// The manifest named a binding the registry will not
+				// serve. Publishing order (§7.3 analog) can produce this
+				// transiently, so fall through to the pointer rather
+				// than reporting not_found off a stale index.
+				bindingHash, bindingEnt, fromCache, err2 = b.lookupBinding(ctx, hctx, normalized)
+			} else {
+				return types.ResolveResultData{}, fmt.Errorf("peerissued: manifest binding body: %w", err2)
+			}
+		} else {
+			bindingHash = h
+		}
+	} else {
+		bindingHash, bindingEnt, fromCache, err2 = b.lookupBinding(ctx, hctx, normalized)
+	}
+	if err2 != nil {
+		if errors.Is(err2, ErrNotFound) {
 			return b.notFoundResult(), nil
 		}
-		return types.ResolveResultData{}, fmt.Errorf("peerissued: lookup binding: %w", err)
+		return types.ResolveResultData{}, fmt.Errorf("peerissued: lookup binding: %w", err2)
 	}
 
 	// Step 3 — verify signature against the pinned key.

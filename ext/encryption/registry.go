@@ -10,14 +10,14 @@ import (
 // byte itself per §3.
 
 var encKeyTypeNames = map[byte]string{
-	types.EncKeyTypeReserved:               "reserved",
-	types.EncKeyTypeX25519:                 "X25519",
-	types.EncKeyTypeX448:                   "X448",
-	types.EncKeyTypeMLKEM768:               "ML-KEM-768",
-	types.EncKeyTypeX25519MLKEM768Hybrid:   "X25519+ML-KEM-768",
-	types.EncKeyTypeMLKEM512:               "ML-KEM-512",
-	types.EncKeyTypeMLKEM1024:              "ML-KEM-1024",
-	types.EncKeyTypeTestOnly:               "test-only",
+	types.EncKeyTypeReserved:             "reserved",
+	types.EncKeyTypeX25519:               "X25519",
+	types.EncKeyTypeX448:                 "X448",
+	types.EncKeyTypeMLKEM768:             "ML-KEM-768",
+	types.EncKeyTypeX25519MLKEM768Hybrid: "X25519+ML-KEM-768",
+	types.EncKeyTypeMLKEM512:             "ML-KEM-512",
+	types.EncKeyTypeMLKEM1024:            "ML-KEM-1024",
+	types.EncKeyTypeTestOnly:             "test-only",
 }
 
 var aeadIDNames = map[byte]string{

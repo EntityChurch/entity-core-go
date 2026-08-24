@@ -649,4 +649,3 @@ func extractStatusAndCode(respEnv entity.Envelope) (uint, string, types.ExecuteR
 	}
 	return resp.Status, code, resp, nil
 }
-

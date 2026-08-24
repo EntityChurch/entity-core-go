@@ -923,7 +923,7 @@ func main() {
 	// Chunk E serving-mode is on.
 	var pollScope httplive.ScopePredicate
 	if pollEnabled {
-		pollScope = makeChunkEScopePredicate(p, *serveNamespace, *serveWholeStore, *serveClosureRoot)
+		pollScope = makeChunkEScopePredicate(p, publisher, *serveNamespace, *serveWholeStore, *serveClosureRoot)
 		switch {
 		case *serveClosureRoot:
 			log.Printf("Serving mode: closure-of-signed-root (NETWORK §6.5.6 Amendment 10) — content gated by transitive trie-node closure of system/peer/published-root")
@@ -1097,16 +1097,29 @@ func validateChunkEFlags(httpAddr, httpPollAddr string, httpPollMountOnLive bool
 // makeChunkEScopePredicate constructs the appropriate ScopePredicate
 // for the configured flags. Caller guarantees validateChunkEFlags
 // has returned pollEnabled=true.
-func makeChunkEScopePredicate(p *peer.Peer, namespace string, wholeStore, closureRoot bool) httplive.ScopePredicate {
+func makeChunkEScopePredicate(p *peer.Peer, publisher *publishedroot.Publisher, namespace string, wholeStore, closureRoot bool) httplive.ScopePredicate {
 	if wholeStore {
 		return httplive.WholeStoreScope{}
 	}
 	if closureRoot {
-		return &httplive.ClosureScope{
+		sc := &httplive.ClosureScope{
 			Store:       p.Store(),
 			Index:       p.LocationIndex(),
 			LocalPeerID: string(p.PeerID()),
 		}
+		if publisher != nil {
+			// One source of truth: the scope must be built for exactly the
+			// head MANIFEST_GET serves, or a consumer can be handed a
+			// manifest whose signature the scope does not admit.
+			sc.Head = func() (hash.Hash, bool) {
+				e, ok := publisher.Current()
+				if !ok || e == nil {
+					return hash.Hash{}, false
+				}
+				return e.ContentHash, true
+			}
+		}
+		return sc
 	}
 	return httplive.NamespaceScope{
 		Index:     p.LocationIndex(),

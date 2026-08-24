@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"go.entitychurch.org/entity-core-go/core/ecf"
+	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/types"
 )
@@ -25,8 +26,12 @@ import (
 //   - Interactive future-secrecy
 //
 // HKDF info pins the recipient_pubkey_hash uniform-across-tiers per F-GO-1
-// — the bound bytes are hash.Bytes() (33-byte SHA-256 wire form: algorithm
-// byte || 32-byte digest).
+// — the bound bytes are hash.Bytes(), the full multihash-prefixed form
+// (algorithm byte || digest; 33 bytes under SHA-256, 49 under SHA-384).
+// The ALGORITHM BYTE IS BOUND, not just the digest, so a sender that
+// re-derived the recipient's key hash under its own home format instead of
+// using the recipient's authored one derives a different AEAD key — the
+// §1.8 / v7.69 §4.5a discipline, gated by ENC-ROUNDTRIP-FORMAT-1.
 const peerInfoPrefix = "entity-core/peer/"
 
 // X25519PrivateSize is the X25519 private-key seed length (32 bytes per RFC 7748).
@@ -222,14 +227,44 @@ func generateOrLoadX25519(seed []byte) (*ecdh.PrivateKey, []byte, error) {
 }
 
 // ComputePubkeyHash hashes a system/encryption-pubkey data shape to its
-// canonical content_hash under the peer-wide default content_hash_format
-// (SHA-256 floor; SHA-384 when active per v7.69 §4.5a). Helper for
-// callers building KAT vectors or wiring §4.4 resolution against
-// locally-constructed pubkey entities.
+// canonical content_hash under the peer's HOME content_hash_format —
+// entity.DefaultHashAlgorithm(), which `entity-peer --hash-type` sets at
+// startup. Helper for callers building KAT vectors or wiring §4.4
+// resolution against locally-constructed pubkey entities.
+//
+// The home format, not SHA-256, because a pubkey entity is content this
+// peer AUTHORS, and V7 §1.2 makes a peer's authored content uniformly its
+// home format. This called hash.Compute — unconditionally SHA-256 — while
+// its own doc comment claimed it followed the default, which is a doc that
+// was true of the intent and false of the code. Nothing caught it because
+// nothing in the suite has ever run with SHA-384 active: under the default
+// the two are the same function.
+//
+// What the divergence cost, had it shipped into a SHA-384 deployment: the
+// entity is published via entity.NewEntity (home-format-aware, so SHA-384)
+// while every path, every recipient_key binding and every §4.4 candidate
+// hash came from here as SHA-256. The peer would publish a key at one
+// address and name it at another — and since the §4.2.a path is derived
+// from the hash, the pubkey would be unreachable at the path senders look
+// for it under. Contrast ext/signaling's Derive, which pins SHA-256
+// deliberately and says so: a rendezvous key must agree across peers that
+// do not share a home format. There is no such reason here.
 func ComputePubkeyHash(data types.EncryptionPubkeyData) (hash.Hash, error) {
+	return ComputePubkeyHashFormat(entity.DefaultHashAlgorithm(), data)
+}
+
+// ComputePubkeyHashFormat is ComputePubkeyHash with the content_hash_format
+// named explicitly rather than read from the process-global home format.
+//
+// It exists for the one caller that must model two peers at once:
+// ENC-ROUNDTRIP-FORMAT-1 (§16) puts a SHA-256-home sender and a SHA-384-home
+// recipient in a single process, and a cross-format test that has to mutate a
+// process-global to express its inputs is a test that cannot run beside
+// anything else. Production callers want ComputePubkeyHash.
+func ComputePubkeyHashFormat(alg byte, data types.EncryptionPubkeyData) (hash.Hash, error) {
 	rawData, err := ecf.Encode(data)
 	if err != nil {
 		return hash.Hash{}, fmt.Errorf("encode pubkey data: %w", err)
 	}
-	return hash.Compute(types.TypeEncryptionPubkey, rawData)
+	return hash.ComputeFormat(alg, types.TypeEncryptionPubkey, rawData)
 }

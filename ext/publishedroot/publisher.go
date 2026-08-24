@@ -99,6 +99,52 @@ type Publisher struct {
 	rootPath    string // the LI path RootTracker writes the tracked root to
 	authorityOK bool
 	publishing  bool // re-entry guard for Publish-cascade-Publish recursion
+	// pending is the trailing edge of the coalescing window: a root that
+	// arrived while a publish was in flight and so could not be published
+	// then. The in-flight publish drains it on completion. Without this
+	// the guard DROPS that root, and if the write burst has stopped there
+	// is no next cascade to pick it up — the published root stays behind
+	// the tracked root forever, which is a §6.5.6 convergence failure and
+	// not merely a slow one. Measured: reproducible at 5000 sequential
+	// writes before this existed.
+	pending *hash.Hash
+
+	// Debounce coalescing (§6.5.6: "coalescing / debouncing is explicitly
+	// permitted — a signature per tree:put is write-amplifying and is not
+	// the intent; a cascade SHOULD produce one republish, not one per
+	// binding"). dirty holds the newest tracked root observed since the
+	// last publish; the timer collapses a burst into one signature.
+	debounce   time.Duration
+	dirty      *hash.Hash
+	timerArmed bool
+}
+
+// DefaultDebounce is the trailing-edge coalescing window.
+//
+// Chosen against the two numbers that bound it. §6.5.6 permits up to a
+// 30 s maximum convergence delay, and measured publish cost is ~21 µs
+// with post-burst convergence ~1 ms — so a window of tens of ms collapses
+// a burst into a single signature while leaving convergence three-plus
+// orders of magnitude inside the ceiling. 25 ms is also far below every
+// consumer-visible wait in the suite (serving_mode polls for 10 s), so it
+// is invisible to conformance timing while removing most of the
+// amplification.
+//
+// It is a trailing-edge debounce, not a rate limit: the timer measures
+// quiet, and the LAST root observed is the one published. A burst of any
+// length therefore costs one signature, and the value published is always
+// the newest — never a stale midpoint.
+const DefaultDebounce = 25 * time.Millisecond
+
+// PublisherOption configures a Publisher at construction.
+type PublisherOption func(*Publisher)
+
+// WithDebounce sets the coalescing window. Zero or negative disables
+// debouncing entirely — every tracked-root advance publishes immediately,
+// which is the maximum-freshness / maximum-amplification end of the trade
+// §6.5.6 describes.
+func WithDebounce(d time.Duration) PublisherOption {
+	return func(p *Publisher) { p.debounce = d }
 }
 
 // NewPublisher builds a publisher that watches the rootTracker for prefix
@@ -110,12 +156,13 @@ type Publisher struct {
 //
 // debugLog may be nil. The publisher silently no-ops (with debug log if
 // set) until SetupAuthority lands the LI + keypair + identity entity.
-func NewPublisher(cs store.ContentStore, tracker *tree.RootTracker, prefix string, debugLog *log.Logger) *Publisher {
-	return &Publisher{
+func NewPublisher(cs store.ContentStore, tracker *tree.RootTracker, prefix string, debugLog *log.Logger, opts ...PublisherOption) *Publisher {
+	p := &Publisher{
 		cs:       cs,
 		tracker:  tracker,
 		prefix:   prefix,
 		debugLog: debugLog,
+		debounce: DefaultDebounce,
 		// RootTracker writes its tracked root to
 		// `store.CleanPath("system/tree/root/" + prefix)` — CleanPath strips
 		// trailing slashes. We mirror the same canonicalization so the
@@ -123,6 +170,10 @@ func NewPublisher(cs store.ContentStore, tracker *tree.RootTracker, prefix strin
 		// (`/{peerID}/system/tree/root/<cleaned-prefix>`) actually fires.
 		rootPath: strings.TrimRight("system/tree/root/"+prefix, "/"),
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // SetupAuthority wires the publisher's location index + signing identity.
@@ -230,14 +281,72 @@ func (p *Publisher) Publish(rootHash hash.Hash) (entity.Entity, error) {
 		return entity.Entity{}, fmt.Errorf("publishedroot.Publish: authority not configured")
 	}
 	if p.publishing {
-		// Another Publish is already in flight on this publisher (we're
-		// being re-entered via the LI-write cascade). The outer call's
-		// effects subsume this one; return the in-flight last entity if
-		// available so callers don't see a spurious error.
+		// Another Publish is in flight (we're being re-entered via the
+		// LI-write cascade). Record this root as the trailing edge rather
+		// than discarding it: the in-flight call republishes it before it
+		// returns. Dropping it is only safe while writes keep arriving —
+		// and the case that matters is the burst that just stopped.
+		r := rootHash
+		p.pending = &r
 		p.mu.Unlock()
 		return entity.Entity{}, errPublishInProgress
 	}
 	p.publishing = true
+	p.mu.Unlock()
+
+	var last entity.Entity
+	current := rootHash
+	// Bounded so a pathological feedback loop degrades into a stall we can
+	// see rather than a goroutine that never returns. The RootTracker skips
+	// PublisherHandlerPattern writes, so our own bindings do not advance the
+	// tracked root and this normally runs once, twice at a burst tail.
+	for round := 0; round < maxTrailingRepublishes; round++ {
+		ent, err := p.publishOnce(current)
+		if err != nil {
+			p.clearPublishing()
+			return entity.Entity{}, err
+		}
+		last = ent
+		// Draining `pending` and releasing the `publishing` flag MUST happen
+		// under one lock hold. Split across two, there is a window between
+		// "pending is empty" and "publishing = false" in which a new root
+		// arrives, sees publishing still set, parks itself in pending, and
+		// is then dropped by a loop that has already decided to exit — the
+		// exact lost wakeup this drain exists to prevent, reintroduced one
+		// level down. Caught by TestRepublishConvergenceAfterBurst under
+		// parallel-package load, not by review.
+		p.mu.Lock()
+		next := p.pending
+		p.pending = nil
+		if next == nil || *next == current {
+			p.publishing = false
+			p.mu.Unlock()
+			return last, nil
+		}
+		p.mu.Unlock()
+		current = *next
+	}
+	p.clearPublishing()
+	if p.debugLog != nil {
+		p.debugLog.Printf("[publishedroot] trailing republish bound (%d) hit; tracked root may still be ahead",
+			maxTrailingRepublishes)
+	}
+	return last, nil
+}
+
+// maxTrailingRepublishes bounds the drain loop in Publish.
+const maxTrailingRepublishes = 64
+
+func (p *Publisher) clearPublishing() {
+	p.mu.Lock()
+	p.publishing = false
+	p.mu.Unlock()
+}
+
+// publishOnce mints, signs and binds exactly one published-root for
+// rootHash. It assumes the caller holds the `publishing` flag.
+func (p *Publisher) publishOnce(rootHash hash.Hash) (entity.Entity, error) {
+	p.mu.Lock()
 	p.lastSeq++
 	pr := types.PublishedRootData{
 		PeerID:   p.peerID,
@@ -257,12 +366,6 @@ func (p *Publisher) Publish(rootHash hash.Hash) (entity.Entity, error) {
 	peerIDHash := p.peerIDHash
 	peerID := p.peerID
 	p.mu.Unlock()
-
-	defer func() {
-		p.mu.Lock()
-		p.publishing = false
-		p.mu.Unlock()
-	}()
 
 	prEntity, err := pr.ToEntity()
 	if err != nil {
@@ -303,16 +406,26 @@ func (p *Publisher) Publish(rootHash hash.Hash) (entity.Entity, error) {
 		HandlerPattern: PublisherHandlerPattern,
 		Operation:      "publish",
 	}
-	storagePath := types.PublishedRootStoragePath(peerID)
-	if cw, ok := li.(store.ContextualWriter); ok {
-		if _, err := cw.SetWithContext(storagePath, prEntity.ContentHash, publisherCtx); err != nil {
-			return entity.Entity{}, fmt.Errorf("bind published-root at %s: %w", storagePath, err)
-		}
-	} else {
-		if err := li.Set(storagePath, prEntity.ContentHash); err != nil {
-			return entity.Entity{}, fmt.Errorf("bind published-root at %s: %w", storagePath, err)
-		}
-	}
+	// ORDER IS LOAD-BEARING: bind the SIGNATURE first, the published-root
+	// second.
+	//
+	// The published-root binding is what makes a new head VISIBLE, and
+	// ClosureScope memoizes its member set per head. Binding the head first
+	// opens a window in which a consumer can observe head H, build and cache
+	// a snapshot for H, and miss the signature that had not yet been bound —
+	// and because the snapshot is keyed by head, it stays wrong until the
+	// head advances again. The manifest is then served but unverifiable.
+	//
+	// Rapid republishing hid this: the head advanced within milliseconds and
+	// the next snapshot picked the signature up. Adding a debounce made the
+	// head sit still, and v5_outbound_dial began failing 2/2 with a 404 on
+	// the signature pointer. The debounce exposed the flaw; it did not
+	// create it.
+	//
+	// Signature-before-pointer is the same discipline SUBSTITUTE §7.3 states
+	// for publishing (upload content first, the manifest that references it
+	// last): bind what is referenced before the reference that makes it
+	// reachable.
 	sigPath := types.LocalSignaturePath(prEntity.ContentHash)
 	if cw, ok := li.(store.ContextualWriter); ok {
 		if _, err := cw.SetWithContext(sigPath, sigEntity.ContentHash, publisherCtx); err != nil {
@@ -321,6 +434,16 @@ func (p *Publisher) Publish(rootHash hash.Hash) (entity.Entity, error) {
 	} else {
 		if err := li.Set(sigPath, sigEntity.ContentHash); err != nil {
 			return entity.Entity{}, fmt.Errorf("bind published-root sig at %s: %w", sigPath, err)
+		}
+	}
+	storagePath := types.PublishedRootStoragePath(peerID)
+	if cw, ok := li.(store.ContextualWriter); ok {
+		if _, err := cw.SetWithContext(storagePath, prEntity.ContentHash, publisherCtx); err != nil {
+			return entity.Entity{}, fmt.Errorf("bind published-root at %s: %w", storagePath, err)
+		}
+	} else {
+		if err := li.Set(storagePath, prEntity.ContentHash); err != nil {
+			return entity.Entity{}, fmt.Errorf("bind published-root at %s: %w", storagePath, err)
 		}
 	}
 
@@ -395,6 +518,26 @@ func (p *Publisher) OnTreeChange(evt store.TreeChangeEvent) *store.ConsumerResul
 	// guard then compresses bursts (each Publish triggers cascade writes
 	// that re-fire this hook; the spawned Publish sees publishing=true
 	// and returns errPublishInProgress without doing duplicate work).
+	p.mu.Lock()
+	debounce := p.debounce
+	if debounce > 0 {
+		// Trailing-edge coalescing. Record the newest root and arm one
+		// timer; every further advance inside the window just overwrites
+		// `dirty`, so a burst of any length costs ONE signature and the
+		// value published is the newest — never a stale midpoint.
+		root := evt.Hash
+		p.dirty = &root
+		if p.timerArmed {
+			p.mu.Unlock()
+			return nil
+		}
+		p.timerArmed = true
+		p.mu.Unlock()
+		time.AfterFunc(debounce, p.flushDirty)
+		return nil
+	}
+	p.mu.Unlock()
+
 	go func(root hash.Hash) {
 		if _, err := p.Publish(root); err != nil {
 			if err == errPublishInProgress {
@@ -406,4 +549,42 @@ func (p *Publisher) OnTreeChange(evt store.TreeChangeEvent) *store.ConsumerResul
 		}
 	}(evt.Hash)
 	return nil
+}
+
+// flushDirty publishes the newest root observed during the debounce
+// window. It is the trailing edge: the timer measures QUIET, so this runs
+// once the writes stop rather than on a fixed cadence.
+//
+// Convergence (§6.5.6) rests on this being unconditional — if it ever
+// returned without either publishing `dirty` or handing it to an in-flight
+// publish, the burst tail would be lost and the published root would sit
+// behind the tracked root forever. errPublishInProgress is precisely that
+// hand-off: Publish parked the root in `pending` and its drain loop will
+// carry it.
+func (p *Publisher) flushDirty() {
+	p.mu.Lock()
+	p.timerArmed = false
+	d := p.dirty
+	p.dirty = nil
+	p.mu.Unlock()
+	if d == nil {
+		return
+	}
+	if _, err := p.Publish(*d); err != nil && err != errPublishInProgress {
+		if p.debugLog != nil {
+			p.debugLog.Printf("[publishedroot] debounced publish error: %v", err)
+		}
+	}
+}
+
+// Flush publishes any root still sitting in the debounce window, without
+// waiting for the timer. Call it before shutting a publisher down so a
+// burst that ended inside the window is not left unpublished.
+//
+// Not calling it is recoverable rather than fatal: SetupAuthority
+// publishes the tracker's current root on startup, so a peer that dies
+// with a pending debounce re-converges on its next boot. Flush turns that
+// from "fixed on restart" into "never wrong".
+func (p *Publisher) Flush() {
+	p.flushDirty()
 }

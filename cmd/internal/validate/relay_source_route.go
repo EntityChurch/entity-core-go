@@ -379,7 +379,7 @@ func runRelaySourceRoute(ctx context.Context, clients []*PeerClient) []CheckResu
 			return FailCheck("build inner: " + err.Error())
 		}
 		fr := types.ForwardRequestData{
-			Destination:   dPeerID,
+			Destination: dPeerID,
 			// Route + NextHop both intentionally empty.
 			TTLHops:       4,
 			EnvelopeInner: inner.ContentHash,

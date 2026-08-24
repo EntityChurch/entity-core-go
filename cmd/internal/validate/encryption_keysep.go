@@ -19,11 +19,11 @@ import (
 // encryption keypair MUST be independent of the Ed25519 identity keypair.
 // Forbidden derivations:
 //
-//   (a) encryption_pk == identity_pk (raw-bytes reuse).
+//	(a) encryption_pk == identity_pk (raw-bytes reuse).
 //
-//   (b) encryption_pk == birational(identity_pk) — the libsodium
-//       crypto_sign_ed25519_pk_to_curve25519 / age transform
-//       u = (1+y)/(1-y) mod 2^255-19.
+//	(b) encryption_pk == birational(identity_pk) — the libsodium
+//	    crypto_sign_ed25519_pk_to_curve25519 / age transform
+//	    u = (1+y)/(1-y) mod 2^255-19.
 //
 // Property check (always runs): a synthetic Ed25519 keypair is generated
 // inside this check; (i) an independent X25519 keypair MUST pass
@@ -32,16 +32,29 @@ import (
 // identity MUST be rejected. Failure here is a Go-side R6 helper bug.
 //
 // Published-pubkey check (best-effort): list
-// system/encryption/pubkey/{hex} on the remote peer. For each pubkey
+// system/encryption-pubkey/{hex} on the remote peer. For each pubkey
 // entity found, decode the X25519 public_key field and ValidateKeySeparation
 // against the remote peer's identity public key (from the connect-time
 // granter identity). Pubkeys without a recoverable remote-peer pubkey
 // are skipped with a note (separation cannot be checked without the
-// identity to separate from). If no encryption-pubkey is published yet,
-// the check still passes — the property check above proves the helper
-// is correct; the BLOCK-1 gate is enforced wherever the peer authors an
-// encryption keypair.
-func runEncKeySeparation(ctx context.Context, client *PeerClient) CheckOutcome {
+// identity to separate from).
+//
+// On an empty listing the check still passes — the property check above
+// is the gating half — but it MUST say that it scanned and found
+// nothing rather than implying it validated something. That distinction
+// is not cosmetic here: this check previously listed
+// `system/encryption/pubkey/`, a prefix no conformant peer publishes to
+// (§4.2.a is `system/encryption-pubkey/`), so its remote half could not
+// have found a real peer's keys and reported PASS either way. A check
+// that cannot be made to fail has not been shown to measure anything.
+// The listing prefix is now the spec path, and `expectPublished` gives
+// the scan teeth whenever the category has already published keys.
+// expectPublished is the number of encryption-pubkeys an earlier check
+// in this category published and confirmed readable. Zero means "we have
+// no floor" (the check ran standalone, or the publisher was skipped) and
+// the scan stays best-effort; non-zero means an empty or short listing is
+// evidence the scan is not seeing what is demonstrably there.
+func runEncKeySeparation(ctx context.Context, client *PeerClient, expectPublished int) CheckOutcome {
 	// Step 1 — synthetic property check.
 	synthSeed := make([]byte, ed25519.SeedSize)
 	for i := range synthSeed {
@@ -80,16 +93,25 @@ func runEncKeySeparation(ctx context.Context, client *PeerClient) CheckOutcome {
 	}
 
 	// Step 2 — probe the remote peer for published encryption-pubkeys.
-	// List system/encryption/pubkey/ ; per-entry decode and (where the
+	// List system/encryption-pubkey/ ; per-entry decode and (where the
 	// remote identity is recoverable) validate separation.
-	entries, _, err := client.TreeListing(ctx, "system/encryption/pubkey")
+	entries, _, err := client.TreeListing(ctx, "system/encryption-pubkey/")
 	if err != nil {
-		// Listing failure is fine (path may not exist on a fresh peer);
-		// the property check above is the gating signal.
-		return PassCheck("R6 helper property check OK; no published encryption-pubkey to validate (listing: " + err.Error() + ")")
+		// "Could not look" — distinct from "looked and found nothing".
+		if expectPublished > 0 {
+			return WarnCheck(fmt.Sprintf(
+				"R6 helper property check OK; but the remote scan COULD NOT RUN (listing system/encryption-pubkey: %v) while %d pubkey(s) are known published — separation unverified on the wire",
+				err, expectPublished))
+		}
+		return PassCheck("R6 helper property check OK; remote scan not attempted — listing system/encryption-pubkey failed: " + err.Error())
 	}
 	if len(entries) == 0 {
-		return PassCheck("R6 helper property check OK; no encryption-pubkey published on remote")
+		if expectPublished > 0 {
+			return WarnCheck(fmt.Sprintf(
+				"R6 helper property check OK; but the scan found ZERO entries under system/encryption-pubkey while %d were published and confirmed readable this run — the listing surface is not reporting them",
+				expectPublished))
+		}
+		return PassCheck("R6 helper property check OK; scanned system/encryption-pubkey and found no published key to validate")
 	}
 
 	// Recover the remote peer's identity public key from connect-time

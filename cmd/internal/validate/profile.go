@@ -93,26 +93,26 @@ var coreTypeFloor = map[string]bool{
 	"system/protocol/resource-target":      true,
 
 	// Capability (12) — V7 §3.6, §6.2
-	"system/capability/grant":               true,
-	"system/capability/grant-entry":         true,
-	"system/capability/id-scope":            true,
-	"system/capability/path-scope":          true,
-	"system/capability/request":             true,
-	"system/capability/revocation":          true,
-	"system/capability/revoke-request":      true,
-	"system/capability/delegate-request":    true,
-	"system/capability/delegation-caveats":  true,
-	"system/capability/policy-entry":        true,
-	"system/capability/token":               true,
-	"system/capability/multi-granter":       true,
+	"system/capability/grant":              true,
+	"system/capability/grant-entry":        true,
+	"system/capability/id-scope":           true,
+	"system/capability/path-scope":         true,
+	"system/capability/request":            true,
+	"system/capability/revocation":         true,
+	"system/capability/revoke-request":     true,
+	"system/capability/delegate-request":   true,
+	"system/capability/delegation-caveats": true,
+	"system/capability/policy-entry":       true,
+	"system/capability/token":              true,
+	"system/capability/multi-granter":      true,
 
 	// Handler machinery (6) — V7 §3.7, §3.12, §6.1
-	"system/handler":                   true,
-	"system/handler/interface":         true,
-	"system/handler/manifest":          true,
-	"system/handler/operation-spec":    true,
-	"system/handler/register-request":  true,
-	"system/handler/register-result":   true,
+	"system/handler":                  true,
+	"system/handler/interface":        true,
+	"system/handler/manifest":         true,
+	"system/handler/operation-spec":   true,
+	"system/handler/register-request": true,
+	"system/handler/register-result":  true,
 
 	// Tree (5) — V7 §3.9, §6.3
 	"system/tree/get-request":   true,
@@ -127,10 +127,10 @@ var coreTypeFloor = map[string]bool{
 	"system/type/name":       true,
 
 	// Operational (4) — V7 §1.2a, §3.11, §3.13
-	"system/bounds":           true,
-	"system/resource-limits":  true,
-	"system/delivery-spec":    true,
-	"system/deletion-marker":  true,
+	"system/bounds":          true,
+	"system/resource-limits": true,
+	"system/delivery-spec":   true,
+	"system/deletion-marker": true,
 }
 
 // inCoreTypeFloor reports whether a type name is part of the V7 §9.5

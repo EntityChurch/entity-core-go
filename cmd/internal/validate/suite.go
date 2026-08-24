@@ -41,9 +41,9 @@ type ValidationSuite struct {
 	// Empty makes the category SKIP.
 	peerIssuedBundle string
 	peerIssuedAddr   string
-	profile       string // V7 v7.72 §9.0 conformance profile: "core" or "full"; default "full" (back-compat)
-	httpPeers     []string // if set in convergence mode, HTTP listener URLs paired by index with peer addresses; enables the R1 cross-peer-subscription-over-HTTP gate
-	wsPeers       []string // if set in convergence mode, WebSocket-live URLs paired by index with peer addresses; Thread F substrate gate for §6.5.2b. When wsPeers[i] is set it preempts httpPeers[i] in transportProfileForPeer (lex-sort puts ws after http after tcp).
+	profile          string   // V7 v7.72 §9.0 conformance profile: "core" or "full"; default "full" (back-compat)
+	httpPeers        []string // if set in convergence mode, HTTP listener URLs paired by index with peer addresses; enables the R1 cross-peer-subscription-over-HTTP gate
+	wsPeers          []string // if set in convergence mode, WebSocket-live URLs paired by index with peer addresses; Thread F substrate gate for §6.5.2b. When wsPeers[i] is set it preempts httpPeers[i] in transportProfileForPeer (lex-sort puts ws after http after tcp).
 
 	// V7 §4.10 (v7.75 RESERVED) — peer-declared resource bounds; the
 	// resource_bounds category probes a value just over each. Zero means

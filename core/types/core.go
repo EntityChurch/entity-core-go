@@ -222,6 +222,9 @@ func RegisterCoreTypes(r *TypeRegistry) {
 	r.ReflectType(TypeRegistryRevokeRequest, reflect.TypeOf(RegistryRevokeRequestData{}))
 	r.ReflectType(TypeRegistryRenewRequest, reflect.TypeOf(RegistryRenewRequestData{}))
 
+	// EXTENSION-REGISTRY §6a.7 — the signed binding-manifest.
+	r.ReflectType(TypeRegistryBindingManifest, reflect.TypeOf(RegistryBindingManifestData{}))
+
 	// `binding.target_peer_id` is the Base58 peer-id per V7 §1.5 — the
 	// semantic system/peer-id type, NOT the bare primitive/string the
 	// reflected struct field renders to. Pin all surfaces that carry it.
@@ -230,6 +233,9 @@ func RegisterCoreTypes(r *TypeRegistry) {
 	r.OverrideField(TypeRegistryResolveResult, "peer_id", FieldSpec{TypeRef: "system/peer-id", Optional: true})
 	r.OverrideField(TypeRegistryLocalNameBindRequest, "target_peer_id", FieldSpec{TypeRef: "system/peer-id"})
 	r.OverrideField(TypeRegistryLocalNameListEntry, "target_peer_id", FieldSpec{TypeRef: "system/peer-id"})
+	// `binding-manifest.registry_id` is the registry's Base58 peer-id, same
+	// discipline — it reflects to primitive/string and must be pinned.
+	r.OverrideField(TypeRegistryBindingManifest, "registry_id", FieldSpec{TypeRef: "system/peer-id"})
 	r.OverrideField(TypeRegistryRegisterRequest, "target_peer_id", FieldSpec{TypeRef: "system/peer-id"})
 	// §6a.9.1 issuer-policy `allowlist` is a list of target_peer_ids per the
 	// spec data block, not bare strings. Matches Rust + Python.

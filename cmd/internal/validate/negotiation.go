@@ -136,8 +136,8 @@ func runNegotiation(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Run("keytype_disjoint_reject", func() CheckOutcome {
 		status, code, err := attemptHelloWithAdvertisedSets(
 			ctx, client.Addr(),
-			nil,                                  // default hash_formats
-			[]string{"fake-disjoint-key-type"},   // disjoint key_types — excludes responder's own
+			nil,                                // default hash_formats
+			[]string{"fake-disjoint-key-type"}, // disjoint key_types — excludes responder's own
 		)
 		if err != nil {
 			return FailCheck(fmt.Sprintf("NEGOTIATE-KEYTYPE-1 b FAIL: hello round-trip errored: %v", err))

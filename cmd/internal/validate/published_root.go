@@ -57,9 +57,9 @@ const catPublishedRoot = "published_root"
 func runPublishedRoot(ctx context.Context, pollURL string) []CheckResult {
 	r := NewCheckRunner(catPublishedRoot)
 
-	r.Declare("v1_round_trip", "PROPOSAL-PEER-MANIFEST-STATIC-HANDSHAKE §4 — system/peer/published-root ECF round-trip + cohort-stable content_hash on a fixed fixture")
-	r.Declare("v2_signature_carriage", "V7 §5.2/§975 — signature carriage via invariant-pointer; the dialer resolves system/signature/{hex(root_hash)} as a tree-leaf and the entity verifies")
-	r.Declare("v3_seq_monotonicity", "§4 + snapshot-manifest §3-RES.4 — connector caches max-seen seq; lower-seq fetch fails closed")
+	r.DeclareSelf("v1_round_trip", "PROPOSAL-PEER-MANIFEST-STATIC-HANDSHAKE §4 — system/peer/published-root ECF round-trip + cohort-stable content_hash on a fixed fixture")
+	r.DeclareSelf("v2_signature_carriage", "V7 §5.2/§975 — signature carriage via invariant-pointer; the dialer resolves system/signature/{hex(root_hash)} as a tree-leaf and the entity verifies")
+	r.DeclareSelf("v3_seq_monotonicity", "§4 + snapshot-manifest §3-RES.4 — connector caches max-seen seq; lower-seq fetch fails closed")
 	r.Declare("v4_manifest_get_served", "MANIFEST_GET returns a system/peer/published-root entity (requires --publish-root + -poll-url)")
 	r.Declare("v5_outbound_dial", "End-to-end dial → MANIFEST_GET → signature verify (requires --publish-root + -poll-url)")
 	r.Declare("v6_host_bytes_distrust", "§1.1 threat-model gate — a host serving wrong bytes is rejected by the connector's hash check")

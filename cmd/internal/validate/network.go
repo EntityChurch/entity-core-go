@@ -441,7 +441,7 @@ type networkOutcome struct {
 	outcome CheckOutcome
 }
 
-func netOK() networkOutcome              { return networkOutcome{pass: true} }
+func netOK() networkOutcome                { return networkOutcome{pass: true} }
 func netBad(o CheckOutcome) networkOutcome { return networkOutcome{outcome: o} }
 
 // networkMaintain EXECUTEs maintain-peer toward the counterpart and decodes the

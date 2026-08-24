@@ -37,7 +37,7 @@ func runRegistry(ctx context.Context, client *PeerClient) []CheckResult {
 	r := NewCheckRunner(catRegistry)
 
 	r.Declare("v1_bind_round_trip", "REGISTRY §6.5 — :bind succeeds + binding entity decodes")
-	r.Declare("v2_resolver_config_round_trip", "REGISTRY §4 — resolver-config entity decodes")
+	r.DeclareSelf("v2_resolver_config_round_trip", "REGISTRY §4 — resolver-config entity decodes")
 	r.Declare("v3_meta_resolver_pin_precedence", "REGISTRY §4.1.2 — pinned binding short-circuits chain")
 	r.Declare("v4_meta_resolver_dispatch_filter", "REGISTRY §4.1 — name_format_dispatch narrows chain")
 	r.Declare("v5_meta_resolver_chain_exhaustion", "REGISTRY §4.1 — fail-closed when nothing matches")
@@ -47,9 +47,9 @@ func runRegistry(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("v9_local-name_supersedes_chain", "REGISTRY §6.5 — rebind links via Supersedes hash")
 	r.Declare("v10_local-name_list_reads_index", "REGISTRY §6.5 — :list returns one entry per live pointer")
 	r.Declare("v11_unknown_backend_kind_skip", "REGISTRY §4.2 — unknown backend_kind skipped, no crash")
-	r.Declare("v12_unknown_binding_kind_skip", "REGISTRY §3.0a — unknown binding kind still decodes")
+	r.DeclareSelf("v12_unknown_binding_kind_skip", "REGISTRY §3.0a — unknown binding kind still decodes")
 	r.Declare("v13_invalidate_cache", "REGISTRY §2.1 — :invalidate-cache returns 200")
-	r.Declare("v14_resolution_log_shape", "REGISTRY §11.2 — log entry decodes")
+	r.DeclareSelf("v14_resolution_log_shape", "REGISTRY §11.2 — log entry decodes")
 
 	r.Run("v1_bind_round_trip", func() CheckOutcome { return runRegBindRoundTrip(ctx, client) })
 	r.Run("v2_resolver_config_round_trip", runRegResolverConfigRoundTrip)

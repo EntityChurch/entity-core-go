@@ -299,12 +299,12 @@ func (c *PeerClient) SendDispatchOutboundProbe(ctx context.Context, value interf
 		c.identityPeerIDString(), conformance.PatternEcho)
 
 	paramsRaw, err := ecf.Encode(map[string]interface{}{
-		"target":                 validatorURI,
-		"operation":              "echo",
-		"value":                  cbor.RawMessage(valueRaw),
-		"reentry_capability":     cbor.RawMessage(capRaw),
-		"reentry_granter":        cbor.RawMessage(granterRaw),
-		"reentry_cap_signature":  cbor.RawMessage(sigRaw),
+		"target":                validatorURI,
+		"operation":             "echo",
+		"value":                 cbor.RawMessage(valueRaw),
+		"reentry_capability":    cbor.RawMessage(capRaw),
+		"reentry_granter":       cbor.RawMessage(granterRaw),
+		"reentry_cap_signature": cbor.RawMessage(sigRaw),
 	})
 	if err != nil {
 		return 0, fmt.Errorf("encode dispatch-outbound params: %w", err)

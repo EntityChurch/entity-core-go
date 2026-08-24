@@ -44,12 +44,69 @@ import (
 //   - consumer-side hash-chain verification is impl-agnostic; the publisher
 //     just has to cover the reachable hash set.
 type ClosureScope struct {
-	Store        store.ContentStore
-	Index        store.LocationIndex
-	LocalPeerID  string
+	Store       store.ContentStore
+	Index       store.LocationIndex
+	LocalPeerID string
 
-	mu       sync.Mutex
-	cached   *closureSnapshot
+	// Head, when set, supplies the published-root the closure is built
+	// for. It MUST be the same source MANIFEST_GET serves from.
+	//
+	// Without it there are two sources of truth for "the current head":
+	// MANIFEST_GET reads the publisher's in-memory Current(), this scope
+	// reads the location index. The publisher binds the index entry and
+	// updates Current() at different instants, so the two disagree for a
+	// window — and in that window a consumer holds manifest H1 while the
+	// scope only admits H2's signature, so verifying the manifest it was
+	// just served 404s. Rapid republishing made the window vanishingly
+	// small; adding a debounce made it reproducible (v5_outbound_dial,
+	// 2/2). One source of truth removes the class rather than narrowing
+	// the window.
+	Head func() (hash.Hash, bool)
+
+	mu     sync.Mutex
+	cached *closureSnapshot
+
+	// recentSigs retains the signature hashes of recently-published heads.
+	//
+	// Verifying a manifest takes TWO requests: fetch the manifest, then
+	// fetch its signature. If the publisher republishes between them, a
+	// scope that admits only the current head's signature 404s the
+	// signature for the manifest it just served — the consumer cannot
+	// verify anything it is handed, through no fault of its own.
+	//
+	// This is why a debounce surfaced it. Publishing immediately on write
+	// keeps republishes inside write bursts; deferring them moves the
+	// publish into the quiet period where consumers are reading, landing
+	// it between the two requests. The race predates the debounce; the
+	// debounce just aimed it at the window that matters.
+	//
+	// Retaining a bounded history of our OWN signatures over our OWN
+	// published roots leaks nothing and costs a few hashes.
+	recentSigs  map[hash.Hash]struct{}
+	recentSigsQ []hash.Hash
+}
+
+// recentSigRetention is how many past heads' signatures stay servable.
+// Sized for "a consumer's manifest→signature round trip overlapping a
+// republish", which is one or two heads; 16 is slack for a slow consumer
+// against a busy publisher.
+const recentSigRetention = 16
+
+// rememberSig records a head signature as servable, evicting the oldest
+// beyond recentSigRetention. Caller holds s.mu.
+func (s *ClosureScope) rememberSig(h hash.Hash) {
+	if s.recentSigs == nil {
+		s.recentSigs = make(map[hash.Hash]struct{}, recentSigRetention)
+	}
+	if _, seen := s.recentSigs[h]; seen {
+		return
+	}
+	s.recentSigs[h] = struct{}{}
+	s.recentSigsQ = append(s.recentSigsQ, h)
+	for len(s.recentSigsQ) > recentSigRetention {
+		delete(s.recentSigs, s.recentSigsQ[0])
+		s.recentSigsQ = s.recentSigsQ[1:]
+	}
 }
 
 type closureSnapshot struct {
@@ -62,7 +119,15 @@ type closureSnapshot struct {
 // lookup + a compare); re-walks the trie only on head advance. Clears the
 // cache when nothing is published so the predicate degrades to closed.
 func (s *ClosureScope) refresh() {
-	head, ok := s.Index.Get(types.PublishedRootStoragePath(s.LocalPeerID))
+	var (
+		head hash.Hash
+		ok   bool
+	)
+	if s.Head != nil {
+		head, ok = s.Head()
+	} else {
+		head, ok = s.Index.Get(types.PublishedRootStoragePath(s.LocalPeerID))
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -96,6 +161,17 @@ func (s *ClosureScope) refresh() {
 	}
 	if sigOK {
 		members[sigHash] = struct{}{}
+		s.rememberSig(sigHash)
+	} else {
+		// Do NOT memoize a snapshot that is missing the head's signature.
+		//
+		// The snapshot is keyed by head, so caching an incomplete one here
+		// makes it permanent until the head advances: the manifest is served
+		// and its signature 404s for as long as the publisher stays quiet.
+		// The publisher now binds the signature before the head to close the
+		// window, and this is the second line of defence — an unmemoized
+		// miss costs one extra walk and self-heals, a memoized one does not.
+		return
 	}
 
 	s.cached = &closureSnapshot{head: head, members: members}
@@ -118,11 +194,18 @@ func (s *ClosureScope) InScope(_ context.Context, h hash.Hash) (bool, error) {
 		return false, nil
 	}
 	members := s.members()
-	if members == nil {
-		return false, nil
+	if members != nil {
+		if _, ok := members[h]; ok {
+			return true, nil
+		}
 	}
-	_, ok := members[h]
-	return ok, nil
+	// A signature over a recently-published head stays servable even after
+	// the head moves on — otherwise a manifest handed out moments ago
+	// becomes unverifiable mid-verification.
+	s.mu.Lock()
+	_, recent := s.recentSigs[h]
+	s.mu.Unlock()
+	return recent, nil
 }
 
 // InScopePath resolves the local binding at path; the path is in-scope iff

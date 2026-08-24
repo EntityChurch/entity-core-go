@@ -279,4 +279,3 @@ func runCryptoAgility(ctx context.Context, client *PeerClient) []CheckResult {
 
 	return r.Results()
 }
-

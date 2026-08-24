@@ -499,12 +499,12 @@ func TestRegistryCoreTypes(t *testing.T) {
 	// release-result, status, peer-summary, close-request) → 207.
 	// EXTENSION-NETWORK Amendment 13 §6.7 reachability facts add the three
 	// (observe-address-result, check-reachability-result, candidate) → 210.
-	if len(defs) != 210 {
+	if len(defs) != 211 {
 		names := make([]string, len(defs))
 		for i, d := range defs {
 			names[i] = d.Name
 		}
-		t.Fatalf("expected 210 core type definitions, got %d: %v", len(defs), names)
+		t.Fatalf("expected 211 core type definitions, got %d: %v", len(defs), names)
 	}
 
 	seen := make(map[string]bool)
@@ -575,12 +575,12 @@ func TestReflectedTypesMatchSpec(t *testing.T) {
 	// seven (maintain-request, maintain-result, release-request,
 	// release-result, status, peer-summary, close-request) → 212 total.
 	all := r.All()
-	if len(all) != 215 {
+	if len(all) != 216 {
 		names := make([]string, len(all))
 		for i, d := range all {
 			names[i] = d.Name
 		}
-		t.Fatalf("expected 215 total type definitions, got %d: %v", len(all), names)
+		t.Fatalf("expected 216 total type definitions, got %d: %v", len(all), names)
 	}
 
 	// Verify specific types have correct fields.

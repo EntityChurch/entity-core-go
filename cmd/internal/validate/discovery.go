@@ -67,16 +67,16 @@ const catDiscovery = "discovery"
 func runDiscovery(ctx context.Context, client *PeerClient) []CheckResult {
 	r := NewCheckRunner(catDiscovery)
 
-	r.Declare("v1_candidate_round_trip", "DISCOVERY §2.1 — system/discovery/candidate ECF round-trip; Base58 peer_id nullable (Ruling-1)")
-	r.Declare("v2_decision_no_silent_admit", "DISCOVERY §2.1, §8.4 — :ignore decision encodes with grant: null (no silent admit)")
-	r.Declare("v3_identity_claim_round_trip", "DISCOVERY §2.2.1 — system/discovery/identity-claim ECF round-trip; non-zero content_hash for fail-closed compare")
-	r.Declare("v4_scan_result_flat_shape", "DISCOVERY §3, cohort discipline #3 — ScanResult is a flat entity, NOT system/protocol/status-wrapped")
+	r.DeclareSelf("v1_candidate_round_trip", "DISCOVERY §2.1 — system/discovery/candidate ECF round-trip; Base58 peer_id nullable (Ruling-1)")
+	r.DeclareSelf("v2_decision_no_silent_admit", "DISCOVERY §2.1, §8.4 — :ignore decision encodes with grant: null (no silent admit)")
+	r.DeclareSelf("v3_identity_claim_round_trip", "DISCOVERY §2.2.1 — system/discovery/identity-claim ECF round-trip; non-zero content_hash for fail-closed compare")
+	r.DeclareSelf("v4_scan_result_flat_shape", "DISCOVERY §3, cohort discipline #3 — ScanResult is a flat entity, NOT system/protocol/status-wrapped")
 	r.Declare("v5_scan_invocation_handler_live", "DISCOVERY §3 — :scan against mdns returns 200 + ScanResult shape (snapshot list may be empty on quiet net)")
 	r.Declare("v6_scan_unknown_backend", "DISCOVERY §3.3 (Ruling-5 erratum) — :scan against unregistered backend MUST return 400 + code `unknown_backend` (V7 §3.3 unknown enum class)")
 	r.Declare("v7_announce_stop_idempotent", "DISCOVERY §3, §8.1 — :announce-stop on never-announced profile returns 200 (idempotent symmetric lifecycle)")
-	r.Declare("v8_watchable_prefix_storage_path", "DISCOVERY §3.0 — CandidateStoragePath helper round-trips, watchable prefix matches `system/discovery/candidate/{backend}/`")
-	r.Declare("v9_successor_pattern_supersedes", "DISCOVERY §2.2 — successor candidate carries PeerID + Supersedes hash; original left immutable")
-	r.Declare("v10_dnssd_wire_pin", "DISCOVERY §3.2 PIN — ServiceType + {version, peer_id_hint, profile_ref} TXT keys MUST be exact strings (cohort's silent-divergence anchor)")
+	r.DeclareSelf("v8_watchable_prefix_storage_path", "DISCOVERY §3.0 — CandidateStoragePath helper round-trips, watchable prefix matches `system/discovery/candidate/{backend}/`")
+	r.DeclareSelf("v9_successor_pattern_supersedes", "DISCOVERY §2.2 — successor candidate carries PeerID + Supersedes hash; original left immutable")
+	r.DeclareSelf("v10_dnssd_wire_pin", "DISCOVERY §3.2 PIN — ServiceType + {version, peer_id_hint, profile_ref} TXT keys MUST be exact strings (cohort's silent-divergence anchor)")
 
 	r.Run("v1_candidate_round_trip", runDiscCandidateRoundTrip)
 	r.Run("v2_decision_no_silent_admit", runDiscDecisionNoSilentAdmit)

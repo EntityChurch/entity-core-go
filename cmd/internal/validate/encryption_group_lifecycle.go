@@ -11,14 +11,14 @@ import (
 // runEncGroupAddRekey — EXTENSION-ENCRYPTION §8.5 group lifecycle
 // (BLOCK-1 scenario B1-3). Exercises:
 //
-//   add member  — fresh wrap appended; existing outer ciphertext +
-//                 group_aead_key unchanged; new member decrypts.
-//   re-key      — fresh group_aead_key + full re-encrypt; removed
-//                 member rejected at wrap lookup on the new entity but
-//                 can still open the OLD entity (no PFS at the message
-//                 level, honest framing); F2-1 commitment property
-//                 holds across the re-key (rekeyed outer cannot be
-//                 opened under the old key).
+//	add member  — fresh wrap appended; existing outer ciphertext +
+//	              group_aead_key unchanged; new member decrypts.
+//	re-key      — fresh group_aead_key + full re-encrypt; removed
+//	              member rejected at wrap lookup on the new entity but
+//	              can still open the OLD entity (no PFS at the message
+//	              level, honest framing); F2-1 commitment property
+//	              holds across the re-key (rekeyed outer cannot be
+//	              opened under the old key).
 func runEncGroupAddRekey() CheckOutcome {
 	type member struct {
 		priv *ecdh.PrivateKey

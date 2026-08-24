@@ -283,4 +283,3 @@ func buildPassthroughEntity(v passthroughVector) (entity.Entity, error) {
 func sanitizeID(id string) string {
 	return strings.ReplaceAll(id, ".", "-")
 }
-

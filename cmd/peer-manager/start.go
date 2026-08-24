@@ -42,7 +42,7 @@ func cmdStart(args []string) {
 	serveNamespace := fs.String("serve-namespace", "", "Chunk E: content-namespace scope (e.g. system/content/public). Tree binding at NAMESPACE/{hex(H)} = in-scope.")
 	serveWholeStore := fs.Bool("serve-scope-whole-store", false, "Chunk E: DEBUG OPT-IN — serve every H in local content-store (ruling §1.3 T2/T3 caveat).")
 	keyType := fs.String("key-type", "ed25519", "peer keypair algorithm: ed25519 (default) | ed448 (v7.67 §3). Applies when minting a new identity for this peer; honored by Go (--key-type), Python (--key-type), and forwarded to Rust once its CLI lands.")
-	hashType := fs.String("hash-type", "sha256", "content_hash_format / home format the peer authors content + substrate under: sha256 (default, 0x00) | sha384 (0x01). V7 v7.70 §1.2. Honored by Go (--hash-type), Rust (--hash-type, post-v7.70 0616727), Python (--hash-type).")
+	hashType := fs.String("hash-type", "sha256", "content_hash_format / home format the peer authors content + substrate under: sha256 (default, 0x00) | sha384 (0x01). V7 v7.70 §1.2. Honored by Go (--hash-type), Rust (--hash-type, read at 0480712 2026-08-10), Python (--hash-type, read at e60c822 2026-08-10). NOTE: sha384 is accepted by all three CLIs but a SHA-384-home peer cannot currently serve http-poll or complete a signaling punch — the 33-byte hash is pinned by EXTENSION-NETWORK §6.5.3.1 and EXTENSION-SIGNALING §6.3, not by any implementation. See docs/validation/spec-issues/2026-08-10-*.")
 	inboxRelayRegistry := fs.String("inbox-relay-registry", "", "EXTENSION-RELAY §3.5 REGISTRY-served inbox-relay decl chain (Go-only initially): comma-separated peer-names of registries to consult (in order). The names are translated to peer-ids from state. Forwarded as --inbox-relay-registry to entity-peer.")
 	validate := fs.Bool("validate", false, "GUIDE-CONFORMANCE §7a: enable system/validate/echo + system/validate/dispatch-outbound test handlers (unblocks concurrency.t1_2_concurrent_reentry). MUST NOT be on in production. Honored by all three impls.")
 	signalingNode := fs.Bool("signaling-node", false, "EXTENSION-SIGNALING §4/§5: serve the system/signaling rendezvous node (offer/collect/advertise) for the punch gate. Honored by all three impls as of 2026-08-08 (Go -signaling-node; Rust + Python --signaling-node). Off by default everywhere — a peer is a signaling CLIENT by default and only a deployed introducer serves. The flag registers the handler but grants nobody access, so it needs an admission posture: Go/Python get the default --open-access, Rust gets --debug-grants (passed unconditionally).")
@@ -469,7 +469,12 @@ func startRustPeer(name, addr string, debug bool, storage, history, files, httpA
 		cmdArgs = append(cmdArgs, "--history", history)
 	}
 	if hashType != "" && hashType != "sha256" {
-		// Rust 0616727: --hash-type sets the peer's home (content) format.
+		// Rust --hash-type sets the peer's home (content) format. Read in the
+		// live tree at 0480712 (cmd/entity-peer/src/commands/peer.rs,
+		// 2026-08-10); the pin this comment used to carry (0616727) resolves
+		// in no sibling repo, so the capability was right and the provenance
+		// was fiction.
+
 		cmdArgs = append(cmdArgs, "--hash-type", hashType)
 	}
 	if files != "" {
@@ -688,7 +693,10 @@ func startPythonPeer(name, addr string, debug, openAccess bool, history, files, 
 		cmdArgs = append(cmdArgs, "--history", pattern)
 	}
 	if hashType != "" && hashType != "sha256" {
-		// Python ff6d1e2 (v7.70 deletion-marker fix) ships --hash-type.
+		// Python ships --hash-type (packages/entity-cli/.../main.py). Read in
+		// the live tree at e60c822, 2026-08-10; the pin this comment used to
+		// carry (ff6d1e2) resolves in no sibling repo.
+
 		cmdArgs = append(cmdArgs, "--hash-type", hashType)
 	}
 	if files != "" {

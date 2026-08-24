@@ -323,15 +323,15 @@ func probeOperationExclude(client *PeerClient) CheckResult {
 // checks not_before, so a not-yet-valid intermediate is the clean isolation.
 func probePerLinkTemporal(client *PeerClient) CheckResult {
 	now := uint64(time.Now().UnixMilli())
-	future := now + 60*60*1000   // intermediate becomes valid in 1 hour
-	leafExp := now + 5*60*1000   // leaf valid now, expires before parent's window even opens
+	future := now + 60*60*1000 // intermediate becomes valid in 1 hour
+	leafExp := now + 5*60*1000 // leaf valid now, expires before parent's window even opens
 	wildcard := types.GrantEntry{
 		Handlers:   types.CapabilityScope{Include: []string{"system/tree"}},
 		Resources:  types.CapabilityScope{Include: []string{"*"}},
 		Operations: types.CapabilityScope{Include: []string{"*"}},
 	}
 	env, _, err := buildSelfChainExecute(client, []chainCap{
-		{grant: wildcard, notBefore: &future}, // intermediate: not yet valid
+		{grant: wildcard, notBefore: &future},  // intermediate: not yet valid
 		{grant: wildcard, expiresAt: &leafExp}, // leaf: valid now
 	}, serverTreeURI(client), "get", &types.ResourceTarget{Targets: []string{"system/type/system/peer"}})
 	if err != nil {
@@ -482,8 +482,8 @@ func probeContentHashSubstitution(client *PeerClient) CheckResult {
 // transitively by verify_cap_chain; this vector pins it directly.
 func probeChainMidLinkExpiryDenied(client *PeerClient) CheckResult {
 	now := uint64(time.Now().UnixMilli())
-	middleExpired := now - 1                    // middle: expired 1ms ago
-	leafValid := now + 60*60*1000               // leaf: valid for another hour
+	middleExpired := now - 1      // middle: expired 1ms ago
+	leafValid := now + 60*60*1000 // leaf: valid for another hour
 	wildcard := types.GrantEntry{
 		Handlers:   types.CapabilityScope{Include: []string{"system/tree"}},
 		Resources:  types.CapabilityScope{Include: []string{"*"}},
@@ -493,9 +493,9 @@ func probeChainMidLinkExpiryDenied(client *PeerClient) CheckResult {
 	// buildSelfChainExecute roots at the connection cap; the slice below is everything
 	// downstream of it. Three caps in the slice = three-link delegated chain.
 	env, _, err := buildSelfChainExecute(client, []chainCap{
-		{grant: wildcard},                              // root of the self-chain
-		{grant: wildcard, expiresAt: &middleExpired},   // middle: expired
-		{grant: wildcard, expiresAt: &leafValid},       // leaf: valid now
+		{grant: wildcard}, // root of the self-chain
+		{grant: wildcard, expiresAt: &middleExpired}, // middle: expired
+		{grant: wildcard, expiresAt: &leafValid},     // leaf: valid now
 	}, serverTreeURI(client), "get", &types.ResourceTarget{Targets: []string{"system/type/system/peer"}})
 	if err != nil {
 		return fail(catSecurity, "chain_mid_link_expiry_denied", "V7 §5.5", "build: "+err.Error())
@@ -603,10 +603,10 @@ func probeCaptokFormDispatchMintedXpeerPresentedPL(client *PeerClient) CheckResu
 // 3-link self-anchored chain (cap_root → cap_mid → cap_leaf):
 //   - cap_root:  granter=us (validator), grantee=A, resources=/*/*    (frame-invariant)
 //   - cap_mid:   granter=A (foreign),     grantee=B, resources="*"    (FRAME-DEPENDENT
-//                — per §PR-8 canonicalizes against A → /{A}/*; under buggy
-//                local_peer_id frame would canonicalize to /{verifier}/*)
+//     — per §PR-8 canonicalizes against A → /{A}/*; under buggy
+//     local_peer_id frame would canonicalize to /{verifier}/*)
 //   - cap_leaf:  granter=B (foreign),     grantee=us, resources=/{verifier}/system/type/system/peer
-//                (FRAME-INVARIANT — already absolute; canonicalization is a no-op)
+//     (FRAME-INVARIANT — already absolute; canonicalization is a no-op)
 //
 // EXECUTE target = /{verifier}/system/type/system/peer (peer-relative `system/type/system/peer`
 // canonicalizes against the verifier to the absolute form). The leaf's explicit cross-peer
@@ -755,6 +755,7 @@ func probeAuthzAttenuationForeignGranter1(client *PeerClient) CheckResult {
 //
 // Chain-walk subset-checks under CORRECT §PR-8 per-link frame:
 //   - leaf /{verifier}/system/type/system/peer ⊆ mid2 /{B}/*? No  → DENY (and mid2 /{B}/* ⊆ mid1 /{A}/*? also No).
+//
 // Under BUGGY local_peer_id frame at BOTH mids:
 //   - leaf ⊆ mid2 /{verifier}/*? Yes. mid2 /{verifier}/* ⊆ mid1 /{verifier}/*? Yes (equal). → ADMIT.
 //

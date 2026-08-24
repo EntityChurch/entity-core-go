@@ -122,10 +122,10 @@ func TestPeerAADTamperDetection(t *testing.T) {
 //	sender_eph_seed  = 32 bytes of 0x46  (sender ephemeral priv)
 //	plaintext        = ECF(ENC-KAT-INNER) — same canonical inner as §16.2
 //
-// derived recipient_pubkey_hash = content_hash(system/encryption-pubkey{
-//	enc_key_type:0x01, public_key:<recipient_pubkey>,
-//	supported_aead_ids:[0x01], supported_kdf_ids:[0x01], created:0
-// })
+//	derived recipient_pubkey_hash = content_hash(system/encryption-pubkey{
+//		enc_key_type:0x01, public_key:<recipient_pubkey>,
+//		supported_aead_ids:[0x01], supported_kdf_ids:[0x01], created:0
+//	})
 func TestPeerKAT1(t *testing.T) {
 	recipientSeed := bytes.Repeat([]byte{0x45}, 32)
 	senderEphSeed := bytes.Repeat([]byte{0x46}, 32)

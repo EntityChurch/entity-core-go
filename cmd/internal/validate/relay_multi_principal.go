@@ -79,13 +79,13 @@ func runRelayMultiPrincipal(ctx context.Context, clients []*PeerClient) []CheckR
 
 	// State threaded across mpr1 → mpr2.
 	var (
-		destPeerID     string
-		customNS       string
-		aliceHash      hash.Hash
-		bobHash        hash.Hash
-		originalInner  entity.Entity
-		aliceKP        crypto.Keypair
-		storedAtNS     string
+		destPeerID    string
+		customNS      string
+		aliceHash     hash.Hash
+		bobHash       hash.Hash
+		originalInner entity.Entity
+		aliceKP       crypto.Keypair
+		storedAtNS    string
 	)
 
 	r.Run(nameMpr1, func() CheckOutcome {
@@ -142,7 +142,7 @@ func runRelayMultiPrincipal(ctx context.Context, clients []*PeerClient) []CheckR
 		// 3) Build the inner EXECUTE via Alice's client (so Alice's keypair
 		//    signs the inner envelope's invariant-pointer signature).
 		payload := mustCreateEntity("test/relay-multi-principal-payload", map[string]string{
-			"alice": "authored-this-inner",
+			"alice":  "authored-this-inner",
 			"suffix": suffix,
 		})
 		inner, ierr := buildInnerExecute(

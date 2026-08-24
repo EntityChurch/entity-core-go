@@ -52,7 +52,11 @@ func SelfAAD(aeadID, kdfID byte, nonce, kdfSalt []byte, params types.KDFParams) 
 //
 // recipient_key is the inner system/encryption-pubkey content_hash —
 // uniform at every tier per F-GO-1. Hash is ECF-encoded as a CBOR byte
-// string via hash.Hash's own MarshalCBOR (33 bytes: algorithm || digest).
+// string via hash.Hash's own MarshalCBOR (algorithm || digest: 33 bytes
+// under SHA-256, 49 under SHA-384). It is the RECIPIENT's authored hash
+// under the RECIPIENT's home format, never a re-derivation under the
+// sender's (§1.8 / v7.69 §4.5a) — so the algorithm byte in this AAD is the
+// recipient's, and binding it is what makes the discipline observable.
 func PeerAAD(encKeyType, aeadID, kdfID byte, nonce []byte, recipientKey hash.Hash, ephemeralKey []byte) ([]byte, error) {
 	m := map[string]interface{}{
 		"mode":          types.EncryptionModePeer,

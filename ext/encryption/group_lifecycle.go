@@ -27,16 +27,16 @@ import (
 // GroupAddMember produces a new system/encrypted wrapper that extends
 // the given outer entity with one additional member wrap. Inputs:
 //
-//   existing      — the prior wrapper (mode=group). Outer ciphertext,
-//                   nonce, AEAD/KDF id, and existing wraps are reused
-//                   verbatim.
-//   groupAEADKey  — the symmetric outer key. Caller (an existing
-//                   member) recovered this by unwrapping their own
-//                   slot via GroupDecrypt's per-wrap path; this
-//                   primitive does not re-derive it.
-//   newMember     — the X25519 pubkey + hash of the member being
-//                   added, plus optional pinned wrap nonce / ephemeral
-//                   seed for KAT determinism.
+//	existing      — the prior wrapper (mode=group). Outer ciphertext,
+//	                nonce, AEAD/KDF id, and existing wraps are reused
+//	                verbatim.
+//	groupAEADKey  — the symmetric outer key. Caller (an existing
+//	                member) recovered this by unwrapping their own
+//	                slot via GroupDecrypt's per-wrap path; this
+//	                primitive does not re-derive it.
+//	newMember     — the X25519 pubkey + hash of the member being
+//	                added, plus optional pinned wrap nonce / ephemeral
+//	                seed for KAT determinism.
 //
 // The output's wrapped_keys is existing.WrappedKeys || [new_wrap].
 // The outer ciphertext + nonce do not change; only the wrap list
