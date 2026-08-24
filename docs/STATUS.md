@@ -1,6 +1,6 @@
 # entity-core-go — status
 
-_Updated: 2026-08-22 · public: v0.8.0 (`master`)_
+_Updated: 2026-08-24 · released version: the newest git tag on `master` (authoritative in `CHANGELOG.md` + `go.mod`) — deliberately not restated here, so it cannot go stale on a cut_
 
 **This file is the canonical rolling log for this repo** — one file, re-measured
 rather than appended to, and the only status document that publishes. The dated
@@ -30,7 +30,8 @@ two external dependencies (`fxamacker/cbor` for ECF, `mr-tron/base58` for
 PeerID), pure-Go/no-CGo. The build is fully containerized (`make` + `podman`,
 per-invocation resource caps in the `Makefile` / `RESOURCE-CAPS.md`); a fresh
 clone with no sibling repos present builds and tests standalone. Maturity:
-**v0.8.0 research-preview** — publicly released and tagged. The extension
+**pre-1.0 research-preview** — publicly released and tagged (the released
+version is the newest git tag; see `CHANGELOG.md`). The extension
 surface is broad and landed: `inbox`, `subscription`, `continuation`,
 `revision`, `role`, `type` (+`constraint`), `localfiles`, `content`,
 `identity`/`attestation`/`quorum`, `registry`, `relay`, `discovery`,
@@ -1040,6 +1041,27 @@ Ranked roughly by readiness to pick up.
   implementation of the conventions, which is done.
 
 **Cross-impl conformance & quality.**
+- **Published-root §6.5.6 convergence: validate Rust and Python under starvation
+  (pick up after the py/rust release cut).** Go carried a scheduling race in the
+  undebounced publisher — one goroutine per tracked-root advance, each with a
+  CAPTURED root hash, so under CPU contention a late goroutine could publish a
+  STALE root last and strand the published root behind the tracked root (a
+  §6.5.6 convergence failure). It is fixed: the undebounced path now routes
+  every advance through a single newest-wins coalescing slot (see
+  `ext/publishedroot.Publisher` `dirty` / `publishPending`), with deterministic
+  teeth `TestOnTreeChangeRecordsNewestInSlot` and a general scheduling-race net
+  `make test-starved`. The sibling question is open and worth a measured answer,
+  not an inference: **Python looks structurally immune** (boolean `_dirty` +
+  live-root read on a single-threaded asyncio loop), but **Rust's
+  `core/peer/src/published_root.rs` `guarded_publish` DROPS a concurrent
+  republish with no `dirty`/`pending` recovery slot** — structurally the
+  pre-drain-fix "dropped tail" shape Go already fixed, so it is the one to
+  probe. Deliverable: a burst-then-stop convergence stress under
+  `GOMAXPROCS`-starvation (or `--cpus<1`) against live rust + py peers, checking
+  the published root actually catches up to the tracked root, written up as
+  dated per-peer reports under `docs/validation/reports/`. Do NOT root-cause a
+  sibling's internals — measure, report, route. Full account: the
+  `test-starved` candidate discipline in `AGENTS.md`.
 - Stand up dated, oracle-pinned **per-peer conformance reports** for the Rust
   and Python implementations (the local `docs/validation/` reporting tier is
   not part of the published surface yet). Every published number must be
