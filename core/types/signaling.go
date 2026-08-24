@@ -8,7 +8,8 @@ import (
 )
 
 // Signaling extension wire types — the rendezvous/NAT-introduction surface of
-// PROPOSAL-CONNECTIVITY-SIGNALING-AND-PUNCH (§2.2/§3) and PROPOSAL-CONNECTION-NODE.
+// the committed EXTENSION-SIGNALING.md (§4 handler/operations, §6 coordination
+// messages, §7 the punch).
 //
 // entity-core-go builds the CLIENT of this surface; the server/node role is
 // Rust's (see docs and the rust→cohort brief). These structs are the shared
@@ -16,106 +17,109 @@ import (
 // validate harness builds them inline the same way it builds network/relay
 // types. Absent optional fields stay absent (pointer + omitempty), never null.
 //
-// SOURCE OF TRUTH NOTE: the arch signaling corpus is not yet committed upstream
-// (see docs/status). These shapes trace to the rust→cohort build brief's §5
-// wire table; re-diff against the committed spec once it lands.
+// SOURCE OF TRUTH NOTE: reconciled against the committed EXTENSION-SIGNALING.md
+// (2026-07-31 re-diff). The §6.1 coordination messages carry candidates of type
+// system/network/candidate (EXTENSION-NETWORK §6.7.3 — NetworkCandidateData),
+// NOT a signaling-private candidate struct; the pre-v1.0 rust→cohort brief's
+// NATCandidateData (which carried an out-of-spec `priority` field) is retired.
+// Message type names system/nat/* are retained per §6.1/§12 (Open Item #1 defers
+// any system/signaling/* rename to a cohort call).
 
 const (
-	// TypeSignalingOfferRequest is the offer input (§5.1).
+	// TypeSignalingOfferRequest is the offer input (§4.1).
 	TypeSignalingOfferRequest = "system/signaling/offer-request"
-	// TypeSignalingOfferResult is the offer output (§5.1).
+	// TypeSignalingOfferResult is the offer output (§4.1).
 	TypeSignalingOfferResult = "system/signaling/offer-result"
-	// TypeSignalingCollectRequest is the collect input (§5.1).
+	// TypeSignalingCollectRequest is the collect input (§4.1).
 	TypeSignalingCollectRequest = "system/signaling/collect-request"
-	// TypeSignalingCollectResult is the collect output (§5.1).
+	// TypeSignalingCollectResult is the collect output (§4.1).
 	TypeSignalingCollectResult = "system/signaling/collect-result"
-	// TypeSignalingAdvertisement is the advertise output (§5.1).
-	TypeSignalingAdvertisement = "system/signaling/advertisement"
+	// TypeSignalingAdvertiseResult is the advertise output (§4.5, §12).
+	TypeSignalingAdvertiseResult = "system/signaling/advertise-result"
+	// TypeSignalingLimits is the published bucket/TTL limits block (§4.5, §12).
+	TypeSignalingLimits = "system/signaling/limits"
 
-	// TypeNATConnectRequest is the §3 initiator coordination message (§5.4).
+	// TypeNATConnectRequest is the §6 initiator coordination message (§6.1).
 	TypeNATConnectRequest = "system/nat/connect-request"
-	// TypeNATConnectResponse is the §3 responder coordination message (§5.4).
+	// TypeNATConnectResponse is the §6 responder coordination message (§6.1).
 	TypeNATConnectResponse = "system/nat/connect-response"
-	// TypeNATPunchSync is the §3 fire-time coordination message (§5.4).
+	// TypeNATPunchSync is the §6 fire-time coordination message (§6.1, §7.2).
 	TypeNATPunchSync = "system/nat/punch-sync"
 )
 
-// OfferRequestData is the system/signaling/offer-request payload (§5.1).
+// OfferRequestData is the system/signaling/offer-request payload (§4.1).
 //
 // RendezvousKey is a plain 33-byte CBOR bstr (algorithm‖digest, the derived key
 // passed straight through) — NOT a system/hash field: to the node it is opaque
-// bytes. Message is the §4.4 blob (a canonical V7 entity wire encoding).
+// bytes. Message is the §6.2 blob (a canonical V7 entity wire encoding).
 type OfferRequestData struct {
 	RendezvousKey []byte `cbor:"rendezvous_key"`
 	Message       []byte `cbor:"message"`
 }
 
-// OfferResultData is the system/signaling/offer-result payload (§5.1). Ok is
-// always true — a duplicate offer is idempotent and indistinguishable (§5.2).
+// OfferResultData is the system/signaling/offer-result payload (§4.1). Ok is
+// always true — a duplicate offer is idempotent and indistinguishable (§5 pin 1).
 type OfferResultData struct {
 	Ok bool `cbor:"ok"`
 }
 
-// CollectRequestData is the system/signaling/collect-request payload (§5.1).
+// CollectRequestData is the system/signaling/collect-request payload (§4.1).
 type CollectRequestData struct {
 	RendezvousKey []byte `cbor:"rendezvous_key"`
 }
 
-// CollectResultData is the system/signaling/collect-result payload (§5.1).
-// Messages carries the blobs THEMSELVES, not hashes (arch ruling 1); an unknown
-// key yields an empty list and a 200, never a 404 (§5.2).
+// CollectResultData is the system/signaling/collect-result payload (§4.1, §4.4).
+// Messages carries the blobs THEMSELVES, not hashes; an unknown key yields an
+// empty list and a 200, never a 404 (§4.4, §5 pin 1).
 type CollectResultData struct {
 	Messages [][]byte `cbor:"messages"`
 }
 
-// SignalingLimitsData is the bare-map limits block inside an advertisement
-// (§5.1) — a struct field, not a core/entity wrapper.
+// SignalingLimitsData is the system/signaling/limits block inside an
+// advertise-result (§4.5). Field names, units, and defaults are the committed
+// wire contract: max_blob_bytes (default 8192), max_bucket_blobs (default 32),
+// ttl_seconds (default 60, SECONDS not ms). LobbyConstant is the optional
+// `lobby` override — present only if the deployment overrides lobby:default;
+// bytes (primitive/bytes), absent (nil) stays absent via omitempty.
 type SignalingLimitsData struct {
-	BucketTTLMs       uint64 `cbor:"bucket_ttl_ms"`
-	MaxKeys           uint64 `cbor:"max_keys"`
-	MaxMessageBytes   uint64 `cbor:"max_message_bytes"`
-	MaxMessagesPerKey uint64 `cbor:"max_messages_per_key"`
+	MaxBlobBytes   uint64 `cbor:"max_blob_bytes"`
+	MaxBucketBlobs uint64 `cbor:"max_bucket_blobs"`
+	TTLSeconds     uint64 `cbor:"ttl_seconds"`
+	LobbyConstant  []byte `cbor:"lobby_constant,omitempty"`
 }
 
-// AdvertisementData is the system/signaling/advertisement payload (§5.1).
-// Lobby is absent unless the node published an override — pointer + omitempty
-// so absent stays absent (§5.1).
-type AdvertisementData struct {
+// AdvertiseResultData is the system/signaling/advertise-result payload (§4.5).
+// The `lobby` override lives inside Limits.LobbyConstant (§4.5), not as a
+// top-level field. Clients read these limits rather than assuming them — a
+// limit the client does not know is a cross-implementation reject boundary
+// (§4.5).
+type AdvertiseResultData struct {
 	Endpoint string              `cbor:"endpoint"`
 	Limits   SignalingLimitsData `cbor:"limits"`
-	Lobby    *string             `cbor:"lobby,omitempty"`
 }
 
-// NATCandidateData is one §3 dial candidate — a bare map. Address is opaque at the
-// entity layer (the layer never interprets IP:port). Priority is lower-tried-
-// first. Substrate is tcp|quic|webrtc (only tcp ships v1). Type is
-// host|srflx|relay; an unknown class sorts last, never dropped (§5.4).
-type NATCandidateData struct {
-	Address   string `cbor:"address"`
-	Priority  uint64 `cbor:"priority"`
-	Substrate string `cbor:"substrate"`
-	Type      string `cbor:"type"`
-}
-
-// ConnectRequestData is the system/nat/connect-request payload (§5.4).
+// ConnectRequestData is the system/nat/connect-request payload (§6.1).
+// Candidates are system/network/candidate (EXTENSION-NETWORK §6.7.3) — the
+// same type reachability gathering produces; try order derives from the
+// candidate `type` (host→srflx→relay), not a wire priority field.
 type ConnectRequestData struct {
-	Candidates []NATCandidateData `cbor:"candidates"`
-	Initiator  string          `cbor:"initiator"`
-	Nonce      []byte          `cbor:"nonce"`
+	Candidates []NetworkCandidateData `cbor:"candidates"`
+	Initiator  string                 `cbor:"initiator"`
+	Nonce      []byte                 `cbor:"nonce"`
 }
 
-// ConnectResponseData is the system/nat/connect-response payload (§5.4). Nonce
-// is echoed from the request (§4.5 correlation).
+// ConnectResponseData is the system/nat/connect-response payload (§6.1). Nonce
+// is echoed from the request (§6.4 correlation).
 type ConnectResponseData struct {
-	Candidates []NATCandidateData `cbor:"candidates"`
-	Nonce      []byte          `cbor:"nonce"`
-	Responder  string          `cbor:"responder"`
+	Candidates []NetworkCandidateData `cbor:"candidates"`
+	Nonce      []byte                 `cbor:"nonce"`
+	Responder  string                 `cbor:"responder"`
 }
 
-// PunchSyncData is the system/nat/punch-sync payload (§5.4). FireAt is an
+// PunchSyncData is the system/nat/punch-sync payload (§6.1). FireAt is an
 // UNSIGNED integer of milliseconds from the receiving peer's moment of receipt
 // — never a wall-clock instant. uint64 (not int64) is load-bearing: it must
-// encode as CBOR major 0, and a negative value is refused, not clamped (§4.3).
+// encode as CBOR major 0, and a negative value is refused, not clamped (§7.2).
 type PunchSyncData struct {
 	FireAt uint64 `cbor:"fire_at"`
 	Nonce  []byte `cbor:"nonce"`
@@ -141,9 +145,9 @@ func (d CollectResultData) ToEntity() (entity.Entity, error) {
 	return toSignalingEntity(TypeSignalingCollectResult, d)
 }
 
-// ToEntity encodes an advertisement entity.
-func (d AdvertisementData) ToEntity() (entity.Entity, error) {
-	return toSignalingEntity(TypeSignalingAdvertisement, d)
+// ToEntity encodes an advertise-result entity.
+func (d AdvertiseResultData) ToEntity() (entity.Entity, error) {
+	return toSignalingEntity(TypeSignalingAdvertiseResult, d)
 }
 
 // ToEntity encodes a connect-request entity.
@@ -183,9 +187,9 @@ func CollectResultDataFromEntity(e entity.Entity) (CollectResultData, error) {
 	return d, err
 }
 
-// AdvertisementDataFromEntity decodes an advertisement entity's data.
-func AdvertisementDataFromEntity(e entity.Entity) (AdvertisementData, error) {
-	var d AdvertisementData
+// AdvertiseResultDataFromEntity decodes an advertise-result entity's data.
+func AdvertiseResultDataFromEntity(e entity.Entity) (AdvertiseResultData, error) {
+	var d AdvertiseResultData
 	err := ecf.Decode(e.Data, &d)
 	return d, err
 }

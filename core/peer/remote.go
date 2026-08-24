@@ -84,6 +84,13 @@ type remoteState struct {
 	// transport-profile resolution fails — the dialed pool above wins
 	// when both are available. See registerInboundForReentry.
 	inboundConns map[crypto.PeerID]*Connection
+	// preferRelay is the session-local, NEVER-published prefer-relay memo
+	// (NETWORK §10.3 obligation 4 / SIGNALING §7.2): a peer whose direct-path
+	// traversal failed under a §4.1 reconnect is marked here so later reconnects
+	// skip the live-establishment seam and let the relay path carry it. Cleared
+	// once the peer is reachable again. Local optimization only — it is a MAY and
+	// affects nothing on the wire.
+	preferRelay map[crypto.PeerID]bool
 }
 
 // transportTarget is the resolution result for a remote peer's
@@ -184,6 +191,56 @@ func (p *Peer) tryEstablishLive(ctx context.Context, peerID crypto.PeerID) remot
 		return nil
 	}
 	return pooled
+}
+
+// callerOwnedRetryKey marks a live-establishment consultation whose retry is owned
+// by the CALLER — a §4.1 maintain-peer/reconnect continuation whose own backoff is
+// the retry authority. A seam implementation reads it (CallerOwnsRetry) and makes
+// exactly ONE attempt, per NETWORK §10.3 obligation 4 / SIGNALING §7.2: the punch
+// attempt budget and the reconnection backoff MUST NOT nest — nesting multiplies
+// load onto third-party carrier and reflector peers, which the buggy peer never
+// sees locally.
+type callerOwnedRetryKey struct{}
+
+// WithCallerOwnedRetry marks ctx so a live-establishment seam consulted under it
+// makes a single attempt (the caller's own loop owns retry). The §4.1 reconnect
+// path (EnsureConnected) sets this; a §10 dispatch does NOT, so it spends the full
+// §7.2 budget.
+func WithCallerOwnedRetry(ctx context.Context) context.Context {
+	return context.WithValue(ctx, callerOwnedRetryKey{}, true)
+}
+
+// CallerOwnsRetry reports whether ctx was marked by WithCallerOwnedRetry. A live-
+// establishment seam implementation reads it to cap itself at one attempt.
+func CallerOwnsRetry(ctx context.Context) bool {
+	v, _ := ctx.Value(callerOwnedRetryKey{}).(bool)
+	return v
+}
+
+// markPreferRelay records (session-local, never published) that direct-path
+// traversal to peerID failed, so a later §4.1 reconnect skips the seam.
+func (p *Peer) markPreferRelay(peerID crypto.PeerID) {
+	p.remote.mu.Lock()
+	defer p.remote.mu.Unlock()
+	if p.remote.preferRelay == nil {
+		p.remote.preferRelay = make(map[crypto.PeerID]bool)
+	}
+	p.remote.preferRelay[peerID] = true
+}
+
+// clearPreferRelay drops any prefer-relay memo for peerID — called when the peer
+// is reachable again, so a future disconnect re-attempts the punch.
+func (p *Peer) clearPreferRelay(peerID crypto.PeerID) {
+	p.remote.mu.Lock()
+	defer p.remote.mu.Unlock()
+	delete(p.remote.preferRelay, peerID)
+}
+
+// prefersRelay reports whether peerID carries a prefer-relay memo this session.
+func (p *Peer) prefersRelay(peerID crypto.PeerID) bool {
+	p.remote.mu.Lock()
+	defer p.remote.mu.Unlock()
+	return p.remote.preferRelay[peerID]
 }
 
 // RegisterRemote registers a remote peer's transport address in the
@@ -683,8 +740,36 @@ func (p *Peer) removeRemoteConnection(peerID crypto.PeerID) {
 // handler's maintain-peer/reconnect operations compose on — the connect
 // path is exactly the one ordinary dispatch takes, so the handler adds no
 // second establish flow (§A4 discipline).
+//
+// When the ordinary profile-dial fails, EnsureConnected consults the §10.3
+// live-establishment seam (step 3b) so a NAT'd peer can still be reached by a
+// punch — marked CALLER-OWNED (WithCallerOwnedRetry). EnsureConnected is only
+// reached from the §4.1 maintain-peer/reconnect continuations, whose backoff owns
+// the retry loop; the seam runs a single carrier exchange per consult (SIGNALING
+// §7.2 / §10.3 obligation 4 — the exchange budget and the reconnect backoff MUST
+// NOT nest), and the marker carries that boundary to the seam. A session-local
+// prefer-relay memo short-circuits the seam for a peer whose traversal already
+// failed this session, so the loop stops re-punching an untraversable (e.g.
+// symmetric-NAT) peer and lets relay carry it; the memo clears the moment the
+// peer is reachable again.
 func (p *Peer) EnsureConnected(ctx context.Context, peerID crypto.PeerID) error {
 	_, err := p.getRemoteConnection(ctx, peerID)
+	if err == nil {
+		p.clearPreferRelay(peerID)
+		return nil
+	}
+	// No live-establishment seam registered, or this peer is memoed prefer-relay:
+	// preserve the plain-dial error and fall through to the caller's backoff.
+	if p.establishLive == nil || p.prefersRelay(peerID) {
+		return err
+	}
+	if live := p.tryEstablishLive(WithCallerOwnedRetry(ctx), peerID); live != nil {
+		p.clearPreferRelay(peerID)
+		return nil
+	}
+	// One punch attempt failed; §4.1's backoff owns the next try. Memo prefer-relay
+	// so subsequent reconnects skip a punch that just proved untraversable.
+	p.markPreferRelay(peerID)
 	return err
 }
 

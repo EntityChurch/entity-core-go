@@ -535,6 +535,37 @@ func (p *Peer) Connect(ctx context.Context, addr string) (*Connection, error) {
 	return c, nil
 }
 
+// ConnectVia wraps an ALREADY-ESTABLISHED outbound net.Conn as a *Connection and
+// registers it in the peer's connection set — exactly what Connect does after
+// its own net.Dial, minus the dial. It performs no handshake; the caller drives
+// PerformConnect. This is the client-side substrate seam for a transport the
+// peer does not dial itself: the EXTENSION-SIGNALING §7 hole punch dials with
+// SO_REUSEPORT from the reflector's local socket (§7.3), hands the punched conn
+// here, then runs PerformConnect for the §7.4 identity check before returning it
+// through the NETWORK §10.3 live-establishment seam. The punch INITIATOR (the
+// side that offered connect-request) takes the client role.
+func (p *Peer) ConnectVia(conn net.Conn) *Connection {
+	c := newConnection(p, conn)
+	p.addConnection(c)
+	return c
+}
+
+// ServeConn adopts an already-established INBOUND net.Conn and serves it as a
+// server-side connection on a background goroutine — exactly what the Listen
+// accept loop does per accepted socket, minus the Accept. It runs the server
+// handshake (HELLO_RESPONSE / AUTHENTICATE verify) and, on completion, registers
+// the connection for §6.11 reentry reuse. This is the server-side counterpart of
+// ConnectVia: in a §7 punch the RESPONDER (the side that answered with
+// connect-response) takes the server role on the punched conn, so its peer's
+// PerformConnect completes. Serving stops when the connection closes or the
+// peer's serveCtx is cancelled.
+func (p *Peer) ServeConn(conn net.Conn) *Connection {
+	c := newConnection(p, conn)
+	p.addConnection(c)
+	go c.serve(p.serveCtx)
+	return c
+}
+
 // ListenWebSocketReady starts an HTTP listener bound to addr that
 // upgrades incoming requests at urlPath to WebSocket (V7 §6.5.2b) and
 // hands each accepted connection to the same newConnection().serve()

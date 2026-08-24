@@ -58,12 +58,12 @@ const pollInterval = 200 * time.Millisecond
 
 // The candidate payloads mirror Python's byte-for-byte so a diff of the two
 // impls' output lines up. They are opaque to the node and to the entity layer.
-var initiatorCandidates = []types.NATCandidateData{
-	{Type: signaling.CandidateHost, Substrate: signaling.SubstrateTCP, Address: "192.168.1.10:9000", Priority: 0},
-	{Type: "srflx", Substrate: signaling.SubstrateTCP, Address: "203.0.113.7:41234", Priority: 0},
+var initiatorCandidates = []types.NetworkCandidateData{
+	{Type: types.CandidateTypeHost, Substrate: types.CandidateSubstrateTCP, Address: "192.168.1.10:9000"},
+	{Type: types.CandidateTypeSrflx, Substrate: types.CandidateSubstrateTCP, Address: "203.0.113.7:41234"},
 }
-var responderCandidates = []types.NATCandidateData{
-	{Type: signaling.CandidateHost, Substrate: signaling.SubstrateTCP, Address: "192.168.1.11:9000", Priority: 0},
+var responderCandidates = []types.NetworkCandidateData{
+	{Type: types.CandidateTypeHost, Substrate: types.CandidateSubstrateTCP, Address: "192.168.1.11:9000"},
 }
 
 func deriveKey(mode, value string) ([]byte, error) {
@@ -84,7 +84,7 @@ func deriveKey(mode, value string) ([]byte, error) {
 	return nil, fmt.Errorf("unknown --mode %q", mode)
 }
 
-func addrs(cands []types.NATCandidateData) []string {
+func addrs(cands []types.NetworkCandidateData) []string {
 	out := make([]string, 0, len(cands))
 	for _, c := range cands {
 		out = append(out, c.Address)

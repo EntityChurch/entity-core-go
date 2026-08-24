@@ -43,6 +43,7 @@ const catSignaling = "signaling"
 func runSignaling(ctx context.Context, clientA *PeerClient, addr string) []CheckResult {
 	r := NewCheckRunner(catSignaling)
 	r.Declare("signaling_authority", "brief §5.1/§7 — advertise + caller grant covers system/signaling")
+	r.Declare("signaling_limits_shape", "§4.5 — advertise-result carries the committed limits shape (ttl_seconds/max_blob_bytes/max_bucket_blobs)")
 	r.Declare("signaling_meet_tag", "brief §4.1/§4.5 — two peers derive a `tag` key and meet")
 	r.Declare("signaling_meet_secret", "brief §4.1/§4.5 — two peers derive a `secret` key and meet")
 	r.Declare("signaling_meet_lobby", "brief §4.1/§4.5 — two peers derive a `lobby` key and meet")
@@ -92,6 +93,7 @@ func runSignaling(ctx context.Context, clientA *PeerClient, addr string) []Check
 
 	var pool []signaling.PoolMember
 	lobbyConst := signaling.LobbyDefault
+	var advLimits types.SignalingLimitsData
 
 	r.Run("signaling_authority", func() CheckOutcome {
 		status, adv, err := sigA.Advertise(ctx)
@@ -108,10 +110,34 @@ func runSignaling(ctx context.Context, clientA *PeerClient, addr string) []Check
 			return FailCheck("advertise returned an empty endpoint")
 		}
 		pool = []signaling.PoolMember{{Endpoint: adv.Endpoint, Priority: 0}}
-		if adv.Lobby != nil {
-			lobbyConst = *adv.Lobby
+		advLimits = adv.Limits
+		if len(adv.Limits.LobbyConstant) > 0 {
+			lobbyConst = string(adv.Limits.LobbyConstant)
 		}
 		return PassCheck(fmt.Sprintf("node advertises endpoint %q (lobby %q); caller holds signaling authority", adv.Endpoint, lobbyConst))
+	})
+
+	// §4.5 limits shape — the F2 drift catcher. A node still emitting the
+	// pre-v1.0 advertise shape (bucket_ttl_ms / max_message_bytes /
+	// max_messages_per_key) decodes into the committed SignalingLimitsData as
+	// ALL-ZERO, because the field names differ. So a zero-valued limits block is
+	// the signature of a node that has not re-diffed to §4.5 — exactly the drift
+	// that slipped past signaling_authority (which only checks the endpoint) and
+	// that both Go and Rust flagged. WARN, not FAIL: the client is conformant and
+	// the meet only needs the endpoint; this surfaces a NODE-side observation
+	// without gating the meet. The ttl unit is load-bearing (§4.5 ttl_seconds vs
+	// the drifted bucket_ttl_ms is a 1000x reap-race).
+	r.Run("signaling_limits_shape", func() CheckOutcome {
+		if out, ok := r.Require("signaling_authority"); !ok {
+			return out
+		}
+		if advLimits.TTLSeconds == 0 || advLimits.MaxBlobBytes == 0 || advLimits.MaxBucketBlobs == 0 {
+			return WarnCheck(fmt.Sprintf(
+				"advertise-result limits decoded all/partly zero (ttl_seconds=%d max_blob_bytes=%d max_bucket_blobs=%d) — the node likely still emits the pre-§4.5 shape (bucket_ttl_ms/max_message_bytes/max_messages_per_key), which decodes to zero under the committed field names. Re-diff the node's advertise emission to §4.5. See docs/validation/reports/2026-07-31-signaling-redigest-and-punch-stage2-to-arch.md (F2).",
+				advLimits.TTLSeconds, advLimits.MaxBlobBytes, advLimits.MaxBucketBlobs))
+		}
+		return PassCheck(fmt.Sprintf("advertise-result limits match §4.5 shape (ttl_seconds=%d max_blob_bytes=%d max_bucket_blobs=%d)",
+			advLimits.TTLSeconds, advLimits.MaxBlobBytes, advLimits.MaxBucketBlobs))
 	})
 
 	meet := func(name, label string, deriveKey func() ([]byte, error)) {
@@ -144,8 +170,8 @@ func runSignaling(ctx context.Context, clientA *PeerClient, addr string) []Check
 // for a single derived key, and returns Pass only if A ends holding B's
 // nonce-matched response.
 func signalingMeet(ctx context.Context, sigA, sigB *signaling.Client, idA, idB string, key []byte, label string) CheckOutcome {
-	cands := []types.NATCandidateData{
-		{Type: signaling.CandidateHost, Substrate: signaling.SubstrateTCP, Address: "10.0.0.1:9000", Priority: 0},
+	cands := []types.NetworkCandidateData{
+		{Type: types.CandidateTypeHost, Substrate: types.CandidateSubstrateTCP, Address: "10.0.0.1:9000"},
 	}
 	nonce, err := signaling.GenerateNonce()
 	if err != nil {

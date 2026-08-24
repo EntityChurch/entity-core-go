@@ -79,19 +79,20 @@ func (c *Client) Collect(ctx context.Context, key []byte) (uint, [][]byte, error
 	return status, result.Messages, nil
 }
 
-// Advertise reads the node's endpoint, limits, and lobby constant (§5.1). Worth
-// calling before deriving a lobby key: if the node overrides the constant and
-// the peer derives from LobbyDefault anyway, it lands in a bucket nobody else on
-// that pool uses. advertise takes no arguments, but an EXECUTE still carries a
-// params entity and an empty data is rejected — so we send an empty CBOR map.
-func (c *Client) Advertise(ctx context.Context) (uint, types.AdvertisementData, error) {
+// Advertise reads the node's endpoint and limits — including the optional
+// lobby_constant override inside limits (§4.5). Worth calling before deriving a
+// lobby key: if the node overrides the constant and the peer derives from
+// LobbyDefault anyway, it lands in a bucket nobody else on that pool uses.
+// advertise takes no arguments, but an EXECUTE still carries a params entity and
+// an empty data is rejected — so we send an empty CBOR map.
+func (c *Client) Advertise(ctx context.Context) (uint, types.AdvertiseResultData, error) {
 	status, resultEnt, err := c.execute(ctx, OpAdvertise, emptyParams())
 	if err != nil || status != 200 {
-		return status, types.AdvertisementData{}, err
+		return status, types.AdvertiseResultData{}, err
 	}
-	result, err := types.AdvertisementDataFromEntity(resultEnt)
+	result, err := types.AdvertiseResultDataFromEntity(resultEnt)
 	if err != nil {
-		return status, types.AdvertisementData{}, fmt.Errorf("decode advertisement: %w", err)
+		return status, types.AdvertiseResultData{}, fmt.Errorf("decode advertise-result: %w", err)
 	}
 	return status, result, nil
 }

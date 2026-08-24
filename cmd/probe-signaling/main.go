@@ -129,7 +129,7 @@ func discoverPool(ctx context.Context, dialAddrs []string, verbose bool) ([]sign
 			continue
 		}
 		if verbose {
-			fmt.Printf("  advertise %s → endpoint=%q lobby=%v limits=%+v\n", addr, adv.Endpoint, adv.Lobby, adv.Limits)
+			fmt.Printf("  advertise %s → endpoint=%q limits=%+v\n", addr, adv.Endpoint, adv.Limits)
 		}
 		members = append(members, signaling.PoolMember{Endpoint: adv.Endpoint, Priority: 0})
 		byEndpoint[adv.Endpoint] = node{dialAddr: addr, endpoint: adv.Endpoint, peerID: peerID}
@@ -153,8 +153,8 @@ func meet(ctx context.Context, target node, kpA, kpB crypto.Keypair, idA, idB st
 	clientA := signaling.NewClient(ca)
 	clientB := signaling.NewClient(cb)
 
-	cands := []types.NATCandidateData{
-		{Type: signaling.CandidateHost, Substrate: signaling.SubstrateTCP, Address: "10.0.0.1:9000", Priority: 0},
+	cands := []types.NetworkCandidateData{
+		{Type: types.CandidateTypeHost, Substrate: types.CandidateSubstrateTCP, Address: "10.0.0.1:9000"},
 	}
 	nonce := mustNonce()
 

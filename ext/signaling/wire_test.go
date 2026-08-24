@@ -11,15 +11,17 @@ import (
 	cbor "github.com/fxamacker/cbor/v2"
 )
 
-// §4 dial order: class first (host → srflx → relay), then priority ascending,
-// then address. An unknown class sorts LAST rather than being dropped.
+// §7.1 dial order: class first (host → srflx → relay, via CandidatePriority),
+// then address. An unknown class sorts LAST rather than being dropped. There is
+// no wire priority field on system/network/candidate (§6.7.3) — try order is a
+// pure function of the candidate `type`.
 func TestCandidatesOrderHostThenSrflxThenRelay(t *testing.T) {
-	in := []types.NATCandidateData{
-		{Type: CandidateRelay, Substrate: SubstrateTCP, Address: "r:1", Priority: 0},
-		{Type: "mystery", Substrate: SubstrateTCP, Address: "u:1", Priority: 0},
-		{Type: CandidateSRFLX, Substrate: SubstrateTCP, Address: "s:2", Priority: 5},
-		{Type: CandidateSRFLX, Substrate: SubstrateTCP, Address: "s:1", Priority: 5},
-		{Type: CandidateHost, Substrate: SubstrateTCP, Address: "h:1", Priority: 9},
+	in := []types.NetworkCandidateData{
+		{Type: types.CandidateTypeRelay, Substrate: types.CandidateSubstrateTCP, Address: "r:1"},
+		{Type: "mystery", Substrate: types.CandidateSubstrateTCP, Address: "u:1"},
+		{Type: types.CandidateTypeSrflx, Substrate: types.CandidateSubstrateTCP, Address: "s:2"},
+		{Type: types.CandidateTypeSrflx, Substrate: types.CandidateSubstrateTCP, Address: "s:1"},
+		{Type: types.CandidateTypeHost, Substrate: types.CandidateSubstrateTCP, Address: "h:1"},
 	}
 	got := OrderForDialing(in)
 	wantOrder := []string{"h:1", "s:1", "s:2", "r:1", "u:1"}
@@ -41,7 +43,7 @@ func TestCandidatesOrderHostThenSrflxThenRelay(t *testing.T) {
 	}
 }
 
-// §4.1: PunchDelay never falls below the one-way carrier latency (rtt/2). Since
+// §7.2: PunchDelay never falls below the one-way carrier latency (rtt/2). Since
 // d = max(rtt, floor) and d ≥ rtt implies d ≥ rtt/2, the guarantee holds for any
 // rtt.
 func TestPunchDelayNeverBelowOneWayLatency(t *testing.T) {
@@ -110,7 +112,7 @@ func TestNegativeFireAtIsRefusedNotClamped(t *testing.T) {
 	}
 }
 
-// §4.4: a blob round trip preserves the message TYPE. connect-request and
+// §6.2: a blob round trip preserves the message TYPE. connect-request and
 // connect-response differ only by a field name, so classifying by type (not by
 // sniffing keys) is what keeps them apart in a mixed bucket.
 func TestBlobRoundTripPreservesTheMessageType(t *testing.T) {
@@ -118,8 +120,8 @@ func TestBlobRoundTripPreservesTheMessageType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cands := []types.NATCandidateData{
-		{Type: CandidateHost, Substrate: SubstrateTCP, Address: "10.0.0.1:9000", Priority: 0},
+	cands := []types.NetworkCandidateData{
+		{Type: types.CandidateTypeHost, Substrate: types.CandidateSubstrateTCP, Address: "10.0.0.1:9000"},
 	}
 
 	reqEnt, err := types.ConnectRequestData{Candidates: cands, Initiator: "peer-A", Nonce: nonce}.ToEntity()
@@ -160,7 +162,7 @@ func TestBlobRoundTripPreservesTheMessageType(t *testing.T) {
 	}
 }
 
-// §4.5: an unrecognized blob classifies as Unknown, not an error. A future
+// §6.4: an unrecognized blob classifies as Unknown, not an error. A future
 // message type this build has never seen is MUST-ignore.
 func TestUnrecognizedBlobClassifiesAsUnknownNotAnError(t *testing.T) {
 	raw, err := ecf.Encode(map[string]interface{}{"hello": "world"})
@@ -184,12 +186,12 @@ func TestUnrecognizedBlobClassifiesAsUnknownNotAnError(t *testing.T) {
 	}
 }
 
-// §4.5: FindResponse requires the nonce echo AND skips my own peer-id. A shared
+// §6.4: FindResponse requires the nonce echo AND skips my own peer-id. A shared
 // bucket holds other pairs' traffic and my own re-read offers.
 func TestFindResponseRequiresNonceEchoAndSkipsSelf(t *testing.T) {
 	mine, _ := GenerateNonce()
 	other, _ := GenerateNonce()
-	cands := []types.NATCandidateData{{Type: CandidateHost, Substrate: SubstrateTCP, Address: "a:1", Priority: 0}}
+	cands := []types.NetworkCandidateData{{Type: types.CandidateTypeHost, Substrate: types.CandidateSubstrateTCP, Address: "a:1"}}
 
 	mkResp := func(responder string, nonce []byte) CollectedMessage {
 		d := types.ConnectResponseData{Candidates: cands, Nonce: nonce, Responder: responder}
@@ -215,11 +217,11 @@ func TestFindResponseRequiresNonceEchoAndSkipsSelf(t *testing.T) {
 	}
 }
 
-// §4.5: FindRequest skips my own offers (collect is non-destructive, so I re-read
+// §6.4: FindRequest skips my own offers (collect is non-destructive, so I re-read
 // what I wrote).
 func TestFindRequestSkipsMyOwn(t *testing.T) {
 	nonce, _ := GenerateNonce()
-	cands := []types.NATCandidateData{{Type: CandidateHost, Substrate: SubstrateTCP, Address: "a:1", Priority: 0}}
+	cands := []types.NetworkCandidateData{{Type: types.CandidateTypeHost, Substrate: types.CandidateSubstrateTCP, Address: "a:1"}}
 	mkReq := func(initiator string) CollectedMessage {
 		d := types.ConnectRequestData{Candidates: cands, Initiator: initiator, Nonce: nonce}
 		return CollectedMessage{Kind: KindConnectRequest, Request: &d}
