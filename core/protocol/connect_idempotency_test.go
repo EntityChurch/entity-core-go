@@ -93,3 +93,82 @@ func TestConnect_R3a_GranterIdempotency(t *testing.T) {
 		t.Fatalf("R3a violated: distinct remotes collapsed onto a single token (%s)", g1.Token)
 	}
 }
+
+// TestConnect_RT6_NonceSingleUse pins RT-6 (§4.6): the issued handshake nonce
+// is single-use. A SECOND authenticate on the SAME connection (same connection
+// state, replaying the consumed nonce) MUST be rejected with 401 invalid_nonce.
+// The mechanism is impl-defined — Go tracks post-handshake established state —
+// but the status is pinned: a generic 409 connection_already_established (the
+// pre-RT-6 behavior) under-signals a replay to the peer. This is the
+// same-connection complement to R3a idempotency, which re-handshakes on a
+// FRESH connection (fresh nonce) and legitimately returns 200.
+func TestConnect_RT6_NonceSingleUse(t *testing.T) {
+	localKP, _ := crypto.Generate()
+	remoteKP, _ := crypto.Generate()
+
+	ch, err := NewConnectHandler(localKP, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := handler.NewRegistry()
+	reg.Register("system/protocol/connect", ch)
+
+	cs := store.NewMemoryContentStore()
+	li := store.NewNamespacedIndex(store.NewMemoryLocationIndex(), string(localKP.PeerID()))
+	if err := SeedHandlersFromRegistry(cs, li, reg); err != nil {
+		t.Fatal(err)
+	}
+	d := NewDispatcher(reg, cs, li, localKP, nil)
+
+	// One connection state, reused for both authenticate legs (same nonce).
+	cstate := NewConnectionState()
+
+	helloEnv, _, err := CreateHelloExecute(remoteKP, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.DispatchEnvelope(context.Background(), helloEnv, cstate); err != nil {
+		t.Fatalf("hello dispatch: %v", err)
+	}
+
+	// Leg 1: valid authenticate consumes the nonce — 200.
+	authEnv, err := CreateAuthenticateExecute(remoteKP, cstate.OurNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp1, err := d.DispatchEnvelope(context.Background(), authEnv, cstate)
+	if err != nil {
+		t.Fatalf("authenticate dispatch: %v", err)
+	}
+	rd1, err := types.ExecuteResponseDataFromEntity(resp1.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rd1.Status != 200 {
+		t.Fatalf("first authenticate: got status %d, want 200", rd1.Status)
+	}
+
+	// Leg 2: replay the identical authenticate on the same connection state.
+	resp2, err := d.DispatchEnvelope(context.Background(), authEnv, cstate)
+	if err != nil {
+		t.Fatalf("replay authenticate dispatch: %v", err)
+	}
+	rd2, err := types.ExecuteResponseDataFromEntity(resp2.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rd2.Status != 401 {
+		t.Fatalf("RT-6: replayed authenticate got status %d, want 401 invalid_nonce (a non-401 under-signals the replay)", rd2.Status)
+	}
+	var errEnt entity.Entity
+	if err := ecf.Decode(rd2.Result, &errEnt); err != nil {
+		t.Fatalf("decode replay error result entity: %v", err)
+	}
+	var errData types.ErrorData
+	if err := ecf.Decode(errEnt.Data, &errData); err != nil {
+		t.Fatalf("decode replay error data: %v", err)
+	}
+	if errData.Code != "invalid_nonce" {
+		t.Fatalf("RT-6: replayed authenticate code %q, want invalid_nonce", errData.Code)
+	}
+}

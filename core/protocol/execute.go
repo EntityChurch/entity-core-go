@@ -17,7 +17,6 @@ import (
 	"go.entitychurch.org/entity-core-go/core/types"
 )
 
-
 // DispatchEnvelope processes an incoming wire envelope from a remote peer.
 // Returns an execute response envelope, or an error.
 // For locally-originated envelopes that may target remote peers, use DispatchLocalEnvelope.
@@ -67,6 +66,17 @@ func (d *Dispatcher) handleExecute(ctx context.Context, env entity.Envelope, con
 			return d.dispatchToHandler(ctx, handlerPath, execData, env, connState)
 		}
 		if connState != nil && connState.Completed {
+			// RT-6 (§4.6): a second authenticate on an already-established
+			// connection replays the consumed single-use nonce. The anti-replay
+			// property MUST surface as 401 invalid_nonce — the mechanism
+			// (established-state tracking here) is impl-defined, only the status
+			// is pinned. A generic 409 connection_already_established
+			// under-signals the replay to the peer, so authenticate is special-
+			// cased; other connect ops keep 409. (Fresh-connection re-handshakes
+			// — R3a idempotency — carry a fresh nonce and never reach this path.)
+			if execData.Operation == "authenticate" {
+				return d.makeErrorResponse(execData.RequestID, 401, "invalid_nonce", "authenticate nonce already consumed (single-use per §4.6; connection already established)")
+			}
 			return d.makeErrorResponse(execData.RequestID, 409, "connection_already_established", "connection already established")
 		}
 		if connState != nil {

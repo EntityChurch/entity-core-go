@@ -123,10 +123,13 @@ func (h *Handler) handleInstall(ctx context.Context, req *handler.Request) (*han
 			return handler.NewErrorResponse(400, "invalid_continuation",
 				"on_incomplete requires completion_deadline_ms — without a deadline no round is ever incomplete")
 		}
-		// A fresh install starts a fresh round: never inherit a round clock or
-		// per-slot statuses from the caller's params.
+		// A fresh install starts a fresh round: never inherit a round clock,
+		// per-slot statuses, or a round generation from the caller's params. A
+		// join installed pre-set to round 500 would silently reject every slot
+		// tagged for round 0 (§4.1) until the fan-out caught up.
 		joinData.RoundStartedMs = nil
 		joinData.ReceivedStatus = nil
+		joinData.RoundID = 0
 		dispatchCap = joinData.DispatchCapability
 		installedJoin = &joinData
 		var err error

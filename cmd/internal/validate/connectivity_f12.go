@@ -123,7 +123,136 @@ func runHandshakeProofChecks(ctx context.Context, addr string) []CheckResult {
 	// nonce is bound per-connection against a genuinely valid authenticate.
 	checks = append(checks, probeReplayCrossConnection(ctx, addr, baselineOK))
 
+	// Probe (RT-6, §4.6 nonce single-use): the issued handshake nonce is
+	// single-use. A *second* authenticate on the SAME connection replaying the
+	// SAME (now-consumed) nonce MUST be rejected with the PINNED status
+	// `401 invalid_nonce`. This is stricter than the cross-connection probe
+	// above (which only asserts != 200 against a per-connection nonce): RT-6
+	// pins the status/code, because the status is cross-peer-observable and a
+	// `409`/state-conflict (or a silent idempotent 200) under-signals a replay.
+	// The anti-replay MECHANISM stays impl-defined (explicit nonce-invalidation
+	// or post-handshake established-state); only the rejection status is pinned.
+	checks = append(checks, probeNonceSingleUse(ctx, addr, baselineOK))
+
 	return checks
+}
+
+// probeNonceSingleUse completes one full hello+authenticate on a single
+// connection (consuming the issued nonce), then replays the very same valid
+// authenticate on that same connection. Per RT-6 (§4.6) the consumed nonce is
+// single-use, so the second authenticate MUST be rejected with 401
+// invalid_nonce. A responder that returns 200 (idempotent re-auth) or a
+// non-401 rejection (e.g. 409 state-conflict) is non-conformant.
+func probeNonceSingleUse(ctx context.Context, addr string, baselineOK bool) CheckResult {
+	const cat = catConnectivity
+	const name = "handshake_nonce_single_use"
+	const ref = "V7 §4.6 / RT-6"
+	const desc = "a second authenticate replaying the consumed nonce on the same connection"
+
+	pc, err := NewPeerClient(addr)
+	if err != nil {
+		return warn(cat, name, ref, "could not create probe client: "+err.Error())
+	}
+	defer pc.Close()
+	if err := pc.Connect(ctx); err != nil {
+		return warn(cat, name, ref, "probe connect failed: "+err.Error())
+	}
+
+	issuedNonce, err := probeHelloNonce(ctx, pc)
+	if err != nil {
+		return warn(cat, name, ref, "probe hello failed: "+err.Error())
+	}
+	authEnv, err := protocol.CreateAuthenticateExecute(pc.keypair, issuedNonce)
+	if err != nil {
+		return warn(cat, name, ref, "could not build valid authenticate: "+err.Error())
+	}
+
+	// Leg 1: the valid authenticate MUST be accepted (consumes the nonce). If
+	// it is not accepted, the second-authenticate result is unattributable.
+	status1, ok := sendAuthAndReadStatus(ctx, pc, authEnv)
+	if !ok || status1 != 200 {
+		if !baselineOK {
+			return warn(cat, name, ref, "first (valid) authenticate did not return 200 and the fresh-connection baseline also did not hold — cannot attribute a replay verdict")
+		}
+		return warn(cat, name, ref, fmt.Sprintf("first (valid) authenticate returned status %d (ok=%v; expected 200) — cannot probe single-use without a consumed nonce", status1, ok))
+	}
+
+	// Leg 2: replay the identical valid authenticate on the same connection.
+	// A write failure here means the connection was torn down AFTER leg-1's
+	// success but BEFORE the replay was delivered — the replay never reached
+	// the peer's logic, so the single-use verdict is unattributable (WARN, not
+	// a security fail). This is distinct from a close that follows a delivered
+	// replay (the read path below).
+	if err := pc.writeEnvelope(ctx, authEnv); err != nil {
+		// Pre-delivery write-fail close: the connection was torn down AFTER
+		// leg-1's success but BEFORE the replay was delivered, so the replay
+		// never landed on the peer's logic. Per the RT-6 outcome ladder
+		// (HANDOFF-2026-07-28 arch ruling) this is `unmeasured` (WARN) — the
+		// replay was never measured; re-run under skip semantics (§3.1(2)).
+		res := warn(cat, name, ref, "replay write failed after a successful first authenticate — the connection closed before the replay was delivered, so the peer never received it; the single-use verdict is unattributable, re-run (RT-6 needs the peer to receive the replay and reject it with 401 invalid_nonce): "+err.Error())
+		res.Details = map[string]string{"rt6_class": "unmeasured"}
+		return res
+	}
+	// The replay HAS been delivered. A close emitting nothing here does NOT
+	// prove acceptance: a bare close is indistinguishable from a silent reject
+	// (reject-by-disconnect) and a silent accept-then-close. Per the RT-6
+	// outcome ladder (HANDOFF-2026-07-28 arch ruling, applying the F40-Row-A
+	// discipline — the observable must not assert a cause it can't prove) this
+	// is `no-rejection-proof`: FAIL (fail-closed — rejection is UNPROVEN), but
+	// scored DISTINCTLY from `replay-accepted` (a demonstrable accept). One
+	// needs a code fix (emit 401 invalid_nonce); the other needs source
+	// inspection to tell silent-reject from silent-accept. RT-6 §4.6 requires
+	// an explicit 401 invalid_nonce.
+	respBytes, err := pc.readFrame(ctx)
+	if err != nil {
+		if baselineOK {
+			res := fail(cat, name, ref, "FAIL:no-rejection-proof — "+desc+" got a connection CLOSE emitting nothing (no response frame) after the replay was delivered — a bare close does not PROVE rejection (it may be silent-reject-by-disconnect OR silent-accept-then-close); RT-6 §4.6 requires an explicit 401 invalid_nonce. Fail-closed and scored distinctly from replay-accepted per HANDOFF-2026-07-28 (rejection unproven — source inspection needed to tell silent-reject from silent-accept): "+err.Error())
+			res.Details = map[string]string{"rt6_class": "no-rejection-proof"}
+			return res
+		}
+		return warn(cat, name, ref, "replay read failed and baseline did not hold: "+err.Error())
+	}
+	var respEnv entity.Envelope
+	if err := ecf.Decode(respBytes, &respEnv); err != nil {
+		return warn(cat, name, ref, "could not decode replay response envelope: "+err.Error())
+	}
+	status2, code, _, err := extractStatusAndCode(respEnv)
+	if err != nil {
+		return warn(cat, name, ref, "could not decode replay response status/code: "+err.Error())
+	}
+
+	// RT-6 outcome ladder (HANDOFF-2026-07-28 arch ruling — replaces the
+	// 2026-07-27 close→replay-accepted lumping). Every bin carries a distinct
+	// rt6_class in Details so keystone's census scores each attributably:
+	//
+	//   401 invalid_nonce      → conformant   (PASS  — proven correct rejection)
+	//   other 401              → other-401    (WARN  — rejected via a different path)
+	//   409 / non-401 reject   → wrong-status (FAIL  — safe: proven rejection, wrong code)
+	//   2xx / proceeds authed  → replay-accepted (FAIL — security: PROVEN acceptance)
+	//
+	// `replay-accepted` requires a *demonstrable* accept (a 2xx here); it is
+	// NOT the silent-close case (that is `no-rejection-proof`, handled above).
+	// The two FAIL classes must never share a label — one is a status
+	// migration, the other an exploitable anti-replay hole.
+	switch {
+	case status2 >= 200 && status2 < 300:
+		res := fail(cat, name, ref,
+			fmt.Sprintf("FAIL:replay-accepted — %s was ACCEPTED (status %d) — the consumed nonce is not single-use; a replayed authenticate is honored (RT-6 §4.6 anti-replay hole, security class — a PROVEN accept)", desc, status2))
+		res.Details = map[string]string{"rt6_class": "replay-accepted"}
+		return res
+	case status2 == 401 && code == "invalid_nonce":
+		res := pass(cat, name, ref, desc+" rejected with 401 invalid_nonce (RT-6 §4.6 single-use satisfied)")
+		res.Details = map[string]string{"rt6_class": "conformant"}
+		return res
+	case status2 == 401:
+		res := warn(cat, name, ref, fmt.Sprintf("%s rejected with 401 but code=%q (rejected via a different path, e.g. missing_author; RT-6 pins 401 invalid_nonce)", desc, code))
+		res.Details = map[string]string{"rt6_class": "other-401"}
+		return res
+	default:
+		res := fail(cat, name, ref, fmt.Sprintf("FAIL:wrong-status — %s rejected with status %d code=%q (e.g. 409 state-conflict) — the replay was NOT accepted (wrong-but-safe), but RT-6 §4.6 pins 401 invalid_nonce; a non-401 status under-signals a replay to the peer. Distinct from FAIL:replay-accepted, which is exploitable.", desc, status2, code))
+		res.Details = map[string]string{"rt6_class": "wrong-status"}
+		return res
+	}
 }
 
 // probeReplayCrossConnection builds a fully valid authenticate against

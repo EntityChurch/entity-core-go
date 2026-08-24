@@ -204,6 +204,18 @@ const (
 	// The round is observably failed rather than silently folded into a
 	// boundary entity computed from an error payload.
 	ChainErrorReasonJoinErrorSlot = "join_error_slot"
+
+	// ChainErrorReasonJoinLate: a slot advance targeted a round that is no
+	// longer current — a straggler from an abandoned (or already-fired) round
+	// arriving after the join advanced to the next generation (§4.1 "drop
+	// stale, loudly"). The slot is NOT admitted; the marker names the stale
+	// slot and the round it targeted so lateness is observable, not merely
+	// survived — a silently mixed generation is worse than a dropped round.
+	//
+	// Go's proposed spelling — §4.1 requires "a lost/late marker naming the
+	// stale slot" and pins no code. Routed for cohort pinning alongside the
+	// round_id field.
+	ChainErrorReasonJoinLate = "join_late"
 )
 
 // V7 §6.12 — per-request transport error codes. Used as the {reason}
@@ -405,6 +417,27 @@ type ContinuationJoinData struct {
 	// key at all, so its entity bytes and its assembled params are identical to
 	// what they were before this proposal. Failure-path only.
 	ReceivedStatus map[string]uint `cbor:"received_status,omitempty"`
+
+	// RoundID is the join's current round generation (STANDING-MODEL §4.1 — the
+	// abandon straggler guard, a MUST). Incremented on every round turnover
+	// (abandon-reset, fire-reset, fire-partial-reset). A slot advance carries
+	// the round_id it targets (ContinuationAdvanceRequestData.RoundID); a slot
+	// whose round_id ≠ this MUST NOT be admitted — otherwise a straggler from an
+	// abandoned round N lands in round N+1's slot and the round is stitched from
+	// two generations, a boundary hash that is wrong, deterministic-looking, and
+	// reproducible (the silent seam-collapse the compute POC exists to prevent).
+	//
+	// Scoped to deadline-carrying joins (the joins §4.1's abandon path applies
+	// to): a pre-§4 wait-forever join never turns a round over via abandon and
+	// carries no round_id, so `omitempty` keeps its bytes identical to today. The
+	// guard engages only when BOTH the join is deadline-carrying and the advance
+	// opts in by tagging its round_id — additive, no silent change.
+	//
+	// Wire-visible on a spec'd type, so cross-impl-observable: §6 R3(a) pins
+	// `round_id: uint` on the join echoed on each slot advance. The exact spelling
+	// and the late-drop reason code were routed to arch and are now PINNED by
+	// EXTENSION-CONTINUATION §3.5a (v1.21): `round_id` (§2.3) + reason `join_late`.
+	RoundID uint64 `cbor:"round_id,omitempty"`
 }
 
 // IncompleteRound reports whether the join's current round has begun and
@@ -573,6 +606,13 @@ func ContinuationInstallResultDataFromEntity(e entity.Entity) (ContinuationInsta
 type ContinuationAdvanceRequestData struct {
 	Result cbor.RawMessage `cbor:"result,omitempty"`
 	Status *uint           `cbor:"status,omitempty"`
+
+	// RoundID, when present, is the join round this slot advance targets
+	// (STANDING-MODEL §4.1). Optional: absent → untracked (pre-§4.1 behavior,
+	// admitted as today); present → the join admits the slot only if it matches
+	// the join's current RoundID, else drops it loudly with a join_late marker.
+	// Only meaningful for a join-slot advance on a deadline-carrying join.
+	RoundID *uint64 `cbor:"round_id,omitempty"`
 }
 
 // ToEntity creates a system/continuation/advance-request entity.

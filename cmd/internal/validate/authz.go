@@ -37,6 +37,7 @@ package validate
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
@@ -88,6 +89,12 @@ func runAuthz(ctx context.Context, client *PeerClient) []CheckResult {
 		"V7 v7.71 §A4-AUTHZ (AUTHZ-NO-CATCHALL-1): granter identity unresolvable during chain verify MUST surface 403 capability_denied (§5.5 `granter is null → DENY`) — explicit regression pin against the verification_failed catch-all")
 	r.Declare("authz_expired_1",
 		"V7 v7.71 §A4-AUTHZ (AUTHZ-EXPIRED-1): cap used after expires_at MUST surface 403 capability_denied as the default code (§5.6 / §5.2 validity — NOT a separate capability_expired string)")
+	r.Declare("f40_id_scope_include_control",
+		"V7 §5.2 / F40 — control row A (VECTOR-SPEC-2026-07-27): the include-only grant (NO exclude) MUST allow a real `get`. This is the positive control that isolates the exclude entry so a Row-B deny is attributable to canonicalization and not an unrelated policy deny.")
+	r.Declare("f40_id_scope_exclude_literal",
+		"V7 §5.2 / F40 — operations/peers are id-scope (literal match): an operations exclude \"/*/get\" is a literal string that MUST NOT be canonicalized as a §5.4 path and block a real `get`. Scored on the A→B differential (VECTOR-SPEC-2026-07-27): (ALLOW,ALLOW)=PASS literal · (ALLOW,DENY)=FAIL canonicalization · (DENY,DENY)=unrelated deny, not F40.")
+	r.Declare("f40_id_scope_include_no_overgrant",
+		"V7 §5.2 / F40 — a path-syntax operations include (probed across /*/get, /{local}/get, /*/*, /*/{peer}) matches only the literal op string; none may canonicalize as a path and over-grant a real `get` (reject-path complement; a canonicalizing peer wrongly allows at least one)")
 
 	roleURI := fmt.Sprintf("entity://%s/system/role", client.RemotePeerID())
 	treeURI := fmt.Sprintf("entity://%s/system/tree", client.RemotePeerID())
@@ -570,6 +577,148 @@ func runAuthz(ctx context.Context, client *PeerClient) []CheckResult {
 		return FailCheck(fmt.Sprintf("AUTHZ-EXPIRED-1 FAIL: returned status=%d code=%q; v7.71 pins 403 capability_denied", status, code))
 	})
 
+	r.Run("f40_id_scope_include_control", func() CheckOutcome {
+		// F40 control Row A (VECTOR-SPEC-2026-07-27): the exact Row-B grant
+		// MINUS the exclude entry — an operations include of only "get" over
+		// cross-peer resources "/*/*". With no exclude in play, a `get` MUST be
+		// ALLOWED on any conformant peer regardless of how it matches id-scope.
+		// This row establishes the positive baseline so that Row B's deny (if
+		// any) is attributable to the exclude entry alone, not to some
+		// unrelated policy. A deny here means the differential is unattributable
+		// (DENY,* = not an F40 canonicalization defect), so this is WARN, not a
+		// canonicalization FAIL.
+		if len(client.Grants()) == 0 {
+			return SkipCheck("no authenticated grants to attenuate from")
+		}
+		allowA, statusA, codeA, err := probeF40Row(client, treeURI, false)
+		if err != nil {
+			return FailCheck("F40 control row A: " + err.Error())
+		}
+		det := map[string]any{"row": "A", "status": statusA, "code": codeA, "allow": allowA}
+		if allowA {
+			return PassCheck("F40 control row A: include-only grant (no exclude) ALLOWED a `get` — positive baseline holds; Row B's verdict is now attributable to the exclude entry (VECTOR-SPEC-2026-07-27)").WithDetails(det)
+		}
+		return WarnCheck(fmt.Sprintf("F40 control row A: include-only grant (no exclude) DENIED a `get` (status=%d code=%q) — the baseline itself refuses, so the exclude-row differential is unattributable to id-scope typing (DENY,* = not an F40 canonicalization defect). Investigate the unrelated deny before scoring F40.", statusA, codeA)).WithDetails(det)
+	})
+
+	r.Run("f40_id_scope_exclude_literal", func() CheckOutcome {
+		// F40 (§5.2 id-scope grammar): operations/peers are id-scope
+		// dimensions matched as LITERAL strings (only bare "*" and a trailing
+		// "/*"), NOT through §5.4 path canonicalization. The highest-value
+		// accept-path row: an operations EXCLUDE of "/*/get". Read literally,
+		// "/*/get" is an operation string that does not equal "get", so the
+		// exclude does NOT fire and a `get` is ALLOWED. A peer that routes
+		// id-scope through path canonicalization reads "/*/get" as
+		// /{any-peer}/get, matches the request, and wrongly DENIES.
+		//
+		// Scored on the A→B DIFFERENTIAL (VECTOR-SPEC-2026-07-27), not Row B's
+		// deny in isolation: the exclude entry is the ONLY variable between the
+		// control (Row A, include-only) and this probe (Row B, include+exclude),
+		// so a verdict flip is attributable to it and nothing else. A bare 403
+		// can arise from any unrelated policy; without the control it cannot be
+		// pinned to canonicalization (this is the confound that false-positived
+		// swift). Attribution:
+		//   (ALLOW,ALLOW) = literal matcher, exclude never fires → PASS
+		//   (ALLOW,DENY)  = the exclude entry alone flipped the verdict → FAIL, cause=canonicalization
+		//   (DENY,DENY)   = baseline denies regardless → unrelated deny, NOT an F40 defect → WARN (exonerate)
+		//   (DENY,ALLOW)  = adding an exclude widened access → incoherent → WARN (harness/setup error)
+		if len(client.Grants()) == 0 {
+			return SkipCheck("no authenticated grants to attenuate from")
+		}
+		// Resources use the cross-peer "/*/*" pattern (pass-through absolute
+		// canonicalization → covers the responder's subtree), NOT bare "*".
+		// Bare "*" canonicalizes against the child cap's GRANTER (this client,
+		// per PR-8) → /{client}/*, which never covers the responder's
+		// namespace and would 403 on the RESOURCE dimension — confounding the
+		// operations-exclude signal. "/*/*" ⊆ the open-access parent's
+		// {"*","/*/*"}, so only the operations exclude is the variable.
+		allowA, statusA, codeA, err := probeF40Row(client, treeURI, false)
+		if err != nil {
+			return FailCheck("F40 row A (control): " + err.Error())
+		}
+		allowB, statusB, codeB, err := probeF40Row(client, treeURI, true)
+		if err != nil {
+			return FailCheck("F40 row B (exclude): " + err.Error())
+		}
+		det := map[string]any{
+			"rowA": map[string]any{"status": statusA, "code": codeA, "allow": allowA},
+			"rowB": map[string]any{"status": statusB, "code": codeB, "allow": allowB},
+		}
+		switch {
+		case allowA && allowB:
+			return PassCheck(fmt.Sprintf("F40 (ALLOW,ALLOW): operations exclude \"/*/get\" did NOT block a `get` (A=%d, B=%d) — id-scope matched literally, not canonicalized as a path (§5.2 accept-path)", statusA, statusB)).WithDetails(det)
+		case allowA && !allowB:
+			return FailCheck(fmt.Sprintf("F40 FAIL (ALLOW,DENY) cause=canonicalization: `get` was ALLOWED without an exclude (A=%d) but DENIED with exclude:[\"/*/get\"] (B=%d %s) — the exclude entry, and only it, flipped the verdict, so the peer canonicalized an id-scope entry as a §5.4 path (§5.2). Fix: branch the matcher on scope kind — id-scope compares literally (only bare \"*\" + trailing \"/*\"); path-scope canonicalizes.", statusA, statusB, codeB)).WithDetails(det)
+		case !allowA && !allowB:
+			return WarnCheck(fmt.Sprintf("F40 (DENY,DENY) unrelated-deny: the baseline denies regardless of the exclude (A=%d %s, B=%d %s) — the deny is UNRELATED to id-scope typing and is NOT an F40 canonicalization defect (exonerate; not scored as F40). Investigate the unrelated deny separately.", statusA, codeA, statusB, codeB)).WithDetails(det)
+		default: // !allowA && allowB
+			return WarnCheck(fmt.Sprintf("F40 (DENY,ALLOW) harness/setup error: adding an exclude WIDENED access (A=%d %s denied, B=%d allowed) — incoherent; excludes only narrow. Do not score; investigate the harness/setup.", statusA, codeA, statusB)).WithDetails(det)
+		}
+	})
+
+	r.Run("f40_id_scope_include_no_overgrant", func() CheckOutcome {
+		// F40 reject-path complement: an operations INCLUDE carrying path
+		// syntax matches only the literal operation string — which no real op
+		// equals — so it authorizes NOTHING and a `get` is DENIED. A peer that
+		// canonicalizes id-scope reads the pattern as a §5.4 path, matches the
+		// `get`, and OVER-GRANTS. Conformant → deny (4xx) for every shape;
+		// canonicalizing → 2xx on at least one. The packet names four
+		// over-grant shapes; probe all so a peer that canonicalizes on any of
+		// them (not just "/*/get") is caught. Robust to parent scope: a
+		// conformant peer denies whether by literal op-mismatch or chain
+		// subset-validation; only a canonicalizing peer reaches 2xx. Resources
+		// use cross-peer "/*/*" (see the exclude-literal row) so the RESOURCE
+		// dimension covers the target and the operations include is the sole
+		// variable.
+		if len(client.Grants()) == 0 {
+			return SkipCheck("no authenticated grants to attenuate from")
+		}
+		localID := string(client.RemotePeerID())
+		shapes := []struct{ name, pattern string }{
+			{"interior_peer_wildcard", "/*/get"},            // matches /{any}/get
+			{"leading_slash_local", "/" + localID + "/get"}, // §5.4 absolute universal-ish scope
+			{"full_path_wildcard", "/*/*"},                  // matches any /{peer}/*
+			{"trailing_peer_segment", "/*/" + localID},      // interior wildcard + trailing peer id
+		}
+		var passed []string
+		for _, s := range shapes {
+			child := types.GrantEntry{
+				Handlers:   types.CapabilityScope{Include: []string{"system/tree"}},
+				Resources:  types.CapabilityScope{Include: []string{"/*/*"}},
+				Operations: types.CapabilityScope{Include: []string{s.pattern}},
+			}
+			childCap, childSig, err := buildAttenuatedChildCap(client, child)
+			if err != nil {
+				return FailCheck("build child cap (" + s.name + "): " + err.Error())
+			}
+			params, resource, err := buildSimpleGetParams()
+			if err != nil {
+				return FailCheck("build params: " + err.Error())
+			}
+			env, err := buildDelegatedExecute(client, childCap, childSig, treeURI, "get", params, resource)
+			if err != nil {
+				return FailCheck("build delegated execute (" + s.name + "): " + err.Error())
+			}
+			respEnv, _, err := client.SendRawEnvelope(env)
+			if err != nil {
+				return FailCheck("send (" + s.name + "): " + err.Error())
+			}
+			status, code, _, err := extractStatusAndCode(respEnv)
+			if err != nil {
+				return FailCheck("extract response (" + s.name + "): " + err.Error())
+			}
+			if status >= 200 && status < 300 {
+				return FailCheck(fmt.Sprintf("F40 FAIL: `get` ALLOWED (2xx) under an operations include of only %q [%s] — the peer canonicalized an id-scope pattern as a §5.4 path and OVER-GRANTED. A path-syntax operation string no real op equals must authorize nothing (§5.2).", s.pattern, s.name))
+			}
+			if status >= 400 {
+				passed = append(passed, fmt.Sprintf("%s=%d/%s", s.name, status, code))
+				continue
+			}
+			return WarnCheck(fmt.Sprintf("F40: shape %s (%q) expected a denial (4xx) but got status=%d code=%q — investigate before scoring", s.name, s.pattern, status, code))
+		}
+		return PassCheck("`get` DENIED under all four path-syntax operations includes (" + strings.Join(passed, ", ") + ") — id-scope matched literally, no path over-grant (F40 §5.2)")
+	})
+
 	return r.Results()
 }
 
@@ -684,4 +833,44 @@ func stageRevokedCapProbe(ctx context.Context, client *PeerClient, capURI, treeU
 		return 0, "", &out
 	}
 	return status, code, nil
+}
+
+// probeF40Row runs one F40 id-scope row: an attenuated child cap granting an
+// operations include of only "get" over cross-peer resources "/*/*", optionally
+// carrying the exclude entry ["/*/get"]. It executes a `get` and reports
+// whether the op was ALLOWED (2xx). Row A (withExclude=false) is the positive
+// control; Row B (withExclude=true) is the exclude probe. The F40
+// canonicalization verdict is the A→B differential — see
+// VECTOR-SPEC-2026-07-27-F40-scope-typing-control-row.md.
+func probeF40Row(client *PeerClient, treeURI string, withExclude bool) (allowed bool, status uint, code string, err error) {
+	ops := types.CapabilityScope{Include: []string{"get"}}
+	if withExclude {
+		ops.Exclude = []string{"/*/get"}
+	}
+	child := types.GrantEntry{
+		Handlers:   types.CapabilityScope{Include: []string{"system/tree"}},
+		Resources:  types.CapabilityScope{Include: []string{"/*/*"}},
+		Operations: ops,
+	}
+	childCap, childSig, err := buildAttenuatedChildCap(client, child)
+	if err != nil {
+		return false, 0, "", fmt.Errorf("build child cap: %w", err)
+	}
+	params, resource, err := buildSimpleGetParams()
+	if err != nil {
+		return false, 0, "", fmt.Errorf("build params: %w", err)
+	}
+	env, err := buildDelegatedExecute(client, childCap, childSig, treeURI, "get", params, resource)
+	if err != nil {
+		return false, 0, "", fmt.Errorf("build delegated execute: %w", err)
+	}
+	respEnv, _, err := client.SendRawEnvelope(env)
+	if err != nil {
+		return false, 0, "", fmt.Errorf("send: %w", err)
+	}
+	status, code, _, err = extractStatusAndCode(respEnv)
+	if err != nil {
+		return false, 0, "", fmt.Errorf("extract response: %w", err)
+	}
+	return status >= 200 && status < 300, status, code, nil
 }

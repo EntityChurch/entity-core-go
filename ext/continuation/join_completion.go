@@ -91,13 +91,23 @@ func armJoinRound(join *types.ContinuationJoinData, nowMs uint64) {
 }
 
 // clearJoinRound drops the round clock and per-slot statuses along with
-// `received`. Called from every reset site so the three can never drift apart —
-// a stale RoundStartedMs would make the NEXT round inherit this round's
-// deadline and abandon itself early.
+// `received`, and advances the round generation. Called from every reset site
+// (abandon, fire, fire-partial) so the four can never drift apart — a stale
+// RoundStartedMs would make the NEXT round inherit this round's deadline and
+// abandon itself early, and a non-advanced RoundID would let a straggler from
+// the round just closed pass the §4.1 guard into the next one.
+//
+// RoundID advances only for a deadline-carrying join — the joins §4.1's abandon
+// path applies to. A pre-§4 wait-forever join never turns a round over via
+// abandon and carries no round_id, so this keeps its entity bytes identical to
+// pre-proposal (no silent change; `omitempty` on RoundID drops the zero).
 func clearJoinRound(join *types.ContinuationJoinData) {
 	join.Received = nil
 	join.RoundStartedMs = nil
 	join.ReceivedStatus = nil
+	if join.CompletionDeadlineMs != nil {
+		join.RoundID++
+	}
 }
 
 // reapExpiredJoinRound applies the completion policy to a join whose round has
@@ -245,6 +255,17 @@ func (h *Handler) resetJoinRound(hctx *handler.HandlerContext, joinPath string, 
 // round.
 func (h *Handler) bindJoinIncompleteMarker(hctx *handler.HandlerContext, joinPath string, join types.ContinuationJoinData, slots []string, reason string, nowMs uint64) {
 	h.bindLostErrorMarkerForJoin(hctx, dispatchChainID(hctx), join.Target, 0, nil, reason, nowMs, hash.Hash{}, joinPath, slots)
+}
+
+// bindJoinLateMarker records a §4.1 stale-slot drop as a `lost` marker with
+// reason join_late, naming the one stale slot. The status carries the round the
+// straggler targeted (in TargetURI-adjacent form) — enough for a reader to see
+// "slot X arrived for round N when the join was at round M". Reuses the same
+// lost sink as the other join reasons so every consumer walking the lost tree
+// sees it. Status 0: a dropped straggler is an engine-internal observation
+// (Appendix A class), not a wire verdict.
+func (h *Handler) bindJoinLateMarker(hctx *handler.HandlerContext, joinPath string, join types.ContinuationJoinData, slot string, targetedRound uint64, nowMs uint64) {
+	h.bindLostErrorMarkerForJoin(hctx, dispatchChainID(hctx), join.Target, uint(targetedRound), nil, types.ChainErrorReasonJoinLate, nowMs, hash.Hash{}, joinPath, []string{slot})
 }
 
 // --- the sweep (§4: "reaped by the existing CollectExpired* sweep extended to

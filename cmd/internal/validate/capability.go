@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/ecf"
@@ -50,6 +51,7 @@ func runCapability(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("revoke_happy_path_writes_marker", "V7 v7.62 §5 + §6 — revoke writes marker at system/capability/revocations/{cap_hash_hex} with handler-set revoked_at")
 	r.Declare("revoked_cap_denied_on_use", "V7 v7.62 §5.1 is_revoked — presenting a revoked cap on a subsequent EXECUTE MUST be refused")
 	r.Declare("delegate_remote_caller_returns_501", "V7 closeout F1 (§2.6) — delegate is same-peer-only in v1; a remote caller MUST receive 501 unsupported_operation (not 403)")
+	r.Declare("hash_hex_path_segment_lowercase", "V7 §3.5 / RT-14 — a peer-emitted content-hash-hex tree path segment MUST be lowercase (format-code byte included); an uppercase segment self-loopbacks but fails cross-peer")
 
 	uri := fmt.Sprintf("entity://%s/system/capability", client.RemotePeerID())
 
@@ -658,6 +660,43 @@ func runCapability(ctx context.Context, client *PeerClient) []CheckResult {
 			return WarnCheck(fmt.Sprintf("revoked cap refused with %d %s — non-403 rejection; verify cross-impl path", respData.Status, errCode))
 		}
 		return WarnCheck(fmt.Sprintf("revoked cap returned %d %s; expected 403 capability_denied", respData.Status, errCode))
+	})
+
+	r.Run("hash_hex_path_segment_lowercase", func() CheckOutcome {
+		// RT-14 (§3.5): content-hash hex in ANY tree path segment MUST be
+		// lowercase, format-code byte included. Tree path segments are
+		// case-sensitive, so an uppercase-hex segment self-loopbacks (a peer's
+		// own writer and reader agree) but breaks cross-peer.
+		//
+		// The revoke marker at system/capability/revocations/{cap_hash_hex} is
+		// a PEER-CHOSEN content-hash-hex segment: the client sends the token as
+		// bytes; the peer picks the hex casing of the storage-path segment. We
+		// probe the peer's own storage casing with two case-sensitive gets: the
+		// marker MUST resolve at the lowercase segment and (segments being
+		// case-sensitive) MUST NOT resolve at the uppercase one. This observes
+		// where the PEER wrote, not a client-constructed lowercase path.
+		out, ok := r.Require("revoke_happy_path_writes_marker")
+		if !ok {
+			return out
+		}
+		revoked, _ := r.Load("revoked_token_hash").(hash.Hash)
+		if revoked.IsZero() {
+			return SkipCheck("no revoked token recorded — cannot probe the peer-emitted hex segment")
+		}
+		lowerHex := hex.EncodeToString(revoked.Bytes())
+		upperHex := strings.ToUpper(lowerHex)
+		if upperHex == lowerHex {
+			return SkipCheck("revoked token hex has no alpha nibbles — cannot distinguish case (astronomically unlikely for a 33-byte hash)")
+		}
+		lowerPath := "system/capability/revocations/" + lowerHex
+		upperPath := "system/capability/revocations/" + upperHex
+		if _, _, err := client.TreeGet(ctx, lowerPath); err != nil {
+			return FailCheck(fmt.Sprintf("revocation marker did NOT resolve at the lowercase segment %s (%v) — the peer emitted a non-lowercase content-hash-hex path segment (RT-14 §3.5 violation)", lowerPath, err))
+		}
+		if _, _, err := client.TreeGet(ctx, upperPath); err == nil {
+			return WarnCheck("revocation marker resolved at BOTH lowercase and UPPERCASE segments — the peer's tree-path lookup appears case-insensitive (§3.5 requires case-sensitive segments); cannot positively confirm lowercase-only emission")
+		}
+		return PassCheck("peer stored the revocation marker at the lowercase content-hash-hex segment and not the uppercase one — segment is lowercase and case-sensitive (RT-14 §3.5)")
 	})
 
 	return r.Results()

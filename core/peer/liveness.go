@@ -17,8 +17,12 @@ import (
 // Seam discipline (normative MUST, mirrors Amendment 11): this is called at the
 // dispatch caller that both observes the send() Err and holds peer_id — never
 // buried inside a transport primitive that holds only a socket handle. The
-// callers are the three §10-step-1 / §8.2 / RELAY-terminal dispatch sites in
-// remote.go.
+// callers are the three direct-dispatch send sites in remote.go: remoteExecute
+// (§10 step 1) and RemoteExecuteWithIncluded's TCP + HTTP branches (the §9
+// intermediate-hop forward, itself a direct send to a connected next hop).
+// Per the §A1 demotion-seam scope pin (Go rung-1 ask E), the two paths that
+// MUST NOT demote — the §10.2 dispatch-fallback and the RELAY terminal-hop
+// forward (SendRawFrameTo) — deliberately do NOT call this; they only evict.
 func (p *Peer) demotePeerOnTransportError(peerID crypto.PeerID, failed remoteEndpoint, cause error) {
 	p.demotePeer(peerID, failed, types.PeerStatusSuspect, types.PeerStatusReasonTransportError, cause)
 }

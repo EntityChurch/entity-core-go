@@ -76,12 +76,15 @@ func (h *Handler) handleAdvance(ctx context.Context, req *handler.Request) (*han
 		status = *advReq.Status
 	}
 
-	return h.advanceAtPath(ctx, hctx, path, advReq.Result, status)
+	return h.advanceAtPath(ctx, hctx, path, advReq.Result, status, advReq.RoundID)
 }
 
 // advanceAtPath implements the continuation advancement algorithm (spec §3.3).
 // Returns {advanced: true} on success, {advanced: false} when no continuation at path.
-func (h *Handler) advanceAtPath(ctx context.Context, hctx *handler.HandlerContext, path string, result cbor.RawMessage, status uint) (*handler.Response, error) {
+//
+// roundID is the §4.1 round the advance targets, threaded only to the join-slot
+// path (a forward continuation has no rounds and ignores it). nil = untracked.
+func (h *Handler) advanceAtPath(ctx context.Context, hctx *handler.HandlerContext, path string, result cbor.RawMessage, status uint, roundID *uint64) (*handler.Response, error) {
 	// Step 1: Check for continuation entity at the path.
 	cont, contType := readEntity(hctx, path)
 
@@ -105,7 +108,7 @@ func (h *Handler) advanceAtPath(ctx context.Context, hctx *handler.HandlerContex
 				if err != nil {
 					return handler.NewErrorResponse(500, "internal_error", "decode join: "+err.Error())
 				}
-				return h.advanceJoinSlot(ctx, hctx, parent, slot, joinData, result, status)
+				return h.advanceJoinSlot(ctx, hctx, parent, slot, joinData, result, status, roundID)
 			}
 		}
 	}
@@ -376,6 +379,26 @@ func advancementOK() (*handler.Response, error) {
 // advancementNotFound returns {advanced: false} when no continuation exists at path.
 func advancementNotFound() (*handler.Response, error) {
 	resultRaw, _ := ecf.Encode(map[string]interface{}{"advanced": false})
+	resultEntity, _ := entity.NewEntity("system/continuation/advancement-result", cbor.RawMessage(resultRaw))
+	return &handler.Response{Status: 200, Result: resultEntity}, nil
+}
+
+// joinSlotDroppedStale is the §4.1 straggler drop result: the slot targeted a
+// round that is no longer current and was NOT admitted. Returned 200 (the
+// advance was processed and validly rejected as stale — not a server error;
+// a non-2xx would invite the advancer to retry the same stale slot forever)
+// with an explicit body so the drop is visible on the wire in addition to the
+// durable join_late marker. The status/code contract here was routed to arch
+// as a pin candidate and is now PINNED: EXTENSION-CONTINUATION §3.5a (v1.21)
+// fixes both the join_late marker and this 5-key 200 drop-body shape.
+func joinSlotDroppedStale(slotName string, targetedRound, currentRound uint64) (*handler.Response, error) {
+	resultRaw, _ := ecf.Encode(map[string]interface{}{
+		"advanced":       false,
+		"dropped":        "stale_round",
+		"slot":           slotName,
+		"targeted_round": targetedRound,
+		"current_round":  currentRound,
+	})
 	resultEntity, _ := entity.NewEntity("system/continuation/advancement-result", cbor.RawMessage(resultRaw))
 	return &handler.Response{Status: 200, Result: resultEntity}, nil
 }
@@ -701,7 +724,7 @@ func resolveOrDefaultResource(value cbor.RawMessage, extractPath string, default
 // completes and the failure vanishes into the stitch unless the join records it
 // (§4 mechanism 1). The slot's payload itself is stored exactly as it arrived:
 // an error payload is passed through as-is, never coerced into boundary bytes.
-func (h *Handler) advanceJoinSlot(ctx context.Context, hctx *handler.HandlerContext, joinPath, slotName string, join types.ContinuationJoinData, result cbor.RawMessage, status uint) (*handler.Response, error) {
+func (h *Handler) advanceJoinSlot(ctx context.Context, hctx *handler.HandlerContext, joinPath, slotName string, join types.ContinuationJoinData, result cbor.RawMessage, status uint, roundID *uint64) (*handler.Response, error) {
 	// Validate slot.
 	if !slotInExpected(slotName, join.Expected) {
 		return handler.NewErrorResponse(400, "unexpected_slot",
@@ -739,6 +762,23 @@ func (h *Handler) advanceJoinSlot(ctx context.Context, hctx *handler.HandlerCont
 		if join, err = types.ContinuationJoinDataFromEntity(joinEnt); err != nil {
 			return handler.NewErrorResponse(500, "internal_error", "re-decode join after reap: "+err.Error())
 		}
+	}
+
+	// §4.1 straggler guard (MUST): a slot advance targeting a round that is no
+	// longer current — a straggler from an abandoned (or already-fired) round —
+	// MUST NOT be admitted. Admitting it stitches two generations into one
+	// boundary hash: wrong, deterministic-looking, reproducible — the silent
+	// seam-collapse §4.1 exists to prevent. Checked HERE, after the reap
+	// re-read, so `join.RoundID` is the current generation (the reap above may
+	// have advanced it). Additive: only a deadline-carrying join turns rounds
+	// over, and only a slot that opted in by tagging `round_id` is checked — an
+	// untagged advance is admitted exactly as before §4.1. Dropped LOUDLY: a
+	// join_late marker naming the stale slot + the round it targeted, so
+	// lateness is observable, not merely survived.
+	if roundID != nil && join.CompletionDeadlineMs != nil && *roundID != join.RoundID {
+		h.bindJoinLateMarker(hctx, joinPath, join, slotName, *roundID, nowMs)
+		debugLog("join %s: slot %q targeted stale round %d (current %d) — dropped loudly (§4.1)", joinPath, slotName, *roundID, join.RoundID)
+		return joinSlotDroppedStale(slotName, *roundID, join.RoundID)
 	}
 
 	// Accumulate. The payload goes in verbatim — byte fidelity here is what

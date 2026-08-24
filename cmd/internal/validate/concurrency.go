@@ -96,6 +96,15 @@ const (
 
 	// T2.2 — connection churn. Number of connect → 1 req → close cycles.
 	t22Cycles = 100
+
+	// T1.4 — frame-write atomicity (RT-13b / §6.11 a′). N concurrent distinct
+	// LARGE responses on ONE shared connection, repeated over W windows so a
+	// low-probability write-splice has repeated chances to fire. N ≥ 64 and
+	// bodies large enough to span multiple writes per the vector spec
+	// (VECTOR-SPEC-2026-07-27-RT-13b-frame-write-atomicity §3).
+	t14N            = 64
+	t14Windows      = 3
+	t14PayloadBytes = 16 * 1024 // distinct multi-KB body per request → splice detectable
 )
 
 // runConcurrency entry point — invoked by the suite under --profile core via
@@ -112,12 +121,16 @@ func runConcurrency(ctx context.Context, client *PeerClient, newClient func() (*
 	r.Declare("t1_1_concurrent_demux", "V7 §6.11(a)(b) — multiplexed reader + per-id demux on one connection")
 	r.Declare("t1_2_concurrent_reentry", "V7 §6.11 + §7a.2a — concurrent reentrant dispatch (--validate-gated)")
 	r.Declare("t1_3_no_head_of_line", "V7 §6.11(a) — fast not gated behind slow on one connection")
+	// RT-13b Part A. Named t1_4 (not the vector spec's "T1.3") because t1_3 is
+	// already head-of-line here — label reconciliation flagged to arch.
+	r.Declare("t1_4_frame_write_atomicity", "V7 §6.11 a′ / RT-13b Part A — bytes of distinct response frames MUST NOT interleave on one connection under concurrent outbound (best-effort detection; verdict gated on each peer's Part-B attestation)")
 	r.Declare("t2_1_sustained_load", "V7 §6.11 robustness — no drops, no latency runaway under sustained C×K load")
 	r.Declare("t2_2_connection_churn", "V7 §6.11 robustness — accept loop + per-conn lifecycle across N cycles")
 
 	r.Run("t1_1_concurrent_demux", func() CheckOutcome { return runT11(ctx, client) })
 	r.Run("t1_2_concurrent_reentry", func() CheckOutcome { return runT12(ctx, client) })
 	r.Run("t1_3_no_head_of_line", func() CheckOutcome { return runT13(ctx, client) })
+	r.Run("t1_4_frame_write_atomicity", func() CheckOutcome { return runT14(ctx, client) })
 	r.Run("t2_1_sustained_load", func() CheckOutcome { return runT21(ctx, client) })
 	r.Run("t2_2_connection_churn", func() CheckOutcome { return runT22(ctx, newClient) })
 
@@ -255,6 +268,111 @@ func stageDemuxEntities(ctx context.Context, client *PeerClient, bucket string, 
 		expected[path] = h.String()
 	}
 	return paths, expected, ""
+}
+
+// stageLargeDemuxEntities stages n distinct LARGE entities (payloadBytes each)
+// under system/validate/concurrency/<bucket>/<i>, returning paths + each path's
+// expected content_hash. Like stageDemuxEntities but the bodies are multi-KB and
+// per-index-distinct so response frames span multiple writes and a write-splice
+// (two envelopes interleaved) is detectable as a body-hash mismatch. Used by the
+// RT-13b frame-write-atomicity probe (T1.4).
+func stageLargeDemuxEntities(ctx context.Context, client *PeerClient, bucket string, n, payloadBytes int) (paths []string, expected map[string]string, skip string) {
+	paths = make([]string, n)
+	expected = make(map[string]string, n)
+	for i := 0; i < n; i++ {
+		path := fmt.Sprintf("system/validate/concurrency/%s/%d", bucket, i)
+		// Distinct large body: a per-index header repeated to fill payloadBytes,
+		// so every entity is a unique multi-KB blob (unique content_hash) and a
+		// splice that mixes two bodies shows up as a hash mismatch.
+		header := fmt.Sprintf("rt13b-%s-%d-", bucket, i)
+		buf := make([]byte, 0, payloadBytes)
+		for len(buf) < payloadBytes {
+			buf = append(buf, header...)
+		}
+		buf = buf[:payloadBytes]
+		ent, err := entity.NewEntity("primitive/bytes", cbor.RawMessage(mustEncode(buf)))
+		if err != nil {
+			return nil, nil, fmt.Sprintf("build large staged entity %d: %v", i, err)
+		}
+		h, err := client.TreePut(ctx, path, ent)
+		if err != nil {
+			return nil, nil, fmt.Sprintf("tree.put %s rejected (%v) — peer not running with write grants the concurrency gate requires (pair --validate with --open-access or --debug-grants)", path, err)
+		}
+		paths[i] = path
+		expected[path] = h.String()
+	}
+	return paths, expected, ""
+}
+
+// runT14 — frame-write atomicity under concurrent outbound (RT-13b Part A,
+// §6.11 a′). Drives N distinct large responses concurrently on ONE connection
+// across W windows and asserts the peer's frame writer never interleaves the
+// bytes of two envelopes: every response frames+decodes cleanly (a splice
+// corrupts a length-prefix → demux desync → decode error), demuxes to its own
+// request with a byte-identical body (a splice mixes two bodies → hash
+// mismatch), and none is dropped or duplicated. This is best-effort DETECTION:
+// a green run proves only that the race did not fire, so the RT-13b verdict is
+// gated on each peer's Part-B atomicity attestation (the vacuous-green guard,
+// keystone §8.4). A single observed splice is a deterministic FAIL.
+func runT14(ctx context.Context, client *PeerClient) CheckOutcome {
+	paths, expected, skip := stageLargeDemuxEntities(ctx, client, "atomicity", t14N, t14PayloadBytes)
+	if skip != "" {
+		return SkipCheck(skip)
+	}
+
+	type result struct {
+		path string
+		hash string
+		err  error
+	}
+	for w := 0; w < t14Windows; w++ {
+		results := make(chan result, t14N)
+		for _, p := range paths {
+			go func(p string) {
+				ent, _, err := client.TreeGet(ctx, p)
+				if err != nil {
+					results <- result{path: p, err: err}
+					return
+				}
+				results <- result{path: p, hash: ent.ContentHash.String()}
+			}(p)
+		}
+		seen := make(map[string]int, t14N)
+		var errs, crossTalk []string
+		for i := 0; i < t14N; i++ {
+			select {
+			case r := <-results:
+				if r.err != nil {
+					// A splice corrupts the length prefix / trailing bytes of a
+					// spliced frame → the reader's demux desyncs → decode error.
+					errs = append(errs, fmt.Sprintf("%s: %v", r.path, r.err))
+					continue
+				}
+				seen[r.path]++
+				if r.hash != expected[r.path] {
+					crossTalk = append(crossTalk, fmt.Sprintf("%s: got body-hash %s expected %s", r.path, r.hash, expected[r.path]))
+				}
+			case <-time.After(t11DeadlockCeiling):
+				return FailCheck(fmt.Sprintf("§6.11 a′ window %d/%d: concurrent N=%d did not complete inside %v — deadlock / stream-stall backstop tripped", w+1, t14Windows, t14N, t11DeadlockCeiling))
+			}
+		}
+		if len(errs) > 0 {
+			return FailCheck(fmt.Sprintf("§6.11 a′ window %d/%d: %d/%d responses failed to frame/decode cleanly — a non-atomic frame writer splices envelopes and desyncs the reader (RT-13b): %v", w+1, t14Windows, len(errs), t14N, errs))
+		}
+		if len(crossTalk) > 0 {
+			return FailCheck(fmt.Sprintf("§6.11 a′ window %d/%d: %d/%d bodies were not byte-identical to their staged payload — a write-splice mixed two response bodies (RT-13b): %v", w+1, t14Windows, len(crossTalk), t14N, crossTalk))
+		}
+		if len(seen) != t14N {
+			return FailCheck(fmt.Sprintf("§6.11 a′ window %d/%d: expected %d distinct responses, saw %d — a frame was dropped or duplicated", w+1, t14Windows, t14N, len(seen)))
+		}
+	}
+
+	// Keeps serving after the burst — a desync that corrupted the stream would
+	// also surface here (§4.9 resilience).
+	if _, _, err := client.TreeGet(ctx, paths[0]); err != nil {
+		return FailCheck(fmt.Sprintf("§4.9: peer failed a normal get after the atomicity burst (stream may be desynced): %v", err))
+	}
+	return PassCheck(fmt.Sprintf("RT-13b Part A: %d concurrent distinct %d KB responses over %d windows all framed cleanly, demuxed by request_id, and were byte-identical — no frame-write splice detected. Best-effort detection; the RT-13b verdict is gated on each peer's Part-B atomicity attestation (keystone §8.4 vacuous-green guard).", t14N, t14PayloadBytes/1024, t14Windows))
 }
 
 // runT12 — concurrent reentrant dispatch.

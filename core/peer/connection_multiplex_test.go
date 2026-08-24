@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sync"
@@ -83,8 +84,45 @@ func (r *reentryHandler) Manifest() types.HandlerManifestData {
 	}
 }
 
+// echoHandler returns a distinct LARGE response body derived from the
+// request's "marker" param — used to drive the RT-13b (§6.11 a′) frame-write
+// atomicity path: concurrent responses are large enough to span multiple
+// writes and distinct enough that a write-splice (two envelopes interleaved on
+// the wire) shows up as a body-byte mismatch.
+type echoHandler struct{ payloadBytes int }
+
+func (e *echoHandler) Name() string { return "test-echo" }
+
+func (e *echoHandler) Handle(ctx context.Context, req *handler.Request) (*handler.Response, error) {
+	var params struct {
+		Marker string `cbor:"marker"`
+	}
+	if err := ecf.Decode(req.Params.Data, &params); err != nil {
+		return handler.NewErrorResponse(400, "invalid_params", err.Error())
+	}
+	buf := make([]byte, 0, e.payloadBytes)
+	for len(buf) < e.payloadBytes {
+		buf = append(buf, params.Marker...)
+	}
+	buf = buf[:e.payloadBytes]
+	raw, _ := ecf.Encode(buf)
+	ent, _ := entity.NewEntity("primitive/bytes", cbor.RawMessage(raw))
+	return &handler.Response{Status: 200, Result: ent}, nil
+}
+
+func (e *echoHandler) Manifest() types.HandlerManifestData {
+	return types.HandlerManifestData{
+		Pattern: "test/echo",
+		Name:    "test-echo",
+		Operations: map[string]types.HandlerOperationSpec{
+			"echo": {InputType: "test/echo-input", OutputType: "primitive/bytes"},
+		},
+	}
+}
+
 // newMultiplexTestPeer builds a peer with open-access grants + a slow + a
-// reentry handler, ready to drive WB-28-shape probes.
+// reentry handler + a large-echo handler, ready to drive WB-28-shape probes
+// and the RT-13b frame-write-atomicity attestation.
 func newMultiplexTestPeer(t *testing.T, slowDelay time.Duration) *Peer {
 	t.Helper()
 	kp, err := crypto.Generate()
@@ -97,6 +135,7 @@ func newMultiplexTestPeer(t *testing.T, slowDelay time.Duration) *Peer {
 		WithConnectionGrants(OpenAccessGrants()),
 		WithHandler("test/slow", &slowHandler{delay: slowDelay}),
 		WithHandler("test/reentry", &reentryHandler{}),
+		WithHandler("test/echo", &echoHandler{payloadBytes: 16 * 1024}),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -343,3 +382,97 @@ func mustKey(t *testing.T) crypto.Keypair {
 // drop direct references — connection tests sometimes import it via
 // the helpers above.
 var _ = hash.Hash{}
+
+// TestConnection_FrameWriteAtomicity_RT13b is the RT-13b (§6.11 a′) Part-B
+// peer-side atomicity attestation: on one connection carrying concurrent
+// dispatch, the bytes of two distinct response frames MUST NOT interleave —
+// each frame is written whole / serialized against other frame writes. Go's
+// mechanism is writeMu in connection.go (SendEnvelope holds it across the whole
+// envelope write); this test is the standing guarantee that the property holds
+// by construction, the load-bearing half of RT-13b that a wire probe alone
+// cannot certify (VECTOR-SPEC-2026-07-27-RT-13b §4).
+//
+// It drives M concurrent Executes that each force a distinct LARGE response
+// body and asserts every response is byte-identical to its own expected body —
+// a splice would mix two bodies — with none dropped. Run under `go test -race`:
+// the race detector additionally flags any unsynchronized write to the shared
+// connection, so removing the writeMu serialization fails both deterministically
+// (byte mismatch) and under -race.
+func TestConnection_FrameWriteAtomicity_RT13b(t *testing.T) {
+	const concurrency = 64
+	const payloadBytes = 16 * 1024
+
+	server := newMultiplexTestPeer(t, 0)
+	client, err := New(
+		WithIdentity(mustKey(t)),
+		WithConnectionGrants(OpenAccessGrants()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	conn := connectClient(t, client, server)
+	defer conn.Close()
+
+	echoURI := "entity://" + string(server.PeerID()) + "/test/echo"
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	expected := func(idx int) []byte {
+		marker := fmt.Sprintf("rt13b-partb-%d-", idx)
+		buf := make([]byte, 0, payloadBytes)
+		for len(buf) < payloadBytes {
+			buf = append(buf, marker...)
+		}
+		return buf[:payloadBytes]
+	}
+
+	var wg sync.WaitGroup
+	var failures atomic.Int32
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			marker := fmt.Sprintf("rt13b-partb-%d-", idx)
+			paramsRaw, _ := ecf.Encode(struct {
+				Marker string `cbor:"marker"`
+			}{Marker: marker})
+			paramsEnt, _ := entity.NewEntity("test/echo-input", cbor.RawMessage(paramsRaw))
+			respEnv, err := conn.Execute(ctx, echoURI, "echo", paramsEnt, nil)
+			if err != nil {
+				failures.Add(1)
+				t.Errorf("execute %d: %v", idx, err)
+				return
+			}
+			respData, err := types.ExecuteResponseDataFromEntity(respEnv.Root)
+			if err != nil || respData.Status != 200 {
+				failures.Add(1)
+				t.Errorf("execute %d: status=%d err=%v", idx, respData.Status, err)
+				return
+			}
+			var resultEnt entity.Entity
+			if err := ecf.Decode(respData.Result, &resultEnt); err != nil {
+				failures.Add(1)
+				t.Errorf("execute %d: decode result entity: %v", idx, err)
+				return
+			}
+			var got []byte
+			if err := ecf.Decode(resultEnt.Data, &got); err != nil {
+				failures.Add(1)
+				t.Errorf("execute %d: decode body bytes: %v", idx, err)
+				return
+			}
+			if !bytes.Equal(got, expected(idx)) {
+				failures.Add(1)
+				t.Errorf("execute %d: response body not byte-identical (got len=%d want len=%d) — frame-write splice suspected", idx, len(got), len(expected(idx)))
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if failures.Load() != 0 {
+		t.Fatalf("RT-13b Part B: %d/%d concurrent large responses failed byte-identity/framing — the frame writer is not atomic", failures.Load(), concurrency)
+	}
+	t.Logf("RT-13b Part B: %d concurrent distinct %d KB responses all byte-identical on one connection (writeMu serializes whole-frame writes)", concurrency, payloadBytes/1024)
+}

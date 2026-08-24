@@ -171,9 +171,11 @@ func (h *Handler) handleMaintainPeer(ctx context.Context, req *handler.Request) 
 
 // installReconnectContinuations writes the on-disconnect standing
 // continuation (inbox resident — the lifecycle subscription's delivery
-// target) and the one-shot backoff continuation (managed-namespace resident
+// target) and the STANDING backoff continuation (managed-namespace resident
 // — advanced only by the handler's delayed self-advance, never via
-// system/inbox/*). Writes are direct handler-authorized tree binds per §11:
+// system/inbox/*). STANDING per §A6.0, NOT the §4.1-pseudocode one-shot: the
+// one-shot loses the re-arm race and dies after ~2 attempts — see
+// installBackoffContinuation. Writes are direct handler-authorized tree binds per §11:
 // the graph lives in the handler's managed namespaces, authorized by its own
 // grant, with dispatch_capability = the handler grant (the F2 pattern).
 func (h *Handler) installReconnectContinuations(hctx *handler.HandlerContext, sess *session) error {

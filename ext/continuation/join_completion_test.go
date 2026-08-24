@@ -51,6 +51,34 @@ func backdateJoinRound(t *testing.T, hctx *handler.HandlerContext, joinPath stri
 	storeJoin(t, hctx, joinPath, join)
 }
 
+// makeAdvanceRequestRound is makeAdvanceRequest with a §4.1 round_id tag on the
+// slot advance — the round the fan-out believes the slot belongs to.
+func makeAdvanceRequestRound(t *testing.T, hctx *handler.HandlerContext, path string, status uint, result interface{}, roundID uint64) *handler.Request {
+	t.Helper()
+	resultRaw, err := ecf.Encode(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusVal := status
+	rid := roundID
+	advReq := types.ContinuationAdvanceRequestData{
+		Result:  cbor.RawMessage(resultRaw),
+		Status:  &statusVal,
+		RoundID: &rid,
+	}
+	params, err := advReq.ToEntity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hctx.Resource = &types.ResourceTarget{Targets: []string{path}}
+	return &handler.Request{
+		Path:      "system/continuation",
+		Operation: "advance",
+		Params:    params,
+		Context:   hctx,
+	}
+}
+
 // loadJoin reads the join entity back out of the tree.
 func loadJoin(t *testing.T, hctx *handler.HandlerContext, joinPath string) types.ContinuationJoinData {
 	t.Helper()
@@ -230,6 +258,193 @@ func TestStandingJoinSelfHealsAfterDeadline(t *testing.T) {
 	}
 	if _, leaked := dispatched[0][types.JoinIncompleteField]; leaked {
 		t.Error("a COMPLETE round carried an incomplete marker — the success path must be untouched")
+	}
+}
+
+// TestJoinStragglerBleedCaught is §6 anchor 5 (§4.1, the abandon straggler
+// guard — a MUST). It is the anchor the naive "fires clean on the next round"
+// (anchor 3, TestStandingJoinSelfHealsAfterDeadline) passes STRAIGHT THROUGH:
+// that test never re-delivers the abandoned round's missing slot, so it cannot
+// observe the bleed. Here slot A arrives round N; the deadline passes (B never
+// arrives); round N is abandoned; round N+1 opens and A arrives; THEN B *of
+// round N* arrives late. Without §4.1, B lands in round N+1's B slot and the
+// round fires stitched from two generations — a boundary hash that is wrong,
+// deterministic-looking, and reproducible. With it, B is dropped loudly.
+func TestJoinStragglerBleedCaught(t *testing.T) {
+	h := NewHandler()
+	hctx := newTestContext()
+
+	var dispatched []map[string]interface{}
+	hctx.Execute = func(ctx context.Context, uri, op string, params entity.Entity, opts ...handler.ExecuteOption) (*handler.Response, error) {
+		var decoded map[string]interface{}
+		_ = ecf.Decode(params.Data, &decoded)
+		dispatched = append(dispatched, decoded)
+		resultRaw, _ := ecf.Encode(map[string]interface{}{"ok": true})
+		resultEntity, _ := entity.NewEntity("primitive/any", cbor.RawMessage(resultRaw))
+		return &handler.Response{Status: 200, Result: resultEntity}, nil
+	}
+
+	deadline := uint64(50)
+	capHash := testCapHash(t, hctx.Store)
+	const joinPath = "system/inbox/join-bleed"
+	storeJoin(t, hctx, joinPath, types.ContinuationJoinData{
+		Expected:             []string{"a", "b"},
+		Target:               "system/tree",
+		Operation:            "put",
+		DispatchCapability:   capHash,
+		CompletionDeadlineMs: &deadline,
+		OnIncomplete:         types.JoinOnIncompleteAbandon,
+	})
+
+	// Round 0: slot a arrives tagged round 0, b never does.
+	if _, err := h.Handle(context.Background(), makeAdvanceRequestRound(t, hctx, joinPath+"/a", 200, "round0-a", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadJoin(t, hctx, joinPath).RoundID; got != 0 {
+		t.Fatalf("round 0 should still be round 0, got RoundID=%d", got)
+	}
+	backdateJoinRound(t, hctx, joinPath, 5_000)
+
+	// Round 1 opens: slot a arrives tagged round 1. The touch reaps the dead
+	// round 0 (RoundID 0→1), then a(round 1) matches and accumulates.
+	if _, err := h.Handle(context.Background(), makeAdvanceRequestRound(t, hctx, joinPath+"/a", 200, "round1-a", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadJoin(t, hctx, joinPath).RoundID; got != 1 {
+		t.Fatalf("abandon should have advanced the round to 1, got RoundID=%d", got)
+	}
+
+	// THE STRAGGLER: b of the abandoned round 0 arrives late, still tagged
+	// round 0. It MUST NOT fill round 1's b slot.
+	resp, err := h.Handle(context.Background(), makeAdvanceRequestRound(t, hctx, joinPath+"/b", 200, "round0-b-STRAGGLER", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]interface{}
+	_ = ecf.Decode(resp.Result.Data, &body)
+	if body["advanced"] != false || body["dropped"] != "stale_round" {
+		t.Fatalf("the straggler was not dropped as stale: body=%v", body)
+	}
+	if len(dispatched) != 0 {
+		t.Fatalf("a mixed-generation round FIRED — the straggler bled across: %v", dispatched)
+	}
+	join := loadJoin(t, hctx, joinPath)
+	if _, bled := join.Received["b"]; bled {
+		t.Fatal("the round-0 straggler b landed in round 1 — the §4.1 guard did not hold")
+	}
+	// The drop is loud: a join_late marker names the stale slot.
+	late := requireMarker(t, hctx, types.ChainErrorReasonJoinLate)
+	if !sameSlots(late.JoinSlots, []string{"b"}) {
+		t.Errorf("join_late marker named slots %v, want [b]", late.JoinSlots)
+	}
+
+	// Round 1's real b (tagged round 1) arrives — now the round fires CLEAN,
+	// stitched from a single generation.
+	if _, err := h.Handle(context.Background(), makeAdvanceRequestRound(t, hctx, joinPath+"/b", 200, "round1-b", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatched) != 1 {
+		t.Fatalf("round 1 did not fire clean after its own b: %d dispatches", len(dispatched))
+	}
+	if dispatched[0]["a"] != "round1-a" || dispatched[0]["b"] != "round1-b" {
+		t.Errorf("round 1 fired with a mixed generation: %v (want a=round1-a b=round1-b)", dispatched[0])
+	}
+}
+
+// TestJoinUntaggedAdvanceStillAdmitted pins the additive contract: an advance
+// that does NOT tag a round_id (pre-§4.1 substrate) is admitted regardless of
+// the join's RoundID — the guard engages only when the fan-out opts in. Without
+// this, adding round_id would silently break every existing join caller.
+func TestJoinUntaggedAdvanceStillAdmitted(t *testing.T) {
+	h := NewHandler()
+	hctx := newTestContext()
+	var dispatched int
+	hctx.Execute = func(ctx context.Context, uri, op string, params entity.Entity, opts ...handler.ExecuteOption) (*handler.Response, error) {
+		dispatched++
+		resultRaw, _ := ecf.Encode(map[string]interface{}{"ok": true})
+		resultEntity, _ := entity.NewEntity("primitive/any", cbor.RawMessage(resultRaw))
+		return &handler.Response{Status: 200, Result: resultEntity}, nil
+	}
+
+	deadline := uint64(60_000) // large: no spurious reap between back-to-back slots
+	capHash := testCapHash(t, hctx.Store)
+	const joinPath = "system/inbox/join-untagged"
+	storeJoin(t, hctx, joinPath, types.ContinuationJoinData{
+		Expected:             []string{"a", "b"},
+		Target:               "system/tree",
+		Operation:            "put",
+		DispatchCapability:   capHash,
+		CompletionDeadlineMs: &deadline,
+		OnIncomplete:         types.JoinOnIncompleteAbandon,
+	})
+
+	// Round 0 fires cleanly (tagged slots) → reset advances RoundID to 1.
+	if _, err := h.Handle(context.Background(), makeAdvanceRequestRound(t, hctx, joinPath+"/a", 200, "r0-a", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Handle(context.Background(), makeAdvanceRequestRound(t, hctx, joinPath+"/b", 200, "r0-b", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if dispatched != 1 {
+		t.Fatalf("round 0 did not fire: %d dispatches", dispatched)
+	}
+	if got := loadJoin(t, hctx, joinPath).RoundID; got != 1 {
+		t.Fatalf("expected RoundID=1 after a fire+reset, got %d", got)
+	}
+
+	// Now deliver two UNTAGGED slots (makeAdvanceRequest sets no round_id).
+	// Despite RoundID=1, an untagged advance must be admitted, never dropped —
+	// the guard engages only when the fan-out opts in by tagging.
+	if _, err := h.Handle(context.Background(), makeAdvanceRequest(t, hctx, joinPath+"/a", 200, "untagged-a")); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := h.Handle(context.Background(), makeAdvanceRequest(t, hctx, joinPath+"/b", 200, "untagged-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]interface{}
+	_ = ecf.Decode(resp.Result.Data, &body)
+	if body["dropped"] != nil {
+		t.Fatalf("an untagged advance was dropped by the round guard: %v", body)
+	}
+	if dispatched != 2 {
+		t.Fatalf("the untagged round did not fire (admitted): %d dispatches", dispatched)
+	}
+	if reasons := lostMarkerReasons(hctx); len(reasons) != 0 {
+		t.Errorf("untagged advances bound markers %v — the guard must not fire without a tag", reasons)
+	}
+}
+
+// TestJoinRoundIDStaysZeroWithoutDeadline pins the no-silent-change scope:
+// a deadline-less (wait-forever) join never turns a round over via abandon, so
+// its RoundID stays zero and never serializes — its bytes are identical to
+// pre-§4.1 even across a fire+reset.
+func TestJoinRoundIDStaysZeroWithoutDeadline(t *testing.T) {
+	h := NewHandler()
+	hctx := newTestContext()
+	hctx.Execute = func(ctx context.Context, uri, op string, params entity.Entity, opts ...handler.ExecuteOption) (*handler.Response, error) {
+		resultRaw, _ := ecf.Encode(map[string]interface{}{"ok": true})
+		resultEntity, _ := entity.NewEntity("primitive/any", cbor.RawMessage(resultRaw))
+		return &handler.Response{Status: 200, Result: resultEntity}, nil
+	}
+	capHash := testCapHash(t, hctx.Store)
+	const joinPath = "system/inbox/join-noddl-round"
+	storeJoin(t, hctx, joinPath, types.ContinuationJoinData{
+		Expected:           []string{"a", "b"},
+		Target:             "system/tree",
+		Operation:          "put",
+		DispatchCapability: capHash,
+		// no CompletionDeadlineMs
+	})
+	// Fire a full round: a then b → dispatch → reset.
+	if _, err := h.Handle(context.Background(), makeAdvanceRequest(t, hctx, joinPath+"/a", 200, "va")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Handle(context.Background(), makeAdvanceRequest(t, hctx, joinPath+"/b", 200, "vb")); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadJoin(t, hctx, joinPath).RoundID; got != 0 {
+		t.Errorf("a deadline-less join advanced its RoundID to %d on fire — must stay 0 (no silent change)", got)
 	}
 }
 
