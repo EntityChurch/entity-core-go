@@ -584,6 +584,17 @@ func runRegResolutionLogShape() CheckOutcome {
 	return PassCheck("resolution-log shape round-trips")
 }
 
+// REG-DISPATCH-GRAMMAR-1 is intentionally NOT driven on the wire here. Its
+// discriminator — does an UNMATCHED name still resolve? — is exactly the §4.1
+// step 2 filter question that is UNRULED and cross-impl-divergent (go: unmatched
+// → unfiltered → resolved; rust: unmatched → scoped away → chain_exhausted), so
+// any wire assertion measures the filter, not the matcher, and reports a false
+// result against a conformant peer that reads step 2 the other way. The grammar
+// itself is uncontested and fully pinned in-tree by REG-DISPATCH-GRAMMAR-1
+// (ext/registry/glob_dispatch_test.go, teeth-verified against path.Match); a
+// wire check is deferred until arch rules §4.1 step 2
+// (docs/validation/spec-issues/2026-08-19-a-dispatch-filter-unmatched-name.md).
+
 // --- Helpers --------------------------------------------------------------
 
 var regRandSeed = uint64(1)

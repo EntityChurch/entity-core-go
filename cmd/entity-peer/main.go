@@ -110,7 +110,8 @@ func main() {
 	issuerPolicyMode := flag.String("issuer-policy-mode", "", "EXTENSION-REGISTRY §6a.9 — run this peer as a peer-issued live registry. Value selects the issuer-policy mode: `open` (any layer-1-valid request is signed; first-come-first-serve), `allowlist` (requires --issuer-policy-allowlist), `manual` (requests queue as pending_review). Empty disables — the register-request handler is not wired and publishers must use the curated `registry-issue-binding` CLI. `domain-control` is rejected (deferred per §6a.10).")
 	issuerPolicyAllowlist := flag.String("issuer-policy-allowlist", "", "EXTENSION-REGISTRY §6a.9.1 — comma-separated target_peer_ids permitted to register when --issuer-policy-mode=allowlist. Ignored in other modes.")
 	issuerPolicyNameConstraints := flag.String("issuer-policy-name-constraints", "", "EXTENSION-REGISTRY §6a.9.1 — POSIX glob narrowing which names this registry will issue (e.g. \"*.lab\"). Empty = no constraint.")
-	issuerPolicyDefaultTTL := flag.Duration("issuer-policy-default-ttl", 0, "EXTENSION-REGISTRY §6a.9.1 — TTL the registry signs when register-request omits requested_ttl. Zero = no expiry.")
+	issuerPolicyDefaultTTL := flag.Duration("issuer-policy-default-ttl", 0, "EXTENSION-REGISTRY §6a.9.1 — TTL the registry signs when register-request omits requested_ttl. REQUIRED for a live registry post-CAP-D11 (a null default_ttl can only mint unresolvable bindings); MUST NOT exceed --issuer-policy-max-ttl (§6a.9, v1.11).")
+	issuerPolicyMaxTTL := flag.Duration("issuer-policy-max-ttl", 0, "EXTENSION-REGISTRY §6a.9 (v1.11) — issuer-side TTL ceiling. REQUIRED for a live registry: a resolved binding ttl above it is CLAMPED (not refused). This is operator hygiene; the load-bearing ceiling is the RESOLVER's own clamp (§6a.4). Zero disables the seed of a live policy — set it whenever --issuer-policy-mode is non-empty.")
 	flag.Parse()
 
 	// Wire --hash-type into the process-global authoring default before
@@ -363,7 +364,7 @@ func main() {
 	var peerIssuedIssuer *peerissued.Issuer
 	var peerIssuedSeedEntries []peer.SeedPolicyEntry
 	if *issuerPolicyMode != "" {
-		policy, err := buildIssuerPolicy(*issuerPolicyMode, *issuerPolicyAllowlist, *issuerPolicyNameConstraints, *issuerPolicyDefaultTTL)
+		policy, err := buildIssuerPolicy(*issuerPolicyMode, *issuerPolicyAllowlist, *issuerPolicyNameConstraints, *issuerPolicyDefaultTTL, *issuerPolicyMaxTTL)
 		if err != nil {
 			log.Fatalf("--issuer-policy-mode: %v", err)
 		}
@@ -1446,7 +1447,7 @@ func issuerSeedGrants(openAccess bool) []types.GrantEntry {
 // policy is installed as the Issuer's in-memory fallback; an explicit
 // `system/registry/issuer-policy` entity in the store still wins at
 // dispatch time so an operator can re-tune without a restart.
-func buildIssuerPolicy(mode, allowlistCSV, nameConstraints string, defaultTTL time.Duration) (types.IssuerPolicyData, error) {
+func buildIssuerPolicy(mode, allowlistCSV, nameConstraints string, defaultTTL, maxTTL time.Duration) (types.IssuerPolicyData, error) {
 	switch mode {
 	case types.IssuerPolicyModeOpen, types.IssuerPolicyModeAllowlist, types.IssuerPolicyModeManual:
 		// supported
@@ -1474,6 +1475,19 @@ func buildIssuerPolicy(mode, allowlistCSV, nameConstraints string, defaultTTL ti
 	if defaultTTL > 0 {
 		ms := uint64(defaultTTL.Milliseconds())
 		p.DefaultTTL = &ms
+	}
+
+	// §6a.9 (v1.11): max_ttl is the issuer-side ceiling, REQUIRED on a live
+	// policy. Seed it and enforce default_ttl <= max_ttl here so the armed peer
+	// is conformant before it ever reaches set-issuer-policy's write gate.
+	if maxTTL > 0 {
+		ms := uint64(maxTTL.Milliseconds())
+		p.MaxTTL = &ms
+	}
+	if p.DefaultTTL != nil && p.MaxTTL != nil && *p.DefaultTTL > *p.MaxTTL {
+		return types.IssuerPolicyData{}, fmt.Errorf(
+			"--issuer-policy-default-ttl (%d ms) exceeds --issuer-policy-max-ttl (%d ms): default_ttl MUST NOT exceed the ceiling (§6a.9, v1.11)",
+			*p.DefaultTTL, *p.MaxTTL)
 	}
 
 	return p, nil

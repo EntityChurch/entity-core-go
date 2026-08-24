@@ -348,9 +348,16 @@ func RevisionCommitParamsDataFromEntity(e entity.Entity) (RevisionCommitParamsDa
 
 // RevisionLogParamsData is the data payload for system/revision/log-params.
 type RevisionLogParamsData struct {
-	Prefix string    `cbor:"prefix"`
-	Limit  *uint64   `cbor:"limit,omitempty"`
-	Since  hash.Hash `cbor:"since,omitzero"`
+	Prefix string  `cbor:"prefix"`
+	Limit  *uint64 `cbor:"limit,omitempty"`
+	// StartAt is an INCLUSIVE anchor: the walk begins AT this version and moves
+	// toward older ancestors ("start here and walk back"), so log(start_at: v2)
+	// over v3→v2→v1 returns [v2, v1]. Renamed from `since` (SA-PY-7, arch
+	// ROUTING-2026-08-18-g §3): `log` wants a cursor, `fetch` wants an exclusive
+	// watermark, and giving both the name `since` made their result sets
+	// disjoint for the same argument. `since` is now REFUSED on log (no installed
+	// base, no migration). fetch.since is unchanged.
+	StartAt hash.Hash `cbor:"start_at,omitzero"`
 }
 
 func (d RevisionLogParamsData) ToEntity() (entity.Entity, error) {

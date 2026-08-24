@@ -174,8 +174,14 @@ func (h *Handler) Manifest() types.HandlerManifestData {
 			// Go additions (spec-issue: §3.1's block cannot authorize the
 			// §4.1 graph's own advance-time dispatches).
 			{
-				Handlers:  types.CapabilityScope{Include: []string{HandlerPattern}},
-				Resources: types.CapabilityScope{Include: []string{"system/network/*", "system/inbox/network/*"}},
+				Handlers: types.CapabilityScope{Include: []string{HandlerPattern}},
+				// The lifecycle ops target the BARE handler path (maintain.go's
+				// Resource: {Targets: ["system/network"]}), so the bare path is
+				// listed explicitly alongside the subtree. §5.4 `system/network/*`
+				// does NOT self-match `system/network` (ROUTING-2026-08-18-o §4);
+				// this grant relied on go's removed permissive self-match and is now
+				// explicit — the same shape rust/py already carry.
+				Resources: types.CapabilityScope{Include: []string{"system/network", "system/network/*", "system/inbox/network/*"}},
 				Operations: types.CapabilityScope{Include: []string{
 					"maintain-peer", "release-peer", "status", "close",
 					"reconnect", "restore-subscriptions",
@@ -183,7 +189,7 @@ func (h *Handler) Manifest() types.HandlerManifestData {
 			},
 			{
 				Handlers:   types.CapabilityScope{Include: []string{"system/continuation"}},
-				Resources:  types.CapabilityScope{Include: []string{"system/network/*", "system/inbox/network/*"}},
+				Resources:  types.CapabilityScope{Include: []string{"system/network", "system/network/*", "system/inbox/network/*"}},
 				Operations: types.CapabilityScope{Include: []string{"advance"}},
 			},
 		},

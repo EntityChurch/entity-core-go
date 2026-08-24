@@ -12,10 +12,10 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
-	"strings"
 	"time"
 	"unicode/utf8"
 
+	"go.entitychurch.org/entity-core-go/core/capability"
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/handler"
@@ -433,7 +433,7 @@ func validateTypePattern(hctx *handler.HandlerContext, raw cbor.RawMessage, patt
 		if !ok {
 			return types.ConstraintValidateResultData{Valid: true, Reason: "type_pattern: hash not resolvable; pass-with-warning per §4.6"}
 		}
-		if globMatch(pattern, ent.Type) {
+		if capability.MatchesPattern(ent.Type, pattern) {
 			return valid()
 		}
 		return invalid("type_pattern: entity type " + ent.Type + " does not match " + pattern)
@@ -450,51 +450,13 @@ func validateTypePattern(hctx *handler.HandlerContext, raw cbor.RawMessage, patt
 		if !ok {
 			return types.ConstraintValidateResultData{Valid: true, Reason: "type_pattern: path resolved but entity not in store; pass-with-warning per §4.6"}
 		}
-		if globMatch(pattern, ent.Type) {
+		if capability.MatchesPattern(ent.Type, pattern) {
 			return valid()
 		}
 		return invalid("type_pattern: entity type " + ent.Type + " does not match " + pattern)
 	}
 
 	return invalid("type_pattern: value is neither a hash nor a path")
-}
-
-// globMatch implements the §4.6 glob semantics: `*` matches one path
-// segment, `**` matches zero or more. Path segments are separated by `/`.
-func globMatch(pattern, s string) bool {
-	pp := strings.Split(pattern, "/")
-	ss := strings.Split(s, "/")
-	return globMatchSegments(pp, ss)
-}
-
-func globMatchSegments(pat, seg []string) bool {
-	for pi, si := 0, 0; ; {
-		if pi == len(pat) {
-			return si == len(seg)
-		}
-		switch pat[pi] {
-		case "**":
-			// match zero or more segments — try every suffix
-			for k := si; k <= len(seg); k++ {
-				if globMatchSegments(pat[pi+1:], seg[k:]) {
-					return true
-				}
-			}
-			return false
-		case "*":
-			if si == len(seg) {
-				return false
-			}
-			pi++
-			si++
-		default:
-			if si == len(seg) || pat[pi] != seg[si] {
-				return false
-			}
-			pi++
-			si++
-		}
-	}
 }
 
 // Compile-time assertion: Handler satisfies the handler.Handler interface.

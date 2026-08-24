@@ -89,6 +89,19 @@ func (h *Handler) handleMergeConfig(_ context.Context, req *handler.Request) (*h
 			return handler.NewErrorResponse(400, "invalid_strategy", err.Error())
 		}
 
+		// §4.4.18 V7 [MUST, v3.12] — a path-scope `pattern` MUST be one of §2.4's
+		// four forms, refused at write with the same grammar and reason as §4.4.17
+		// V6 (validExcludePattern). `pattern` selects the merge strategy and the
+		// strategy decides the merged bytes (the version root), so a pattern the
+		// peer cannot evaluate under the four rules MUST NOT reach the tree —
+		// read-time handling can only collapse it silently. Type scope keys on the
+		// type name, not a glob, so the rule is path-scope only. arch
+		// ROUTING-2026-08-18-m §3 R15.
+		if params.Scope == "path" && !validExcludePattern(cfg.Pattern) {
+			return handler.NewErrorResponse(400, "config/invalid-merge-pattern",
+				"merge-config `pattern` carries at most one `*`, positioned as the whole pattern, the final character after `/`, or the first character (see §2.4)")
+		}
+
 		// Idempotent: re-issuing identical content returns no_change.
 		cfgEntity, err := cfg.ToEntity()
 		if err != nil {

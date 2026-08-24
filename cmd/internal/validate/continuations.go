@@ -379,6 +379,21 @@ func installJoinFromData(ctx context.Context, client *PeerClient, path string, j
 	if join.Resource != nil && len(join.Resource.Targets) > 0 {
 		resources = join.Resource.Targets
 	}
+	// ENTITY-CORE-PROTOCOL §5.5a (arch ROUTING-2026-08-18-d §3, SA-PY-10): a
+	// stored dispatch_capability's resources are GRANTER-framed, and the granter
+	// here is this client. A peer-relative resource therefore canonicalizes to
+	// /{client}/… and authorizes nothing in the target peer's namespace — the
+	// join fires against the server, so the cap must name it in explicit
+	// cross-peer form. §5.5a names the class: "Helpers that use peer-relative form
+	// on foreign-granted caps are non-conformant." Qualify each target against the
+	// peer named in join.Target before minting.
+	if targetPeer := peerFromTargetURI(join.Target); targetPeer != "" {
+		qualified := make([]string, len(resources))
+		for i, r := range resources {
+			qualified[i] = crossPeerResourceTarget(targetPeer, r)
+		}
+		resources = qualified
+	}
 	dispatchCap, dispatchSig, err := client.CreateDispatchCapability(
 		[]string{handlerPattern}, resources, []string{join.Operation},
 	)
@@ -422,6 +437,18 @@ func peerFromTargetURI(target string) string {
 		return rest[:idx]
 	}
 	return rest
+}
+
+// crossPeerResourceTarget rewrites a resource target into explicit cross-peer
+// absolute form /{peerID}/rest, so a cap minted by one peer (the granter) but
+// authorizing action in ANOTHER peer's namespace is framed correctly under
+// §5.5a. A target that is already absolute (/…) or a qualified URI (entity://…)
+// is left untouched; a peer-relative path (including a bare "*") is prefixed.
+func crossPeerResourceTarget(peerID, target string) string {
+	if strings.HasPrefix(target, "/") || strings.HasPrefix(target, "entity://") {
+		return target
+	}
+	return "/" + peerID + "/" + target
 }
 
 func handlerFromTargetURI(target string) string {

@@ -57,11 +57,11 @@ func runCapability(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("delegate_remote_caller_returns_501", "V7 closeout F1 (§2.6) — delegate is same-peer-only in v1; a remote caller MUST receive 501 unsupported_operation (not 403)")
 	r.Declare("hash_hex_path_segment_lowercase", "V7 §3.5 / RT-14 — a peer-emitted content-hash-hex tree path segment MUST be lowercase (format-code byte included); an uppercase segment self-loopbacks but fails cross-peer")
 	// 0.8.1 CAP-1..CAP-7 fold (core-protocol 30ca731); GUIDE-CONFORMANCE §9 register (r),(t),(u),(v).
-	r.Declare("configure_empty_grants_withdrawal", "§6.2 CAP-2/CAP-3 (0.8.1) — configure MUST accept grants:[] and write it as the withdrawal form (present entry, empty grants; distinct from removal)")
-	r.Declare("request_mint_temporal_ceiling", "§6.2/§5.6 CAP-5 (0.8.1) — request over-long ttl_ms mints a CLAMPED token: 200 AND expires_at == MIN_DEFINED exactly (not a 403, not a `<=` check)")
-	r.Declare("request_ttl_zero_and_overflow", "§5.6 CAP-6 (0.8.1) — ttl_ms:0 = expire immediately (created_at, before caller cap); overflow term drops out (no wrap, no saturate)")
-	r.Declare("configure_rejects_base58_partial_prefix", "§6.2 CAP-7 (0.8.1) — partial prefixes rejected in the Base58 encoding too (a truncated peer-id + glob → 400)")
-	r.Declare("ingest_rejects_unrepresentable_expiry", "§6.2 CAP-6a INGEST (0.8.1; rust CAP-6b) — a RECEIVED token whose expires_at, not_before, OR created_at does not fit uint64 (bignum / negative / out of range) is malformed and MUST be refused via the capability_denied disposition (§5.2), NOT fail-open to never-expiring nor a silent decode drop")
+	r.Declare("configure_empty_grants_withdrawal", "V7 §6.2 CAP-2/CAP-3 (0.8.1) — configure MUST accept grants:[] and write it as the withdrawal form (present entry, empty grants; distinct from removal)")
+	r.Declare("request_mint_temporal_ceiling", "V7 §6.2/§5.6 CAP-5 (0.8.1) — request over-long ttl_ms mints a CLAMPED token: 200 AND expires_at == MIN_DEFINED exactly (not a 403, not a `<=` check)")
+	r.Declare("request_ttl_zero_and_overflow", "V7 §5.6 CAP-6 (0.8.1) — ttl_ms:0 = expire immediately (created_at, before caller cap); overflow term drops out (no wrap, no saturate)")
+	r.Declare("configure_rejects_base58_partial_prefix", "V7 §6.2 CAP-7 (0.8.1) — partial prefixes rejected in the Base58 encoding too (a truncated peer-id + glob → 400)")
+	r.Declare("ingest_rejects_unrepresentable_expiry", "V7 §6.2 CAP-6a INGEST (0.8.1; rust CAP-6b) — a RECEIVED token whose expires_at, not_before, OR created_at does not fit uint64 (bignum / negative / out of range) is malformed and MUST be refused via the capability_denied disposition (§5.2), NOT fail-open to never-expiring nor a silent decode drop")
 
 	uri := fmt.Sprintf("entity://%s/system/capability", client.RemotePeerID())
 

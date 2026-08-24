@@ -17,7 +17,6 @@ package registry
 import (
 	"context"
 	"fmt"
-	"path"
 	"reflect"
 	"strings"
 	"sync"
@@ -196,8 +195,13 @@ func (h *Handler) Resolve(hctx *handler.HandlerContext, name string, isFallback 
 		filtered := make(map[string]bool)
 		any := false
 		for _, d := range cfg.NameFormatDispatch {
-			matched, err := path.Match(d.Pattern, name)
-			if err != nil || !matched {
+			// §4.1a name_format_dispatch grammar [REGISTRY 1.13]: the ONLY
+			// metacharacter is '*'; every other byte (including '/') is a
+			// literal, and no pattern is invalid — so this is matchDispatchName,
+			// NOT path.Match (which grants '?'/'[…]' meaning this grammar denies
+			// and stops '*' at '/'). See matchDispatchName's doc + REG-DISPATCH-
+			// GRAMMAR-1 (glob_dispatch_test.go).
+			if !matchDispatchName(d.Pattern, name) {
 				continue
 			}
 			any = true
@@ -385,6 +389,60 @@ func stablePrioritySorted(chain []types.ResolverChainEntry) []types.ResolverChai
 	return out
 }
 
+// matchDispatchName implements the EXTENSION-REGISTRY §4.1a
+// name_format_dispatch pattern grammar, ruled closed at [REGISTRY 1.13]:
+//
+//   - '*' is the ONLY metacharacter. It matches any run of characters,
+//     INCLUDING NONE, and it crosses every byte — '/' is not a separator,
+//     a name is a flat string with no segment structure.
+//   - Every other byte is a literal that matches only itself: '?', '[', ']',
+//     '\\', '.', ':', '@', '/' all match themselves. This is the difference
+//     from path.Match / filepath.Match / fnmatch, which grant '?' and '[…]'
+//     meaning and stop '*' at '/'.
+//   - Any number of '*' is permitted ('*@*.*' is three).
+//   - The match is anchored at both ends — there is no substring form.
+//   - No pattern is invalid: every string is well-formed because every
+//     non-'*' byte is a literal, so this never errors and never rejects.
+//     (That is the real divergence from EXTENSION-REVISION's four forms,
+//     which CAN be violated and need a 400 at write time; this grammar
+//     cannot, so name_format_dispatch has no write-time rejection.)
+//
+// This is a registry-local matcher scoped to the name_format_dispatch[].pattern
+// field — NOT ENTITY-CORE-PROTOCOL §5.4 (capability.MatchesPattern) and NOT
+// EXTENSION-REVISION's globMatch. Conformance: REG-DISPATCH-GRAMMAR-1.
+func matchDispatchName(pattern, name string) bool {
+	// Split on '*'; each piece is a literal segment that must appear in
+	// order, the first anchored at the start and the last at the end.
+	// Standard '*'-only wildcard match: leftmost-greedy needs no backtrack.
+	segs := strings.Split(pattern, "*")
+	if len(segs) == 1 {
+		return pattern == name // no '*' → exact literal match, anchored both ends
+	}
+	// First segment anchored at the start.
+	if !strings.HasPrefix(name, segs[0]) {
+		return false
+	}
+	name = name[len(segs[0]):]
+	// Last segment anchored at the end; reserve it so a middle segment
+	// cannot consume the bytes the suffix needs.
+	last := segs[len(segs)-1]
+	if !strings.HasSuffix(name, last) {
+		return false
+	}
+	name = name[:len(name)-len(last)]
+	// Middle segments matched in order (empty piece = consecutive '*').
+	for _, m := range segs[1 : len(segs)-1] {
+		if m == "" {
+			continue
+		}
+		i := strings.Index(name, m)
+		if i < 0 {
+			return false
+		}
+		name = name[i+len(m):]
+	}
+	return true
+}
+
 // init guards against accidentally importing the package as a side-effect.
-var _ = strings.HasPrefix
 var _ = fmt.Errorf

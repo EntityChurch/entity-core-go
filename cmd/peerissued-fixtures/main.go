@@ -81,6 +81,21 @@ const (
 	ClockTTLShort   uint64 = 1_000
 	ClockNowExpired uint64 = 1_001_001
 	NegativeTTL     uint64 = 30_000
+
+	// ClockTTLLong keeps a binding that is meant to resolve VALID under the peer
+	// under test's own wall clock. Post CAP-registry F2/D3 (d948b4f,
+	// peerissued.go:316) a peer-issued binding MUST carry a non-null ttl — a
+	// null-ttl one is refused before it can resolve. But IssuedAt is pinned at
+	// ClockIssuedAt (1970) for cohort byte-determinism, and §2.1 step 5 evaluates
+	// `issued_at + ttl` against the RESOLVING peer's live wall clock (that is why
+	// EXPIRED-1's 1970+1s ttl reads expired "under any wall clock a peer will ever
+	// run with"). So the only determinism-preserving ttl that resolves under BOTH
+	// the injected self-verify clock (ClockNowResolve) and a real 2026+ wall clock
+	// is one large enough to reach past that wall clock: ~316 years, expiry ≈ 2286.
+	// Every vector whose binding is meant to be LEGAL (RESOLVE-1, VERIFY-FAIL-1,
+	// REVOKED-1, PRECEDE-1 — each varying one non-ttl thing) carries it; only
+	// EXPIRED-1, whose one variance IS a lapsed ttl, keeps ClockTTLShort.
+	ClockTTLLong uint64 = 10_000_000_000_000
 )
 
 // cohortName — the same NFC name across every vector, so the cross-impl
@@ -219,11 +234,13 @@ func run(outDir string) error {
 
 	// RESOLVE-1 — happy path live-fetch.
 	{
+		ttl := ClockTTLLong
 		body := types.BindingData{
 			Name:         nameFor("RESOLVE-1"),
 			Kind:         types.BindingKindPeerIssued,
 			TargetPeerID: fixTargetPeerID,
 			IssuedAt:     ClockIssuedAt,
+			TTL:          &ttl,
 		}
 		bind, sig, err := buildBindingPair(registryKey, body)
 		if err != nil {
@@ -267,11 +284,13 @@ func run(outDir string) error {
 
 	// VERIFY-FAIL-1 — non-pinned signer.
 	{
+		ttl := ClockTTLLong
 		body := types.BindingData{
 			Name:         nameFor("VERIFY-FAIL-1"),
 			Kind:         types.BindingKindPeerIssued,
 			TargetPeerID: "2KAttackerForgedTargetPeerID111111111111111111",
 			IssuedAt:     ClockIssuedAt,
+			TTL:          &ttl,
 		}
 		bind, sig, err := buildBindingPair(attackerKey, body)
 		if err != nil {
@@ -311,11 +330,13 @@ func run(outDir string) error {
 
 	// REVOKED-1 — valid binding + verifying revocation.
 	{
+		ttl := ClockTTLLong
 		body := types.BindingData{
 			Name:         nameFor("REVOKED-1"),
 			Kind:         types.BindingKindPeerIssued,
 			TargetPeerID: fixTargetPeerID,
 			IssuedAt:     ClockIssuedAt,
+			TTL:          &ttl,
 		}
 		bind, sig, err := buildBindingPair(registryKey, body)
 		if err != nil {
@@ -414,11 +435,13 @@ func run(outDir string) error {
 
 	// PRECEDE-1 — offline cached binding, identical verify as live.
 	{
+		ttl := ClockTTLLong
 		body := types.BindingData{
 			Name:         nameFor("PRECEDE-1"),
 			Kind:         types.BindingKindPeerIssued,
 			TargetPeerID: fixTargetPeerID,
 			IssuedAt:     ClockIssuedAt,
+			TTL:          &ttl,
 		}
 		bind, sig, err := buildBindingPair(registryKey, body)
 		if err != nil {
@@ -699,8 +722,9 @@ func verifyAll(registryKey crypto.Keypair, registryEnt entity.Entity, registryPI
 
 func verifyResolve(registryKey crypto.Keypair, registryEnt entity.Entity, registryPID string, v vectorEntry) error {
 	reader := newMemReader()
+	ttl := ClockTTLLong
 	body := types.BindingData{Name: v.Name, Kind: types.BindingKindPeerIssued,
-		TargetPeerID: fixTargetPeerID, IssuedAt: ClockIssuedAt}
+		TargetPeerID: fixTargetPeerID, IssuedAt: ClockIssuedAt, TTL: &ttl}
 	bind, sig, _ := buildBindingPair(registryKey, body)
 	reader.tree[types.PeerIssuedByNamePath(v.Name)] = bind.ContentHash
 	reader.tree[types.LocalSignaturePath(bind.ContentHash)] = sig.ContentHash
@@ -733,8 +757,9 @@ func verifyResolve(registryKey crypto.Keypair, registryEnt entity.Entity, regist
 
 func verifyVerifyFail(attackerKey crypto.Keypair, registryEnt entity.Entity, registryPID string, v vectorEntry) error {
 	reader := newMemReader()
+	ttl := ClockTTLLong
 	body := types.BindingData{Name: v.Name, Kind: types.BindingKindPeerIssued,
-		TargetPeerID: "2KAttackerForgedTargetPeerID111111111111111111", IssuedAt: ClockIssuedAt}
+		TargetPeerID: "2KAttackerForgedTargetPeerID111111111111111111", IssuedAt: ClockIssuedAt, TTL: &ttl}
 	bind, sig, _ := buildBindingPair(attackerKey, body)
 	reader.tree[types.PeerIssuedByNamePath(v.Name)] = bind.ContentHash
 	reader.tree[types.LocalSignaturePath(bind.ContentHash)] = sig.ContentHash
@@ -751,8 +776,9 @@ func verifyVerifyFail(attackerKey crypto.Keypair, registryEnt entity.Entity, reg
 
 func verifyRevoked(registryKey crypto.Keypair, registryEnt entity.Entity, registryPID string, v vectorEntry) error {
 	reader := newMemReader()
+	ttl := ClockTTLLong
 	body := types.BindingData{Name: v.Name, Kind: types.BindingKindPeerIssued,
-		TargetPeerID: fixTargetPeerID, IssuedAt: ClockIssuedAt}
+		TargetPeerID: fixTargetPeerID, IssuedAt: ClockIssuedAt, TTL: &ttl}
 	bind, sig, _ := buildBindingPair(registryKey, body)
 	rev, revSig, _ := buildRevocationPair(registryKey, bind.ContentHash, ClockIssuedAt+500_000)
 	reader.tree[types.PeerIssuedByNamePath(v.Name)] = bind.ContentHash
@@ -799,8 +825,9 @@ func verifyExpired(registryKey crypto.Keypair, registryEnt entity.Entity, regist
 
 func verifyPrecede(registryKey crypto.Keypair, registryEnt entity.Entity, registryPID string, v vectorEntry) error {
 	reader := newMemReader() // empty — must not be touched for binding/signature
+	ttl := ClockTTLLong
 	body := types.BindingData{Name: v.Name, Kind: types.BindingKindPeerIssued,
-		TargetPeerID: fixTargetPeerID, IssuedAt: ClockIssuedAt}
+		TargetPeerID: fixTargetPeerID, IssuedAt: ClockIssuedAt, TTL: &ttl}
 	bind, sig, _ := buildBindingPair(registryKey, body)
 	hctx := newHctx()
 	if _, err := hctx.Store.Put(bind); err != nil {

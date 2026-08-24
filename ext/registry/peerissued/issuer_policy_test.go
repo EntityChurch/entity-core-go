@@ -102,10 +102,12 @@ func TestSetThenGetIssuerPolicy_RoundTrip(t *testing.T) {
 	iss, hctx := newIssuer(t, registryKP)
 
 	ttl := uint64(3600_000)
+	maxTTL := uint64(86_400_000)
 	want := types.IssuerPolicyData{
 		Mode:       types.IssuerPolicyModeAllowlist,
 		Allowlist:  []string{"peer-a", "peer-b"},
 		DefaultTTL: &ttl,
+		MaxTTL:     &maxTTL, // v1.11: REQUIRED on a live policy through set-issuer-policy
 	}
 
 	setResp := dispatchSet(t, iss, hctx, want)
@@ -143,20 +145,26 @@ func TestSetIssuerPolicy_ReplacesWhole_DoesNotMerge(t *testing.T) {
 	iss, hctx := newIssuer(t, registryKP)
 
 	ttl := uint64(3600_000)
+	ttl2 := uint64(7200_000)
+	maxTTL := uint64(86_400_000)
 	constraints := "*.example"
 	first := types.IssuerPolicyData{
 		Mode:            types.IssuerPolicyModeAllowlist,
 		Allowlist:       []string{"peer-a"},
 		DefaultTTL:      &ttl,
+		MaxTTL:          &maxTTL,
 		NameConstraints: &constraints,
 	}
 	if resp := dispatchSet(t, iss, hctx, first); resp.Status != 200 {
 		t.Fatalf("first set: status want 200 got %d", resp.Status)
 	}
 
-	// Second write carries mode only. Every optional field is absent —
-	// which §6a.9.2 defines as *unset*, not *unchanged*.
-	second := types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen}
+	// Second write carries mode + the mandatory default_ttl (CAP registry D11 —
+	// a live policy MUST define it), with a DIFFERENT value to prove replace not
+	// merge, and DROPS the other optional fields. Absent optional fields are
+	// *unset*, not *unchanged* (§6a.9.2); default_ttl is no longer optional, so
+	// the replace property is shown by its value changing rather than clearing.
+	second := types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen, DefaultTTL: &ttl2, MaxTTL: &maxTTL}
 	if resp := dispatchSet(t, iss, hctx, second); resp.Status != 200 {
 		t.Fatalf("second set: status want 200 got %d", resp.Status)
 	}
@@ -171,8 +179,8 @@ func TestSetIssuerPolicy_ReplacesWhole_DoesNotMerge(t *testing.T) {
 	if len(got.Allowlist) != 0 {
 		t.Fatalf("allowlist survived a whole-replace: %v — this is merge semantics", got.Allowlist)
 	}
-	if got.DefaultTTL != nil {
-		t.Fatalf("default_ttl survived a whole-replace: %d — this is merge semantics", *got.DefaultTTL)
+	if got.DefaultTTL == nil || *got.DefaultTTL != ttl2 {
+		t.Fatalf("default_ttl not replaced whole: got %v want %d — a merge would keep the first value or two would appear", got.DefaultTTL, ttl2)
 	}
 	if got.NameConstraints != nil {
 		t.Fatalf("name_constraints survived a whole-replace: %q — this is merge semantics", *got.NameConstraints)
@@ -228,7 +236,9 @@ func TestSeedPolicy_WritesTheEntity_AndDoesNotOverwrite(t *testing.T) {
 	// An operator-set policy outranks the flag: seeding again must not
 	// revert it. A flag arms an unarmed registry; it does not silently
 	// undo a set-issuer-policy call.
-	if r := dispatchSet(t, iss, hctx, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen}); r.Status != 200 {
+	setTTL := uint64(3600_000)
+	setMaxTTL := uint64(86_400_000)
+	if r := dispatchSet(t, iss, hctx, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen, DefaultTTL: &setTTL, MaxTTL: &setMaxTTL}); r.Status != 200 {
 		t.Fatalf("set over seed: status want 200 got %d", r.Status)
 	}
 	if err := iss.SeedPolicy(hctx.Store, hctx.LocationIndex); err != nil {
@@ -283,6 +293,47 @@ func TestLoadPolicy_StoreWinsOverSeed(t *testing.T) {
 	}
 	if got.Mode != types.IssuerPolicyModeOpen {
 		t.Fatalf("store-first violated: want %q got %q", types.IssuerPolicyModeOpen, got.Mode)
+	}
+}
+
+// REG-TTL-CEILING-1 (REGISTRY §6a.9, v1.11) — set-issuer-policy MUST reject a
+// live-registration policy whose max_ttl is absent (400), and one whose
+// default_ttl exceeds max_ttl (400); the control is a policy with both, where
+// default_ttl <= max_ttl, which is accepted 200. Same trigger and site as the
+// default_ttl gate: max_ttl is the operator's field, and this is where it lives.
+func TestSetIssuerPolicy_MaxTTL_Ceiling(t *testing.T) {
+	registryKP, _, _ := newRegistry(t)
+	iss, hctx := newIssuer(t, registryKP)
+
+	def := uint64(3_600_000)
+	big := uint64(7_200_000)
+	small := uint64(1_800_000)
+
+	// (1) live mode, default_ttl present but max_ttl ABSENT → 400.
+	if resp := dispatchSet(t, iss, hctx, types.IssuerPolicyData{
+		Mode: types.IssuerPolicyModeOpen, DefaultTTL: &def,
+	}); resp.Status != 400 {
+		t.Fatalf("absent max_ttl: status want 400 got %d (%s) — v1.11 makes max_ttl REQUIRED on a live policy", resp.Status, decodeErrorCode(t, resp))
+	}
+
+	// (2) default_ttl > max_ttl → 400.
+	if resp := dispatchSet(t, iss, hctx, types.IssuerPolicyData{
+		Mode: types.IssuerPolicyModeOpen, DefaultTTL: &big, MaxTTL: &small,
+	}); resp.Status != 400 {
+		t.Fatalf("default_ttl > max_ttl: status want 400 got %d (%s)", resp.Status, decodeErrorCode(t, resp))
+	}
+
+	// Negative half of (1)+(2): neither rejected policy was stored — get is still
+	// 404 (nothing armed yet).
+	if resp := dispatchGet(t, iss, hctx); resp.Status != 404 {
+		t.Fatalf("a rejected ceiling policy was stored anyway: get status %d, want 404", resp.Status)
+	}
+
+	// (3) control — both present, default_ttl <= max_ttl → 200.
+	if resp := dispatchSet(t, iss, hctx, types.IssuerPolicyData{
+		Mode: types.IssuerPolicyModeOpen, DefaultTTL: &def, MaxTTL: &big,
+	}); resp.Status != 200 {
+		t.Fatalf("control (default_ttl <= max_ttl): status want 200 got %d (%s)", resp.Status, decodeErrorCode(t, resp))
 	}
 }
 

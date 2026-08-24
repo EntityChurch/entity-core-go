@@ -13,11 +13,14 @@ import (
 // configPrefix is the tree path prefix where history configs are stored.
 const configPrefix = "system/history/config/"
 
-// configEntry is a cached history config with its canonicalized pattern.
+// configEntry is a cached history config with its canonicalized pattern and
+// the two specificity keys (§6.2 v1.7). Key 3 — lexicographic byte order on the
+// canonicalized pattern — is read off canonicalizedPat directly at compare time.
 type configEntry struct {
 	config           types.HistoryConfigData
 	canonicalizedPat string
-	specificity      int
+	literalSegs      int // key 1 — literal (non-"*") segment count; higher wins
+	totalDepth       int // key 2 — total segment depth; higher wins
 }
 
 // configCache maintains an in-memory cache of history configurations,
@@ -54,17 +57,37 @@ func (c *configCache) load(li store.LocationIndex, cs store.ContentStore) {
 			continue
 		}
 		canon := canonicalizePattern(cfg.Pattern, c.localPeerID)
+		lit, depth := patternSpecificity(canon)
 		c.entries = append(c.entries, configEntry{
 			config:           cfg,
 			canonicalizedPat: canon,
-			specificity:      patternSpecificity(canon),
+			literalSegs:      lit,
+			totalDepth:       depth,
 		})
 	}
 
-	// Sort by specificity descending (most specific first).
+	// Sort most-specific-first by the §6.2 three-key tuple. The comparator is a
+	// TOTAL order (key 3 breaks every key-1/key-2 tie), so the selected config
+	// does not depend on enumeration order — the v1.7 [MUST]. sort.Slice need not
+	// be stable because no two distinct patterns can compare equal.
 	sort.Slice(c.entries, func(i, j int) bool {
-		return c.entries[i].specificity > c.entries[j].specificity
+		return moreSpecific(c.entries[i], c.entries[j])
 	})
+}
+
+// moreSpecific reports whether a outranks b under §6.2's ordered tuple:
+// (1) literal segments — higher wins; (2) total depth — higher wins;
+// (3) lexicographic byte order on the canonicalized pattern — LOWER wins.
+// Key 3 makes the order total and peer-independent, so every conformant peer
+// selects the same config regardless of the store's listing order.
+func moreSpecific(a, b configEntry) bool {
+	if a.literalSegs != b.literalSegs {
+		return a.literalSegs > b.literalSegs
+	}
+	if a.totalDepth != b.totalDepth {
+		return a.totalDepth > b.totalDepth
+	}
+	return a.canonicalizedPat < b.canonicalizedPat
 }
 
 // onTreeChange handles a config path change by reloading affected entry.
@@ -140,20 +163,27 @@ func matchHistoryPattern(pattern, path string) bool {
 	return false
 }
 
-// patternSpecificity calculates specificity for pattern priority.
-// More literal segments = higher specificity. Explicit peer ID > wildcard peer.
-func patternSpecificity(pattern string) int {
-	if pattern == "*" {
-		return 0
+// patternSpecificity returns the two ordered specificity keys of a canonicalized
+// pattern per §6.2 (v1.7): the count of literal (non-"*") segments and the total
+// segment depth. §2.2's "explicit peer ID > wildcard peer" needs no separate key
+// — an explicit peer segment is literal and a "*" peer segment is not, so key 1
+// already ranks /{peerA}/project/* above */project/*.
+//
+// This deliberately does NOT collapse the two keys into one scalar: a scalar
+// (e.g. "2 per literal, 1 per wildcard") manufactures ties §2.2 does not have —
+// a/b/c/d (4 literal, depth 4) and a/*/c/*/e (3 literal, depth 5) both score 8 —
+// and then resolves them by whatever the store yielded. Key 1 must decide that
+// pair for the a/b/c/d config; the tuple comparison in moreSpecific does so.
+func patternSpecificity(pattern string) (literal, depth int) {
+	trimmed := strings.Trim(pattern, "/")
+	if trimmed == "" {
+		return 0, 0
 	}
-	segments := strings.Split(strings.Trim(pattern, "/"), "/")
-	score := 0
-	for _, seg := range segments {
+	for _, seg := range strings.Split(trimmed, "/") {
+		depth++
 		if seg != "*" {
-			score += 2 // literal segment
-		} else {
-			score += 1 // wildcard segment (less specific)
+			literal++
 		}
 	}
-	return score
+	return literal, depth
 }

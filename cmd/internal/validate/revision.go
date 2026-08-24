@@ -170,7 +170,7 @@ func runRevision(ctx context.Context, client *PeerClient) []CheckResult {
 	// Step 17: Log pagination
 	r.Declare("log_pagination_limit", "REVISION §4.3.2")
 	r.Declare("log_pagination_has_more", "REVISION §4.3.2")
-	r.Declare("log_pagination_since", "REVISION §4.3.2")
+	r.Declare("log_start_at_inclusive", "REVISION §4.3.2 SA-PY-7 — log.start_at is an inclusive anchor (renamed from since)")
 
 	// Step 18: Merge result cascade_warnings field
 	r.Declare("merge_result_has_cascade_warnings_field", "REVISION v2.6 §4.4.4 (R5)")
@@ -1406,7 +1406,7 @@ func runRevision(ctx context.Context, client *PeerClient) []CheckResult {
 		return FailCheck("log should set has_more=true when 4 versions exist and limit=2")
 	})
 
-	r.Run("log_pagination_since", func() CheckOutcome {
+	r.Run("log_start_at_inclusive", func() CheckOutcome {
 		if out, ok := r.Require("log_pagination_limit"); !ok {
 			return out
 		}
@@ -1414,22 +1414,28 @@ func runRevision(ctx context.Context, client *PeerClient) []CheckResult {
 		pgPrefix := r.Load("pg_prefix").(string)
 
 		if len(logResult.Versions) == 0 {
-			return SkipCheck("no versions to paginate from")
+			return SkipCheck("no versions to anchor from")
 		}
-		sinceHash := logResult.Versions[len(logResult.Versions)-1]
+		// start_at is an INCLUSIVE anchor: the walk begins AT it (SA-PY-7, arch
+		// ROUTING-2026-08-18-g §3). `since` is REFUSED on log. Anchoring at a
+		// version already returned MUST return that version as the first result.
+		anchor := logResult.Versions[len(logResult.Versions)-1]
 		resp, err := client.RevisionExecute(ctx, "log", types.RevisionLogParamsData{
-			Prefix: pgPrefix,
-			Since:  sinceHash,
+			Prefix:  pgPrefix,
+			StartAt: anchor,
 		})
 		if err != nil || resp.Status != 200 {
-			return FailCheck(fmt.Sprintf("log with since failed: %v", err))
+			return FailCheck(fmt.Sprintf("log with start_at failed: %v", err))
 		}
 		var page2 types.RevisionLogResultData
 		decodeRevisionResult(resp, &page2)
-		if len(page2.Versions) > 0 {
-			return PassCheck(fmt.Sprintf("log with since returns %d additional version(s)", len(page2.Versions)))
+		if len(page2.Versions) == 0 {
+			return FailCheck("log start_at returned 0 versions — the anchor itself must appear (inclusive)")
 		}
-		return WarnCheck("log with since returned 0 versions")
+		if page2.Versions[0] != anchor {
+			return FailCheck("log start_at is INCLUSIVE — the anchor MUST be the first result (SA-PY-7)")
+		}
+		return PassCheck(fmt.Sprintf("log start_at is an inclusive anchor: %d version(s) from the anchor, oldest-ward", len(page2.Versions)))
 	})
 
 	// --- Step 18: Merge result cascade_warnings field ---

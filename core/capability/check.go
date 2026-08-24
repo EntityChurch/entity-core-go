@@ -381,10 +381,16 @@ func MatchesPattern(path, pattern string) bool {
 		return MatchesPattern(pathRest, remainder)
 	}
 
-	// Subtree match: prefix/*
+	// Subtree match: pattern/* — canonical §5.4 is `prefix = pattern without
+	// trailing "*"; return path starts with prefix`. The trailing "/" is part of
+	// the prefix, so `a/b/*` matches `a/b/` and everything under it but NOT the
+	// bare `a/b` — there is no bare-prefix self-match. A grant on
+	// `/{peer}/system/capability/*` therefore does not reach `/{peer}/system/
+	// capability` itself; that would be an authorization widening in the
+	// permissive direction, and rust/py both refuse it (ROUTING-2026-08-18-o §4).
 	if strings.HasSuffix(pattern, "/*") {
-		prefix := pattern[:len(pattern)-1] // keep the trailing /
-		return strings.HasPrefix(path, prefix) || path == pattern[:len(pattern)-2]
+		prefix := pattern[:len(pattern)-1] // pattern without trailing "*" (keeps the /)
+		return strings.HasPrefix(path, prefix)
 	}
 
 	// Exact match.

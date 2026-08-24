@@ -124,6 +124,15 @@ func decodeErrorCode(t *testing.T, resp *handler.Response) string {
 // so the Issuer's loadPolicy picks it up.
 func installPolicy(t *testing.T, hctx *handler.HandlerContext, p types.IssuerPolicyData) {
 	t.Helper()
+	// CAP registry D11/D12: a live-registration policy MUST define default_ttl,
+	// else a request omitting requested_ttl resolves to a null ttl and register
+	// fails closed (403 policy_rejected). These fixtures are not about ttl, so
+	// default one when the caller left it nil. The D11/D12 negative cases seed
+	// their null-default_ttl policy directly (not through this helper).
+	if p.DefaultTTL == nil {
+		d := uint64(1_000_000_000)
+		p.DefaultTTL = &d
+	}
 	ent, err := p.ToEntity()
 	if err != nil {
 		t.Fatalf("encode issuer-policy: %v", err)
@@ -214,11 +223,16 @@ func TestRegister_AllowlistMode_DenyThenAllow(t *testing.T) {
 	}
 
 	// (b) allow-listed publisher → 200 + binding hash returned + resolvable.
+	// RequestedTTL is set because this policy defines no DefaultTTL, and CAP
+	// registry D3 makes a null-ttl peer-issued binding unresolvable — this test
+	// is about the allowlist gate, not ttl.
+	reqTTL := uint64(1_000_000)
 	bodyAllowed := types.RegistryRegisterRequestData{
 		Name:         "billslab.com",
 		TargetPeerID: string(allowed.PeerID()),
 		Nonce:        []byte{0xCA, 0xFE, 0xBA, 0xBE},
 		IssuedAt:     1_000_001,
+		RequestedTTL: &reqTTL,
 	}
 	resp = dispatchRegister(t, iss, hctx, stageRequest(t, hctx, allowed, bodyAllowed))
 	if resp.Status != 200 {
@@ -623,5 +637,336 @@ func TestRenew_Unsigned_Rejected(t *testing.T) {
 	}
 	if code := decodeErrorCode(t, resp); code != types.RegistryErrSignatureInvalid {
 		t.Fatalf("unsigned renew: code want %s got %s", types.RegistryErrSignatureInvalid, code)
+	}
+}
+
+// --- CAP registry D11 / D12: the issuer must not mint a null-ttl binding ------
+//
+// REG-ISSUER-NULLTTL-POLICY-1 (arch ROUTING-2026-08-18-d §1), two-stage, same
+// shape as the domain-control pair: D11 refuses the policy at set-issuer-policy,
+// and D12 fails closed for a policy that reached the tree out of band.
+
+// D11 — set-issuer-policy MUST refuse a live-registration policy with no
+// default_ttl (it can only mint bindings D3 makes unresolvable), and store
+// nothing. Mirrors TestSetIssuerPolicy_DomainControl_400UnsupportedMode.
+func TestSetIssuerPolicy_NullDefaultTTL_Refused(t *testing.T) {
+	registryKP, _, _ := newRegistry(t)
+	iss, hctx := newIssuer(t, registryKP)
+
+	// dispatchSet goes through the handler (unlike installPolicy, which seeds
+	// directly), so D11 gates it. Open mode, no default_ttl.
+	resp := dispatchSet(t, iss, hctx, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen})
+	if resp.Status != 400 {
+		t.Fatalf("null-default_ttl policy set: status want 400 got %d", resp.Status)
+	}
+	// Nothing stored — the registry is still unarmed.
+	if getResp := dispatchGet(t, iss, hctx); getResp.Status != 404 {
+		t.Fatalf("null-default_ttl policy was rejected but something was stored (get → %d)", getResp.Status)
+	}
+}
+
+// D12 — a null-default_ttl policy seeded OUT OF BAND (CLI flag / direct tree
+// write / predating D11) must fail register closed: a request omitting
+// requested_ttl resolves to a null ttl, and the issuer refuses 403
+// policy_rejected, mints nothing, and does not substitute a default.
+func TestRegister_NullResolvedTTL_FailsClosed(t *testing.T) {
+	registryKP, _, _ := newRegistry(t)
+	iss, hctx := newIssuer(t, registryKP,
+		WithIssuerClock(func() uint64 { return 1_000_000 }))
+
+	// Seed a null-default_ttl open policy directly, bypassing D11 (this is the
+	// exact path D12 exists to backstop).
+	polEnt, err := types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen}.ToEntity()
+	if err != nil {
+		t.Fatalf("encode null-ttl policy: %v", err)
+	}
+	if _, err := hctx.Store.Put(polEnt); err != nil {
+		t.Fatalf("store null-ttl policy: %v", err)
+	}
+	if err := hctx.LocationIndex.Set(types.IssuerPolicyStoragePath, polEnt.ContentHash); err != nil {
+		t.Fatalf("bind null-ttl policy: %v", err)
+	}
+
+	// A request that omits requested_ttl → resolved ttl is null.
+	publisher, _ := crypto.Generate()
+	body := types.RegistryRegisterRequestData{
+		Name:         "billslab.com",
+		TargetPeerID: string(publisher.PeerID()),
+		Nonce:        []byte{0x01, 0x02, 0x03, 0x04},
+		IssuedAt:     1_000_000,
+		// no RequestedTTL
+	}
+	resp := dispatchRegister(t, iss, hctx, stageRequest(t, hctx, publisher, body))
+	if resp.Status != 403 {
+		t.Fatalf("register against a null-ttl policy: status want 403 got %d", resp.Status)
+	}
+	if code := decodeErrorCode(t, resp); code != types.RegistryErrPolicyRejected {
+		t.Fatalf("code want %q got %q", types.RegistryErrPolicyRejected, code)
+	}
+	// Nothing minted — no by-name pointer published.
+	if _, exists := hctx.LocationIndex.Get(types.PeerIssuedByNamePath("billslab.com")); exists {
+		t.Fatalf("a binding was published despite the null-ttl refusal (D12 must mint nothing)")
+	}
+}
+
+// REG-RENEW-TTL-CASCADE-1 (REGISTRY §6a.9, v1.9; ruled from go spec-issue
+// 2026-08-18-c / SA-PY-13). renew resolves ttl by a three-step cascade —
+// request ttl > policy default_ttl > the superseded binding's OWN ttl (non-null
+// by §6a.3) — and NEVER refuses. Three rows:
+//
+//	(a) explicit ttl          → successor carries it
+//	(b) omit, null-default    → successor carries the PREDECESSOR's ttl (step 3)
+//	(c) omit, policy default  → successor carries the POLICY's ttl, not (b)'s
+//
+// Row (b) fails against a null-minting peer AND a refusing peer (go's own prior
+// disposition); row (c) fails against a peer that wired inherit ABOVE the policy.
+// Mutation control: delete step 3 (the `existing.TTL != nil` branch in
+// handleRenewRequest) → row (b) mints a null ttl and this test fails.
+func TestRenew_TTLCascade(t *testing.T) {
+	const predTTL = uint64(1_000_000_000) // seedBinding's defaulted policy → the predecessor's ttl
+
+	// setPolicy overwrites the armed issuer policy directly (store-first, the
+	// curated-registry path); defaultTTL==nil seeds a null-default policy.
+	setPolicy := func(t *testing.T, hctx *handler.HandlerContext, defaultTTL *uint64) {
+		t.Helper()
+		ent, err := types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen, DefaultTTL: defaultTTL}.ToEntity()
+		if err != nil {
+			t.Fatalf("encode policy: %v", err)
+		}
+		if _, err := hctx.Store.Put(ent); err != nil {
+			t.Fatalf("store policy: %v", err)
+		}
+		if err := hctx.LocationIndex.Set(types.IssuerPolicyStoragePath, ent.ContentHash); err != nil {
+			t.Fatalf("bind policy: %v", err)
+		}
+	}
+
+	successorTTL := func(t *testing.T, hctx *handler.HandlerContext, r *handler.Response) *uint64 {
+		t.Helper()
+		if r.Status != 200 {
+			t.Fatalf("renew: status want 200 got %d (%s)", r.Status, decodeErrorCode(t, r))
+		}
+		res, err := types.LocalNameBindResultDataFromEntity(r.Result)
+		if err != nil {
+			t.Fatalf("decode renew result: %v", err)
+		}
+		ent, ok := hctx.Store.Get(res.BindingHash)
+		if !ok {
+			t.Fatalf("successor binding not in store")
+		}
+		bd, err := types.BindingDataFromEntity(ent)
+		if err != nil {
+			t.Fatalf("decode successor binding: %v", err)
+		}
+		return bd.TTL
+	}
+
+	seed := func(t *testing.T) (*handler.HandlerContext, func(*testing.T, *uint64, []byte) *handler.Response) {
+		registryKP, _, _ := newRegistry(t)
+		iss, hctx := newIssuer(t, registryKP, WithIssuerClock(func() uint64 { return 1_000_000 }))
+		owner, _ := crypto.Generate()
+		bindingHash := seedBinding(t, iss, hctx, owner, "renew-cascade.com")
+		renew := func(t *testing.T, ttl *uint64, nonce []byte) *handler.Response {
+			t.Helper()
+			ent, err := types.RegistryRenewRequestData{BindingHash: bindingHash, TTL: ttl, Nonce: nonce, IssuedAt: 1_000_001}.ToEntity()
+			if err != nil {
+				t.Fatalf("encode renew: %v", err)
+			}
+			ent = stageProof(t, hctx, owner, ent)
+			r, err := iss.Handle(context.Background(), &handler.Request{Path: IssuerHandlerPattern, Operation: OpRenewRequest, Params: ent, Context: hctx})
+			if err != nil || r == nil {
+				t.Fatalf("Handle renew: r=%v err=%v", r, err)
+			}
+			return r
+		}
+		return hctx, renew
+	}
+
+	t.Run("a_explicit_ttl_carried", func(t *testing.T) {
+		hctx, renew := seed(t)
+		explicit := uint64(86_400_000)
+		if got := successorTTL(t, hctx, renew(t, &explicit, []byte{0x0A})); got == nil || *got != explicit {
+			t.Fatalf("explicit renew: successor ttl want %d got %v", explicit, got)
+		}
+	})
+
+	t.Run("b_omit_null_default_inherits_predecessor", func(t *testing.T) {
+		hctx, renew := seed(t)
+		setPolicy(t, hctx, nil) // null-default policy, store-first — step 2 yields nothing
+		if got := successorTTL(t, hctx, renew(t, nil, []byte{0x0B})); got == nil || *got != predTTL {
+			t.Fatalf("null-default renew: successor ttl want predecessor %d got %v", predTTL, got)
+		}
+	})
+
+	t.Run("c_omit_policy_default_outranks_predecessor", func(t *testing.T) {
+		hctx, renew := seed(t)
+		policyTTL := uint64(500_000_000) // deliberately != predTTL, so step 2 vs step 3 is observable
+		setPolicy(t, hctx, &policyTTL)
+		if got := successorTTL(t, hctx, renew(t, nil, []byte{0x0C})); got == nil || *got != policyTTL {
+			t.Fatalf("policy-default renew: successor ttl want policy %d got %v (predecessor is %d)", policyTTL, got, predTTL)
+		}
+	})
+}
+
+// REG-RENEW-TTL-NULLPRED-1 (REGISTRY §6a.9, v1.10; the terminal refusal restored
+// per ROUTING-2026-08-18-{n,o} §3). The three-step cascade is NOT total: v1.9
+// asserted step 3 is non-null *because* §6a.3 guarantees it, but that reads an
+// invariant as a fact about stored bytes. A predecessor carrying ttl:null can be
+// ALREADY there — seeded out-of-band, written directly to the tree, or predating
+// the rules. A renew omitting ttl, against a policy with no default_ttl, whose
+// predecessor is itself null-ttl, resolves all three steps to null and MUST
+// refuse 403 policy_rejected and publish nothing — never mint a null-ttl
+// successor via a deref-guard fallthrough. The CONTROL is TestRenew_TTLCascade
+// row (b): a non-null predecessor + the same renew returns 200.
+//
+// Mutation control: drop the `if ttlPtr == nil` terminal refusal in
+// handleRenewRequest and the fallthrough mints a null-ttl successor → this fails.
+func TestRenew_NullPredecessorTTL_FailsClosed(t *testing.T) {
+	registryKP, _, _ := newRegistry(t)
+	iss, hctx := newIssuer(t, registryKP, WithIssuerClock(func() uint64 { return 1_000_000 }))
+	owner, _ := crypto.Generate()
+
+	// Null-default policy, store-first — step 2 yields nothing.
+	polEnt, err := types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen}.ToEntity()
+	if err != nil {
+		t.Fatalf("encode null-default policy: %v", err)
+	}
+	if _, err := hctx.Store.Put(polEnt); err != nil {
+		t.Fatalf("store policy: %v", err)
+	}
+	if err := hctx.LocationIndex.Set(types.IssuerPolicyStoragePath, polEnt.ContentHash); err != nil {
+		t.Fatalf("bind policy: %v", err)
+	}
+
+	// A null-ttl predecessor written DIRECTLY to the tree — the shape §6a.3 forbids
+	// on any conformant mint path but that an out-of-band write can produce.
+	pred := types.BindingData{
+		Name:         "nullpred.com",
+		Kind:         types.BindingKindPeerIssued,
+		TargetPeerID: string(owner.PeerID()),
+		IssuedAt:     1_000_000,
+		TTL:          nil, // step 3 yields nothing
+	}
+	predEnt, err := pred.ToEntity()
+	if err != nil {
+		t.Fatalf("encode null-ttl predecessor: %v", err)
+	}
+	if _, err := hctx.Store.Put(predEnt); err != nil {
+		t.Fatalf("store predecessor: %v", err)
+	}
+	if _, err := hctx.TreeSet(types.PeerIssuedByNamePath("nullpred.com"), predEnt.ContentHash, "test-nullpred"); err != nil {
+		t.Fatalf("bind by-name: %v", err)
+	}
+
+	// Renew omitting ttl → all three cascade steps null.
+	renewEnt, err := types.RegistryRenewRequestData{
+		BindingHash: predEnt.ContentHash, TTL: nil, Nonce: []byte{0x0D}, IssuedAt: 1_000_001,
+	}.ToEntity()
+	if err != nil {
+		t.Fatalf("encode renew: %v", err)
+	}
+	renewEnt = stageProof(t, hctx, owner, renewEnt)
+	r, err := iss.Handle(context.Background(), &handler.Request{Path: IssuerHandlerPattern, Operation: OpRenewRequest, Params: renewEnt, Context: hctx})
+	if err != nil || r == nil {
+		t.Fatalf("Handle renew: r=%v err=%v", r, err)
+	}
+	if r.Status != 403 {
+		t.Fatalf("renew of a null-ttl predecessor with no default_ttl: status want 403 got %d (%s) — the cascade terminal refusal is missing; a deref-guard fallthrough would mint a null-ttl successor", r.Status, decodeErrorCode(t, r))
+	}
+	if code := decodeErrorCode(t, r); code != types.RegistryErrPolicyRejected {
+		t.Fatalf("renew null-pred: code want %q got %q", types.RegistryErrPolicyRejected, code)
+	}
+	// Publish nothing: the by-name pointer still names the predecessor, no successor.
+	if h, ok := hctx.LocationIndex.Get(types.PeerIssuedByNamePath("nullpred.com")); !ok || h != predEnt.ContentHash {
+		t.Fatalf("by-name pointer moved despite the 403 — a successor was published (must mint nothing)")
+	}
+}
+
+// REG-TTL-CLAMP-1 (register half) — REGISTRY §6a.9, v1.11. A register-request
+// carrying requested_ttl ABOVE the policy max_ttl is CLAMPED, not refused: the
+// call returns 200 and the issued binding carries EXACTLY max_ttl. The clamp is
+// asserted on the binding's value, not the status, because a peer that refuses
+// instead of clamping also returns non-200 and is otherwise indistinguishable.
+func TestRegister_TTLClampedToMax(t *testing.T) {
+	registryKP, _, _ := newRegistry(t)
+	iss, hctx := newIssuer(t, registryKP, WithIssuerClock(func() uint64 { return 1_000_000 }))
+	owner, _ := crypto.Generate()
+
+	defTTL := uint64(1_000_000)
+	maxTTL := uint64(10_000_000)
+	installPolicy(t, hctx, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen, DefaultTTL: &defTTL, MaxTTL: &maxTTL})
+
+	reqTTL := uint64(999_999_999) // far above max_ttl
+	resp := dispatchRegister(t, iss, hctx, stageRequest(t, hctx, owner,
+		types.RegistryRegisterRequestData{
+			Name:         "clamp-me.com",
+			TargetPeerID: string(owner.PeerID()),
+			Nonce:        []byte{0x21},
+			IssuedAt:     1_000_000,
+			RequestedTTL: &reqTTL,
+		}))
+	if resp.Status != 200 {
+		t.Fatalf("register above ceiling: status want 200 (clamp, not refuse) got %d (%s)", resp.Status, decodeErrorCode(t, resp))
+	}
+	res, err := types.LocalNameBindResultDataFromEntity(resp.Result)
+	if err != nil {
+		t.Fatalf("decode bind result: %v", err)
+	}
+	ent, ok := hctx.Store.Get(res.BindingHash)
+	if !ok {
+		t.Fatalf("issued binding not in store")
+	}
+	bd, err := types.BindingDataFromEntity(ent)
+	if err != nil {
+		t.Fatalf("decode binding: %v", err)
+	}
+	if bd.TTL == nil || *bd.TTL != maxTTL {
+		t.Fatalf("register clamp: binding ttl want max_ttl %d got %v (requested %d)", maxTTL, bd.TTL, reqTTL)
+	}
+}
+
+// REG-TTL-CLAMP-1 (renew half) — a renew carrying ttl above max_ttl is likewise
+// clamped: 200, successor carries exactly max_ttl.
+func TestRenew_TTLClampedToMax(t *testing.T) {
+	registryKP, _, _ := newRegistry(t)
+	iss, hctx := newIssuer(t, registryKP, WithIssuerClock(func() uint64 { return 1_000_000 }))
+	owner, _ := crypto.Generate()
+
+	// seedBinding installs a plain open policy (max_ttl nil); re-install one WITH a
+	// ceiling before the renew so the clamp has something to bite.
+	bindingHash := seedBinding(t, iss, hctx, owner, "renew-clamp.com")
+	defTTL := uint64(1_000_000)
+	maxTTL := uint64(10_000_000)
+	installPolicy(t, hctx, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen, DefaultTTL: &defTTL, MaxTTL: &maxTTL})
+
+	reqTTL := uint64(999_999_999)
+	renewEnt, err := types.RegistryRenewRequestData{
+		BindingHash: bindingHash, TTL: &reqTTL, Nonce: []byte{0x22}, IssuedAt: 1_000_001,
+	}.ToEntity()
+	if err != nil {
+		t.Fatalf("encode renew: %v", err)
+	}
+	renewEnt = stageProof(t, hctx, owner, renewEnt)
+	r, err := iss.Handle(context.Background(), &handler.Request{Path: IssuerHandlerPattern, Operation: OpRenewRequest, Params: renewEnt, Context: hctx})
+	if err != nil || r == nil {
+		t.Fatalf("Handle renew: r=%v err=%v", r, err)
+	}
+	if r.Status != 200 {
+		t.Fatalf("renew above ceiling: status want 200 (clamp) got %d (%s)", r.Status, decodeErrorCode(t, r))
+	}
+	res, err := types.LocalNameBindResultDataFromEntity(r.Result)
+	if err != nil {
+		t.Fatalf("decode renew result: %v", err)
+	}
+	ent, ok := hctx.Store.Get(res.BindingHash)
+	if !ok {
+		t.Fatalf("successor not in store")
+	}
+	bd, err := types.BindingDataFromEntity(ent)
+	if err != nil {
+		t.Fatalf("decode successor: %v", err)
+	}
+	if bd.TTL == nil || *bd.TTL != maxTTL {
+		t.Fatalf("renew clamp: successor ttl want max_ttl %d got %v (requested %d)", maxTTL, bd.TTL, reqTTL)
 	}
 }

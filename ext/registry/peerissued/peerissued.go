@@ -101,6 +101,22 @@ func WithCacheOnResolve(on bool) Option {
 	return func(b *Backend) { b.cacheOnResolve = on }
 }
 
+// WithLocalMaxTTL declares this resolver's own TTL ceiling (ms). When set,
+// a resolved binding's effective lifetime is min(binding.ttl, local_max),
+// computed at resolution and NEVER written back into the binding (the stored
+// entity's content hash is unchanged; this is a *use* bound, not a re-issue) —
+// REGISTRY §6a.4 / v1.11. This is the load-bearing ceiling: §6a.3's whole
+// argument is about the consumer, and a ceiling the issuer enforces cannot
+// protect a consumer from that same issuer setting max_ttl high. Only the party
+// bearing the staleness risk — the resolver holding the cached binding — can
+// bound it. This is DNS's max-cache-ttl. Default: no local ceiling.
+func WithLocalMaxTTL(ms uint64) Option {
+	return func(b *Backend) {
+		v := ms
+		b.localMaxTTL = &v
+	}
+}
+
 // Backend implements ext/registry.Backend for one pinned registry peer.
 // Multiple registries → multiple Backend instances, each registered with
 // the meta-resolver under its own backend_id (the registry's base58
@@ -116,6 +132,10 @@ type Backend struct {
 	mu     sync.Mutex
 	clock  func() uint64
 	negTTL *uint64
+
+	// localMaxTTL is the resolver-side TTL ceiling (§6a.4 / v1.11). Nil = none.
+	// Applied as min(binding.ttl, local_max) at resolution, never written back.
+	localMaxTTL *uint64
 
 	cacheOnResolve bool
 
@@ -277,6 +297,21 @@ func (b *Backend) Resolve(hctx *handler.HandlerContext, name string) (types.Reso
 		return types.ResolveResultData{}, fmt.Errorf("peerissued: decode binding: %w", err)
 	}
 
+	// CAP registry F1/D1 (PROPOSAL-REGISTRY-NAME-ASSOCIATION-AND-THE-HOSTILE-HOST,
+	// arch 2026-08-18): the association name→binding is host-chosen and, until now,
+	// never checked. A signature proves WHO issued a binding, never WHAT it was
+	// issued for: sig(R, {name: X, target: B}) attests an association, and a hostile
+	// static byte-server substitutes which signed binding answers the query by
+	// serving R's valid binding for name X at by-name/{normalized(other)}. The
+	// verifier never noticed because it never read the half of the commitment that
+	// would tell it. Refuse and advance the chain (fail-closed) when the body's own
+	// name disagrees with the name we located it under. The manifest path (above)
+	// is unaffected — a signed manifest IS a {name→hash} map, so it commits the
+	// association — but the pointer path is not, so this belongs after both.
+	if body.Name != normalized {
+		return types.ResolveResultData{}, fmt.Errorf("peerissued: binding name %q does not match queried name %q — refusing host-substituted association (CAP registry F1/D1)", body.Name, normalized)
+	}
+
 	// Step 4 — revocation. v1 cohort-pragmatic: read the registry's
 	// by-target index path (one lookup). Absent → not revoked. Present
 	// and verifying against the same registry → revoked, chain advances.
@@ -287,8 +322,34 @@ func (b *Backend) Resolve(hctx *handler.HandlerContext, name string) (types.Reso
 	}
 
 	// Step 5 — TTL.
-	if body.TTL != nil && *body.TTL > 0 {
-		if body.IssuedAt+*body.TTL <= b.clock() {
+	//
+	// CAP registry F2/D3 (same proposal): a peer-issued binding MUST carry a
+	// non-null ttl. `issued_at + ttl` checked against the consumer's own clock is
+	// the ONE check on this path a hostile byte-server cannot influence — it cannot
+	// forge a signature, alter a body, or move the consumer's clock. §6a.4's
+	// `(or ttl null)` carve-out is scoped to local-trust kinds (local-name); a
+	// null-ttl peer-issued binding has no temporal bound at all, so withholding its
+	// revocation (which a static origin freely can) is a PERMANENT bypass rather
+	// than a windowed one. Refuse null and advance the chain. Every binding this
+	// backend resolves is kind="peer-issued" by construction, so the rule applies
+	// unconditionally here.
+	if body.TTL == nil {
+		return types.ResolveResultData{}, fmt.Errorf("peerissued: peer-issued binding carries a null ttl — refusing (CAP registry F2/D3; a null-ttl peer-issued binding with a withheld revocation is permanently unrevokable)")
+	}
+
+	// Resolver-side ceiling (REGISTRY §6a.4 / v1.11): effective lifetime is
+	// min(binding.ttl, local_max), computed here and NEVER written back — the
+	// stored binding entity and its content hash are untouched; effectiveTTL is a
+	// *use* bound only. This is the load-bearing ceiling (a ceiling the issuer
+	// enforces cannot protect a consumer from that same issuer), so it governs the
+	// expiry check AND the TTL surfaced to the meta-resolver, while the binding on
+	// the wire and in the result's authority is unchanged.
+	effectiveTTL := *body.TTL
+	if b.localMaxTTL != nil && *b.localMaxTTL < effectiveTTL {
+		effectiveTTL = *b.localMaxTTL
+	}
+	if effectiveTTL > 0 {
+		if body.IssuedAt+effectiveTTL <= b.clock() {
 			return types.ResolveResultData{}, fmt.Errorf("peerissued: binding expired")
 		}
 	}
@@ -302,13 +363,17 @@ func (b *Backend) Resolve(hctx *handler.HandlerContext, name string) (types.Reso
 	}
 
 	bh := bindingHash
+	// Surface the CLAMPED effective ttl so the meta-resolver and any downstream
+	// negative/positive cache honor this resolver's ceiling; `Binding` still
+	// points at the unchanged stored binding (the *use* bound is not a re-issue).
+	effTTL := effectiveTTL
 	return types.ResolveResultData{
 		Status:      types.ResolutionStatusResolved,
 		Binding:     &bh,
 		PeerID:      body.TargetPeerID,
 		Transports:  body.Transports,
 		TrustAnchor: types.PeerIssuedTrustAnchor(b.registryPeerID),
-		TTL:         body.TTL,
+		TTL:         &effTTL,
 		BackendID:   b.registryPeerID,
 	}, nil
 }

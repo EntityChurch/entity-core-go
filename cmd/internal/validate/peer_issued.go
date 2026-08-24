@@ -468,10 +468,13 @@ func runPeerIssuedRevoked(ctx context.Context, client *PeerClient, fx *peerIssue
 
 // The expiry vector needs NO clock injection. Its binding carries
 // issued_at=1_000_000 ms + ttl=1_000 ms — an expiry at 1970-01-01T00:16:41Z,
-// which is in the past under any wall clock a peer will ever run with. Only
-// this vector carries a TTL at all (the backend skips the expiry check when
-// TTL is nil), so the other five are equally clock-independent. The static
-// bundle drives a live wall-clock peer as-is.
+// which is in the past under any wall clock a peer will ever run with. Post
+// CAP-registry F2/D3 (a peer-issued binding MUST carry a non-null ttl) the
+// resolving vectors carry ClockTTLLong (~316y, expiry ≈ 2286), so they are
+// still clock-independent in the opposite direction — valid under any wall
+// clock a peer will run with for centuries — while EXPIRED-1's short ttl is
+// lapsed under all of them. The static bundle drives a live wall-clock peer
+// as-is.
 func runPeerIssuedExpired(ctx context.Context, client *PeerClient, fx *peerIssuedFixture) CheckOutcome {
 	v, bad := requireVector(fx, "EXPIRED-1")
 	if bad != nil {

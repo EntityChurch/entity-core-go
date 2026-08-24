@@ -265,6 +265,62 @@ func TestLog_Limit(t *testing.T) {
 	}
 }
 
+// TestLog_StartAtInclusive pins SA-PY-7 (arch ROUTING-2026-08-18-g §3):
+// `start_at` is an INCLUSIVE anchor — the walk begins AT it and moves toward
+// older versions. Over v0→v1→v2 (head), log(start_at: v1) returns [v1, v0], not
+// [v2] (the old exclusive-floor `since` behavior) and not [v2, v1] (head-anchored
+// with an inclusive floor).
+func TestLog_StartAtInclusive(t *testing.T) {
+	h := NewHandler()
+	hctx := newTestContext()
+
+	var v []hash.Hash
+	for i := 0; i < 3; i++ {
+		storeEntity(t, hctx, "data/file", "test/document", map[string]interface{}{"v": i})
+		req := makeRequest(t, hctx, "commit", types.RevisionCommitParamsData{Prefix: "data/"})
+		resp, _ := h.Handle(context.Background(), req)
+		result, _ := types.RevisionCommitResultDataFromEntity(resp.Result)
+		v = append(v, result.Version) // v[0] oldest … v[2] head
+	}
+
+	req := makeRequest(t, hctx, "log", types.RevisionLogParamsData{Prefix: "data/", StartAt: v[1]})
+	resp, _ := h.Handle(context.Background(), req)
+	root, _ := unwrapEnvelope(t, resp)
+	result, _ := types.RevisionLogResultDataFromEntity(root)
+
+	if len(result.Versions) != 2 {
+		t.Fatalf("start_at: v1 over v0→v1→v2 must return [v1, v0] (inclusive anchor, walks older); got %d versions", len(result.Versions))
+	}
+	if result.Versions[0] != v[1] {
+		t.Fatal("start_at is INCLUSIVE — the anchor itself must be the first result")
+	}
+	if result.Versions[1] != v[0] {
+		t.Fatal("start_at walks toward OLDER — v0 must follow v1")
+	}
+}
+
+// TestLog_RejectsSince pins the other half of SA-PY-7: `since` is REFUSED on log
+// (it is fetch's exclusive watermark; log takes the inclusive `start_at`). A
+// stray `since` key is a 400, not a silently-ignored field.
+func TestLog_RejectsSince(t *testing.T) {
+	h := NewHandler()
+	hctx := newTestContext()
+	storeEntity(t, hctx, "data/file", "test/document", map[string]interface{}{"v": 0})
+	req := makeRequest(t, hctx, "commit", types.RevisionCommitParamsData{Prefix: "data/"})
+	commitResp, _ := h.Handle(context.Background(), req)
+	commitResult, _ := types.RevisionCommitResultDataFromEntity(commitResp.Result)
+
+	// Inject a raw `since` key via a map (the struct no longer has the field).
+	logReq := makeRequest(t, hctx, "log", map[string]interface{}{
+		"prefix": "data/",
+		"since":  commitResult.Version,
+	})
+	resp, _ := h.Handle(context.Background(), logReq)
+	if resp.Status != 400 {
+		t.Fatalf("log with a `since` key returned %d, want 400 — `since` is refused on log, use `start_at`", resp.Status)
+	}
+}
+
 func TestStatus(t *testing.T) {
 	h := NewHandler()
 	hctx := newTestContext()

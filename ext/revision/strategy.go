@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
@@ -129,7 +130,8 @@ func findMergeStrategy(hctx *handler.HandlerContext, prefix, relPath string, ove
 	// Pattern matched against trie-relative path within the merge prefix.
 	configEntries := hctx.LocationIndex.List("system/revision/config/merge/path/")
 	var bestMatch strategyChoice
-	bestSpecificity := -1
+	var bestKey mergeConfigKey
+	haveBest := false
 	for _, entry := range configEntries {
 		ent, ok := hctx.Store.Get(entry.Hash)
 		if !ok {
@@ -139,15 +141,19 @@ func findMergeStrategy(hctx *handler.HandlerContext, prefix, relPath string, ove
 		if err != nil {
 			continue
 		}
-		if mergePatternMatch(cfg.Pattern, relPath) {
-			specificity := patternSpecificity(cfg.Pattern)
-			if specificity > bestSpecificity {
-				bestMatch = strategyChoice{strategy: mergeStrategy(cfg.Strategy), handlerPath: cfg.Handler}
-				bestSpecificity = specificity
-			}
+		if !mergePatternMatch(cfg.Pattern, relPath) {
+			continue
+		}
+		// v3.12 total order — select the winning config deterministically, never
+		// by store-enumeration order (ties are impossible; see mergeConfigKey).
+		key := mergeConfigKeyOf(cfg.Pattern, mergeConfigName(entry.Path))
+		if !haveBest || key.moreSpecific(bestKey) {
+			bestMatch = strategyChoice{strategy: mergeStrategy(cfg.Strategy), handlerPath: cfg.Handler}
+			bestKey = key
+			haveBest = true
 		}
 	}
-	if bestSpecificity >= 0 {
+	if haveBest {
 		return bestMatch
 	}
 
@@ -196,41 +202,87 @@ func lookupEntity(hctx *handler.HandlerContext, path string) (entity.Entity, boo
 }
 
 // mergePatternMatch matches a merge-config `pattern` against a trie-relative
-// path per §5.1's "Path argument scope."
+// path per §5.1's "Path argument scope." It is the SAME grammar as snapshot
+// excludes: ENTITY-CORE-PROTOCOL §5.4's four closed forms (globMatch) — a bare
+// "*" matches every path, "<lit>/*" is a subtree prefix that crosses "/",
+// "*<lit>" a trailing-literal suffix, "<lit>" exact. §5.1 names bare "*" the
+// peer-WIDE config in as many words ("matches all paths within any merge,
+// regardless of prefix"), which is exactly globMatch's form 1.
 //
-// A BARE "*" MATCHES EVERY PATH, not just single-segment ones. §5.1 says so in
-// as many words — "A config with `pattern: \"*\"` matches all paths within any
-// merge, regardless of prefix" — and v7.70 Amendment 1 reinforces it by naming
-// `pattern: "*"` as the peer-WIDE footgun alongside `"**"`. Go's path.Match
-// gives `*` single-segment semantics (it does not cross `/`), so the shared
-// globMatch silently narrowed a peer-wide operator config to top-level keys
-// only. Found 2026-08-14 while writing the per-type vectors (G-22).
+// This wrapper predates the 2026-08-18 four-forms fold, when `globMatch` was
+// Go's segment-scoped path.Match and a bare "*" silently narrowed a peer-wide
+// operator config to top-level keys (G-22, 2026-08-14). The fold replaced
+// globMatch with the four-form matcher whose form 1 already matches all, so the
+// special case that used to live here is now globMatch's own; this stays a thin
+// named alias only so the merge-config call site reads for what it is.
 //
-// The narrowing was invisible because the one conformance vector that used
-// `pattern: "*"` (the keep-both row) exercises a single-segment trie key, so it
-// passed for the wrong reason — the §2.4a "cannot be made to fail for its
-// stated reason" family. That vector now uses a nested path.
-//
-// Scoped deliberately to merge-config lookup. `globMatch` is shared with
-// snapshot exclude patterns, where single-segment `*` may well be correct; this
-// does not touch them.
+// core-py SA-PY-12 flags that §2.3 invokes glob_match on merge patterns while
+// §2.4 scopes glob_match to exclude/exclude_types. Go applies the one §5.4
+// grammar at both sites, which is conformant under either reading of that
+// scoping — the ambiguity is routed to arch, not resolved by diverging here.
 func mergePatternMatch(pattern, relPath string) bool {
-	if pattern == "*" {
-		return true
-	}
 	return globMatch(pattern, relPath)
 }
 
-// patternSpecificity returns a score for how specific a glob pattern is.
-// More literal characters = more specific. "*" alone scores 0.
-func patternSpecificity(pattern string) int {
-	specificity := 0
-	for _, c := range pattern {
-		if c != '*' && c != '?' {
-			specificity++
-		}
+// mergeConfigKey is §5.1's `pattern_specificity`, pinned as a TOTAL ORDER
+// (EXTENSION-REVISION v3.12; arch ROUTING-2026-08-18-m §3 R15). The corpus called
+// pattern_specificity and defined it nowhere, and all three impls invented a
+// different one — go/py scored literal characters, rust used pattern.len()
+// (counting the `*`) — so `"*"` vs `"a"` on path `a` resolved differently across
+// peers, silently, on a merge whose result is byte-identical to a clean one.
+//
+// Ranks, most specific first: exact (3) → subtree prefix `<lit>/*` (2) → trailing
+// literal `*<lit>` (1) → match-all `*` (0). `literal` is the pattern with its
+// single `*` removed; within a rank the LONGER literal wins. Rank 2 above rank 1
+// is arch's one recorded choice (anchored beats floating). The residual tie —
+// two configs may legitimately carry the same `pattern` under different `{name}`s
+// — breaks on lexicographic `pattern` then `{name}`, both peer-independent, so
+// TIES ARE IMPOSSIBLE and no conflict is resolved by unspecified store-enumeration
+// order (the old `specificity > best` kept whatever list() yielded first).
+type mergeConfigKey struct {
+	rank, litLen  int
+	pattern, name string
+}
+
+func mergeConfigKeyOf(pattern, name string) mergeConfigKey {
+	rank := 3 // exact
+	switch {
+	case pattern == "*":
+		rank = 0
+	case strings.HasSuffix(pattern, "/*"):
+		rank = 2
+	case strings.HasPrefix(pattern, "*"):
+		rank = 1
 	}
-	return specificity
+	return mergeConfigKey{
+		rank:    rank,
+		litLen:  len(strings.Replace(pattern, "*", "", 1)),
+		pattern: pattern,
+		name:    name,
+	}
+}
+
+// moreSpecific reports whether a outranks b under the v3.12 total order.
+func (a mergeConfigKey) moreSpecific(b mergeConfigKey) bool {
+	switch {
+	case a.rank != b.rank:
+		return a.rank > b.rank
+	case a.litLen != b.litLen:
+		return a.litLen > b.litLen
+	case a.pattern != b.pattern:
+		return a.pattern < b.pattern
+	default:
+		return a.name < b.name
+	}
+}
+
+// mergeConfigName is the config's `{name}` — the last segment of its storage path
+// system/revision/config/merge/path/{name} — the final tiebreak in the order.
+func mergeConfigName(storagePath string) string {
+	if i := strings.LastIndex(storagePath, "/"); i >= 0 {
+		return storagePath[i+1:]
+	}
+	return storagePath
 }
 
 // applyMergeStrategy applies the given strategy to resolve a conflict.

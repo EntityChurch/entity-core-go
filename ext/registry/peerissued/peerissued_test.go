@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
@@ -53,6 +54,15 @@ func (r *fakeReader) ContentGet(_ context.Context, h hash.Hash) (entity.Entity, 
 // content_hash.
 func publishBinding(t *testing.T, r *fakeReader, signer crypto.Keypair, body types.BindingData, name string) hash.Hash {
 	t.Helper()
+	// CAP registry D3: a peer-issued binding MUST carry a non-null ttl, else the
+	// resolver refuses it. These positive-path fixtures are not about ttl, so
+	// default a far-future one when the caller left it nil. The D3 negative case
+	// (a genuinely null-ttl binding must be refused) is exercised by
+	// TestResolve_NullTTLRefused, which seeds its binding directly to bypass this.
+	if body.TTL == nil {
+		d := uint64(1_000_000_000)
+		body.TTL = &d
+	}
 	bindingEnt, err := body.ToEntity()
 	if err != nil {
 		t.Fatalf("encode binding: %v", err)
@@ -180,6 +190,158 @@ func TestResolve_HappyPath(t *testing.T) {
 	}
 }
 
+// REG-PEERISSUED-NAME-SUBSTITUTION-1 (CAP registry F1/D1) — a validly-signed,
+// current, unrevoked binding for name X, served at by-name/{Y}. The signature
+// verifies (it is a real binding the registry issued), so the ONLY thing that
+// catches the substitution is comparing body.Name to the queried name. The
+// resolver MUST refuse and advance rather than surface X's target for a query
+// for Y. This is the vector the existing four checks are blind to: every one of
+// them queries the same name the binding was issued for.
+func TestResolve_NameSubstitutionRefused(t *testing.T) {
+	registryKey, registryEnt, registryPID := newRegistry(t)
+	reader := newFakeReader()
+	// A genuine, correctly-signed binding for billslab.com...
+	body := types.BindingData{
+		Name:         "billslab.com",
+		Kind:         types.BindingKindPeerIssued,
+		TargetPeerID: "FakePeer11111111111111111111111111111111111111",
+		IssuedAt:     1_000_000,
+	}
+	// ...but served under the by-name pointer for a DIFFERENT name (the hostile
+	// static host's substitution). publishBinding keys the pointer on its `name`
+	// argument, so passing "evil.example" here is exactly the swap.
+	publishBinding(t, reader, registryKey, body, "evil.example")
+
+	backend, err := New(registryEnt, registryPID, reader, WithClock(func() uint64 { return 2_000_000 }))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	r, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "evil.example")
+	if err == nil {
+		t.Fatalf("resolve of a substituted binding succeeded (status=%s peer=%s) — D1 name check missing: a query for evil.example was answered with billslab.com's target", r.Status, r.PeerID)
+	}
+	if !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("refused, but not for the name mismatch: %v", err)
+	}
+}
+
+// REG-PEERISSUED-NULL-TTL-1 (CAP registry F2/D3) — a peer-issued binding with a
+// null ttl MUST be refused and the chain advanced. `issued_at + ttl` is the one
+// check on this path a hostile byte-server cannot influence; a null ttl removes
+// it, and withholding the revocation (which a static origin freely can) then
+// makes the binding permanently unrevokable. Seeded directly to bypass
+// publishBinding's positive-path ttl default.
+func TestResolve_NullTTLRefused(t *testing.T) {
+	registryKey, registryEnt, registryPID := newRegistry(t)
+	reader := newFakeReader()
+	body := types.BindingData{
+		Name:         "billslab.com",
+		Kind:         types.BindingKindPeerIssued,
+		TargetPeerID: "FakePeer11111111111111111111111111111111111111",
+		IssuedAt:     1_000_000,
+		TTL:          nil, // the defect under test
+	}
+	bindingEnt, _ := body.ToEntity()
+	sigBytes := registryKey.Sign(bindingEnt.ContentHash.Bytes())
+	signerEnt, _ := registryKey.IdentityEntity()
+	sigEnt, _ := types.SignatureData{
+		Target:    bindingEnt.ContentHash,
+		Signer:    signerEnt.ContentHash,
+		Algorithm: signerEnt.Type,
+		Signature: sigBytes,
+	}.ToEntity()
+
+	backend, _ := New(registryEnt, registryPID, reader, WithClock(func() uint64 { return 2_000_000 }))
+	hctx := newHctx(t, newLocalPeer(t))
+	hctx.Store.Put(bindingEnt)
+	hctx.Store.Put(sigEnt)
+	hctx.TreeSet(types.PeerIssuedByNamePath("billslab.com"), bindingEnt.ContentHash, "test-nullttl")
+	hctx.TreeSet(types.LocalSignaturePath(bindingEnt.ContentHash), sigEnt.ContentHash, "test-nullttl")
+
+	r, err := backend.Resolve(hctx, "billslab.com")
+	if err == nil {
+		t.Fatalf("resolve of a null-ttl peer-issued binding succeeded (status=%s) — D3 refusal missing: the binding has no temporal bound and a withheld revocation makes it permanently unrevokable", r.Status)
+	}
+	if !strings.Contains(err.Error(), "null ttl") {
+		t.Fatalf("refused, but not for the null ttl: %v", err)
+	}
+}
+
+// Resolver-side TTL ceiling (REGISTRY §6a.4 / v1.11) — WithLocalMaxTTL makes the
+// resolver honor min(binding.ttl, local_max). This is the LOAD-BEARING ceiling:
+// a ceiling the issuer enforces cannot protect a consumer from that same issuer,
+// so only the resolver holding the cached binding can bound its own exposure.
+// The clamp is computed at resolution and NEVER written back — the stored binding
+// entity and its content hash are untouched; only the *effective* lifetime the
+// resolver honors (expiry check + surfaced TTL) is bounded.
+func TestResolve_LocalMaxTTL_Clamps(t *testing.T) {
+	registryKey, registryEnt, registryPID := newRegistry(t)
+
+	// A binding minted with a very long ttl, issued at t=1_000_000.
+	longTTL := uint64(1_000_000_000)
+	body := types.BindingData{
+		Name:         "clamp.example",
+		Kind:         types.BindingKindPeerIssued,
+		TargetPeerID: "FakePeerClamp11111111111111111111111111111111",
+		IssuedAt:     1_000_000,
+		TTL:          &longTTL,
+	}
+
+	t.Run("clamped_ttl_surfaced_and_binding_unchanged", func(t *testing.T) {
+		reader := newFakeReader()
+		bindingHash := publishBinding(t, reader, registryKey, body, "clamp.example")
+		localMax := uint64(5_000_000) // well below longTTL, still unexpired at the clock
+		backend, err := New(registryEnt, registryPID, reader,
+			WithClock(func() uint64 { return 2_000_000 }),
+			WithLocalMaxTTL(localMax))
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		hctx := newHctx(t, newLocalPeer(t))
+		res, err := backend.Resolve(hctx, "clamp.example")
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.TTL == nil || *res.TTL != localMax {
+			t.Fatalf("result ttl want clamped %d got %v — resolver ceiling not surfaced", localMax, res.TTL)
+		}
+		// Never written back: the stored binding still carries the original longTTL.
+		ent, ok := hctx.Store.Get(bindingHash)
+		if !ok {
+			// live-fetch warm cache writes it; read from the reader's content instead
+			ent, ok = reader.content[bindingHash]
+		}
+		if !ok {
+			t.Fatalf("binding entity not found to check it was not rewritten")
+		}
+		bd, err := types.BindingDataFromEntity(ent)
+		if err != nil {
+			t.Fatalf("decode stored binding: %v", err)
+		}
+		if bd.TTL == nil || *bd.TTL != longTTL {
+			t.Fatalf("stored binding ttl changed to %v — the clamp was written back (want unchanged %d)", bd.TTL, longTTL)
+		}
+	})
+
+	t.Run("clamp_forces_expiry", func(t *testing.T) {
+		reader := newFakeReader()
+		_ = publishBinding(t, reader, registryKey, body, "clamp.example")
+		// local_max so small that issued_at + local_max <= clock → expired under the
+		// ceiling even though the binding's own ttl is far from lapsing.
+		backend, err := New(registryEnt, registryPID, reader,
+			WithClock(func() uint64 { return 2_000_000 }),
+			WithLocalMaxTTL(500_000)) // 1_000_000 + 500_000 = 1_500_000 <= 2_000_000
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		hctx := newHctx(t, newLocalPeer(t))
+		_, err = backend.Resolve(hctx, "clamp.example")
+		if err == nil || !strings.Contains(err.Error(), "expired") {
+			t.Fatalf("Resolve under a tight ceiling: want expired error, got %v", err)
+		}
+	})
+}
+
 // REG-PEERISSUED-VERIFY-FAIL-1 — non-pinned signer → rejected (error),
 // chain advances. The binding's signature is from a DIFFERENT keypair
 // than the one the receiver pinned.
@@ -261,12 +423,14 @@ func TestResolve_Expired(t *testing.T) {
 // reader's wire is empty. Verify is identical to live-fetch.
 func TestResolve_PrecedeOffline(t *testing.T) {
 	registryKey, registryEnt, registryPID := newRegistry(t)
-	reader := newFakeReader() // empty — must not be touched
+	reader := newFakeReader()    // empty — must not be touched
+	ttl := uint64(1_000_000_000) // CAP registry D3: peer-issued binding needs non-null ttl
 	body := types.BindingData{
 		Name:         "billslab.com",
 		Kind:         types.BindingKindPeerIssued,
 		TargetPeerID: "FakePeer11111111111111111111111111111111111111",
 		IssuedAt:     1_000_000,
+		TTL:          &ttl,
 	}
 	bindingEnt, _ := body.ToEntity()
 	sigBytes := registryKey.Sign(bindingEnt.ContentHash.Bytes())

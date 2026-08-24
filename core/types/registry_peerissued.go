@@ -454,12 +454,21 @@ func RegistryRegisterRequestDataFromEntity(e entity.Entity) (RegistryRegisterReq
 //   - name_constraints: optional glob narrowing which names this registry
 //     will issue (e.g. "*.lab"). Nil = no constraint.
 //   - default_ttl:      the binding TTL the registry signs when the
-//     request omits requested_ttl, ms. Nil = no expiry.
+//     request omits requested_ttl, ms. MUST NOT exceed max_ttl.
+//   - max_ttl:          the issuer-side ceiling, ms. REQUIRED on any policy
+//     whose mode can reach *approve* (§6a.9, REGISTRY v1.11). A resolved ttl
+//     above it is CLAMPED, not refused. set-issuer-policy rejects a live-mode
+//     policy whose max_ttl is absent/null or whose default_ttl exceeds it (400).
+//     This is operator hygiene — it stops a careless registrant asking for a
+//     decade; the load-bearing ceiling is the RESOLVER's (§6a.4, min-clamp),
+//     because a ceiling the issuer enforces cannot protect a consumer from that
+//     same issuer setting max_ttl high.
 type IssuerPolicyData struct {
 	Mode            string   `cbor:"mode"`
 	Allowlist       []string `cbor:"allowlist,omitempty"`
 	NameConstraints *string  `cbor:"name_constraints,omitempty"`
 	DefaultTTL      *uint64  `cbor:"default_ttl,omitempty"`
+	MaxTTL          *uint64  `cbor:"max_ttl,omitempty"`
 }
 
 func (d IssuerPolicyData) ToEntity() (entity.Entity, error) {

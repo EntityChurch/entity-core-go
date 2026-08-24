@@ -60,6 +60,25 @@ func (h *Handler) handleConfigSet(hctx *handler.HandlerContext, params types.Rev
 	ph := PrefixHash(cfg.Prefix)
 	configPathStr := configPath(ph)
 
+	// V6: exclude / exclude_types patterns MUST be one of §2.4's four forms
+	// (§4.4.17 V6). Rejected BEFORE V2/V3 so an invalid pattern (e.g. "**")
+	// cannot be interpreted by the coverage checks below. This is the
+	// load-bearing check: a peer that merely omits `**` from its matcher but
+	// silently accepts it at write leaves the token in circulation.
+	for _, p := range cfg.Exclude {
+		if !validExcludePattern(p) {
+			return handler.NewErrorResponse(400, "config/invalid-exclude-pattern",
+				fmt.Sprintf("exclude pattern %q is not one of §2.4's four forms (*, <literal>/*, *<literal>, exact): "+
+					"a valid pattern has at most one *, either the whole pattern, the final char after a /, or the first char", p))
+		}
+	}
+	for _, p := range cfg.ExcludeTypes {
+		if !validExcludePattern(p) {
+			return handler.NewErrorResponse(400, "config/invalid-exclude-pattern",
+				fmt.Sprintf("exclude_types pattern %q is not one of §2.4's four forms (*, <literal>/*, *<literal>, exact)", p))
+		}
+	}
+
 	// V2: auto_version exclude enforcement (§2.4 + §6.1).
 	if cfg.AutoVersion != nil && *cfg.AutoVersion {
 		if missing := missingRequiredExcludes(cfg); len(missing) > 0 {
@@ -68,12 +87,14 @@ func (h *Handler) handleConfigSet(hctx *handler.HandlerContext, params types.Rev
 		}
 	}
 
-	// V3: trie root exclude when prefix encompasses system/tree/root/.
+	// V3: trie root exclude when prefix encompasses system/tree/root/. Form 2
+	// (<literal>/*) already crosses "/" at any depth, so the subtree pattern
+	// system/tree/root/* covers system/tree/root/{...} — no second wildcard.
 	if cfg.AutoVersion != nil && *cfg.AutoVersion {
 		if prefixEncompasses(cfg.Prefix, "system/tree/root/") {
-			if !excludeCovers(cfg.Exclude, "system/tree/root/**") {
+			if !excludeCovers(cfg.Exclude, "system/tree/root/*") {
 				return handler.NewErrorResponse(400, "config/missing-trie-root-exclude",
-					fmt.Sprintf("auto_version with prefix %q requires system/tree/root/** in exclude", cfg.Prefix))
+					fmt.Sprintf("auto_version with prefix %q requires system/tree/root/* in exclude", cfg.Prefix))
 			}
 		}
 	}
@@ -281,7 +302,7 @@ func prefixEncompasses(prefix, target string) bool {
 // excludeCovers returns true if any pattern in the exclude list covers the target.
 func excludeCovers(excludes []string, target string) bool {
 	for _, e := range excludes {
-		if e == "system/**" || e == target {
+		if e == "system/*" || e == target {
 			return true
 		}
 	}

@@ -56,6 +56,9 @@ func runAutoVersion(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("disable_tracking_config", "REVISION §6.1")
 	r.Declare("disable_no_new_versions", "REVISION §6.1")
 
+	// Exclude pattern grammar (§4.4.17 V6 / §2.4 four forms). Hash-determining.
+	r.Declare("exclude_pattern_four_forms_enforced", "REVISION §2.4 §4.4.17 V6 — exclude is four closed forms; ** rejected at config write (REV-GLOB-REJECT-1)")
+
 	// --- Step 1: Enable coordinates ---
 
 	r.Run("enable_config_put", func() CheckOutcome {
@@ -315,6 +318,45 @@ func runAutoVersion(ctx context.Context, client *PeerClient) []CheckResult {
 				beforeCount, len(after.Versions)))
 		}
 		return PassCheck("no new versions created after auto_version: false")
+	})
+
+	// --- §4.4.17 V6 / §2.4: exclude pattern grammar is four closed forms ---
+	//
+	// Hash-determining surface (the matcher decides trie membership → version
+	// root → version identity), so it is validated on the wire, not by prose.
+	// REV-GLOB-REJECT-1 is the load-bearing case: a peer MUST reject `**` at
+	// config write rather than silently omit it from its matcher. Paired with an
+	// acceptance control (a valid four-form pattern IS accepted) so the check
+	// cannot pass trivially against a peer that rejects every config.
+	r.Run("exclude_pattern_four_forms_enforced", func() CheckOutcome {
+		p := autoVersionTestPrefix()
+		af := false
+		// Control: a valid form-2 subtree pattern is accepted.
+		okData := types.RevisionConfigData{Prefix: p, AutoVersion: &af, Exclude: []string{"tmp/*"}}
+		okResp, err := client.RevisionExecute(ctx, "config", types.RevisionConfigParamsData{Name: p, Action: "set", Config: &okData})
+		if err != nil {
+			return FailCheck("config with valid exclude: " + err.Error())
+		}
+		if okResp.Status != 200 {
+			return SkipCheck(fmt.Sprintf("acceptance control failed (valid pattern tmp/* rejected %d) — cannot attribute a `**` rejection to the grammar rather than to a peer that rejects everything", okResp.Status))
+		}
+		// REV-GLOB-REJECT-1: `**` is not one of the four forms → 400 config/invalid-exclude-pattern.
+		badData := types.RevisionConfigData{Prefix: p, AutoVersion: &af, Exclude: []string{"**"}}
+		badResp, err := client.RevisionExecute(ctx, "config", types.RevisionConfigParamsData{Name: p, Action: "set", Config: &badData})
+		if err != nil {
+			return FailCheck("config with `**` exclude: " + err.Error())
+		}
+		if badResp.Status != 400 {
+			return FailCheck(fmt.Sprintf("exclude `**` returned %d, want 400 — `**` is not one of §2.4's four forms and MUST be rejected at config write (§4.4.17 V6). A peer that accepts it has a matcher that silently omits `**` rather than refusing it", badResp.Status))
+		}
+		var resultEnt entity.Entity
+		_ = ecf.Decode(badResp.Result, &resultEnt)
+		var errData types.ErrorData
+		_ = ecf.Decode(resultEnt.Data, &errData)
+		if errData.Code != "config/invalid-exclude-pattern" {
+			return FailCheck(fmt.Sprintf("exclude `**` rejected with code %q, want config/invalid-exclude-pattern", errData.Code))
+		}
+		return PassCheck("exclude grammar enforced: valid four-form pattern accepted, `**` rejected 400 config/invalid-exclude-pattern (REV-GLOB-REJECT-1)")
 	})
 
 	return r.Results()

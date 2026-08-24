@@ -113,7 +113,7 @@ func TestPerTypeMergeConfigOutranksPerPath(t *testing.T) {
 	remote := putDoc(t, hctx, "app/doc", "R")
 
 	storeEntity(t, hctx, "system/revision/config/merge/path/all", types.TypeRevisionMergeConfig,
-		types.RevisionMergeConfigData{Pattern: "**", Strategy: "target-wins"})
+		types.RevisionMergeConfigData{Pattern: "*", Strategy: "target-wins"})
 	storeEntity(t, hctx, mergeConfigTypeScope("app/doc"), types.TypeRevisionMergeConfig,
 		types.RevisionMergeConfigData{Strategy: "source-wins"})
 
@@ -173,7 +173,7 @@ func TestPerTypeInvalidStrategyDoesNotOutrankPerPath(t *testing.T) {
 	storeEntity(t, hctx, mergeConfigTypeScope("app/doc"), types.TypeRevisionMergeConfig,
 		types.RevisionMergeConfigData{Strategy: "field-level"}) // removed by v3.10
 	storeEntity(t, hctx, "system/revision/config/merge/path/all", types.TypeRevisionMergeConfig,
-		types.RevisionMergeConfigData{Pattern: "**", Strategy: "target-wins"})
+		types.RevisionMergeConfigData{Pattern: "*", Strategy: "target-wins"})
 
 	choice := findMergeStrategy(hctx, "data/", "any/path", "", local, remote)
 	if choice.strategy != strategyTargetWins {
@@ -443,13 +443,22 @@ func TestMergePatternStarMatchesNestedPaths(t *testing.T) {
 		want    bool
 	}{
 		{"*", "readme", true},
-		{"*", "docs/readme", true},           // the narrowing: was false
-		{"*", "docs/deep/nested/file", true}, // the narrowing: was false
-		{"**", "docs/readme", true},
-		{"docs/**", "docs/readme", true},
+		{"*", "docs/readme", true},           // form 1 match-all crosses /
+		{"*", "docs/deep/nested/file", true}, // form 1 match-all, any depth
+		// `**` is no longer a glob token (arch 9ee84f3, §2.4 four forms). It is
+		// not one of the four forms, so the matcher treats it as a non-matching
+		// literal rather than a wildcard — subtree matching is form 2 (`docs/*`),
+		// which already crosses / at any depth.
+		{"**", "docs/readme", false},
+		{"docs/**", "docs/readme", false},
 		{"docs/**", "other/readme", false},
-		{"docs/*", "docs/readme", true},
-		{"docs/*", "other/readme", false},
+		{"docs/*", "docs/readme", true},           // form 2 subtree, crosses /
+		{"docs/*", "docs/deep/nested/file", true}, // form 2 subtree, any depth
+		{"docs/*", "other/readme", false},         // retained / prevents sibling match
+		{"*.cache", "a/b/foo.cache", true},        // form 3 suffix, / not special
+		{"*.cache", "a/cache/b", false},           // form 3 must terminate subject
+		{"docs", "docs", true},                    // form 4 exact
+		{"docs", "docs/x", false},                 // form 4 is not a prefix
 	}
 	for _, tc := range cases {
 		if got := mergePatternMatch(tc.pattern, tc.path); got != tc.want {

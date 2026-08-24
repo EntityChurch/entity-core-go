@@ -1,7 +1,6 @@
 package revision
 
 import (
-	"path"
 	"strings"
 
 	"go.entitychurch.org/entity-core-go/core/handler"
@@ -42,7 +41,10 @@ func computeVersionedBindings(hctx *handler.HandlerContext, prefix string, confi
 			}
 			if len(config.ExcludeTypes) > 0 {
 				ent, ok := hctx.Store.Get(entry.Hash)
-				if ok && matchesAnyExact(ent.Type, config.ExcludeTypes) {
+				// REV-GLOB-TYPES-1: the same four forms apply to the type-name
+				// subject — `app/*` (subtree) and `*-draft` (suffix) both match
+				// here, not just exact type names.
+				if ok && matchesAnyPattern(ent.Type, config.ExcludeTypes) {
 					continue
 				}
 			}
@@ -93,39 +95,59 @@ func matchesAnyPattern(p string, patterns []string) bool {
 	return false
 }
 
-// matchesAnyExact checks if value matches any string in the list.
-func matchesAnyExact(value string, list []string) bool {
-	for _, item := range list {
-		if value == item {
-			return true
-		}
+// globMatch implements EXTENSION-REVISION §2.4's exclude / exclude_types matcher:
+// exactly FOUR forms, no `**` and no segment-scoped `*`. `subject` is the
+// prefix-relative path (for `exclude`) or the entity type name (for
+// `exclude_types`). Forms are tested in the spec's order:
+//
+//  1. "*"        — match all.
+//  2. "<lit>/*"  — SUBTREE PREFIX, identical to ENTITY-CORE-PROTOCOL §5.4
+//     `matches_pattern`: the `*` crosses `/` at ANY depth. The
+//     trailing `*` is dropped and the `/` is RETAINED, so
+//     "system/revision/*" matches "system/revision/head/{H}/deep"
+//     yet not the sibling "system/revisionary". This is why §6.1's
+//     Reentrancy exclusion needs no second wildcard.
+//  3. "*<lit>"   — TRAILING LITERAL, a byte-suffix over the WHOLE subject; `/`
+//     is NOT special. "*.cache" matches "a/b/foo.cache" and
+//     ".cache", not "a/cache/b" or "foo.cache.tmp". The one form
+//     beyond §5.4's vocabulary (the operator's addition).
+//  4. "<lit>"    — EXACT.
+//
+// There is deliberately NO stdlib fallback. A matcher that merely dropped `**`
+// but still called path.Match would give `*` segment-scoped semantics that
+// CONTRADICT §5.4 — the exact hash-determining divergence §2.4 pins against
+// (capability/subscription §5.4 `*` crosses `/`; path.Match's does not). Any
+// pattern outside the four forms is rejected at config write by
+// validExcludePattern (§4.4.17 V6) before it can reach here.
+func globMatch(pattern, subject string) bool {
+	switch {
+	case pattern == "*": // form 1
+		return true
+	case strings.HasSuffix(pattern, "/*"): // form 2 — drop "*", retain "/"
+		return strings.HasPrefix(subject, pattern[:len(pattern)-1])
+	case strings.HasPrefix(pattern, "*"): // form 3 — drop leading "*"
+		return strings.HasSuffix(subject, pattern[1:])
+	default: // form 4
+		return subject == pattern
 	}
-	return false
 }
 
-// globMatch implements simple glob matching (*, **).
-func globMatch(pattern, name string) bool {
-	if strings.Contains(pattern, "**") {
-		parts := strings.SplitN(pattern, "**", 2)
-		prefix := parts[0]
-		suffix := parts[1]
-		if !strings.HasPrefix(name, prefix) {
-			return false
-		}
-		if suffix == "" || suffix == "/" {
-			return true
-		}
-		rest := name[len(prefix):]
-		for i := 0; i <= len(rest); i++ {
-			if i == 0 || (i > 0 && rest[i-1] == '/') {
-				matched, _ := path.Match(strings.TrimPrefix(suffix, "/"), rest[i:])
-				if matched {
-					return true
-				}
-			}
-		}
+// validExcludePattern enforces EXTENSION-REVISION §4.4.17 V6: an `exclude` /
+// `exclude_types` pattern MUST be one of globMatch's four forms and nothing
+// else. A valid pattern contains AT MOST ONE `*`, and that `*` is either the
+// whole pattern, the final character preceded by `/`, or the first character.
+// `**`, `a/**/b`, `a*b`, `*a*` are all rejected. This is what makes the matcher
+// deterministic rather than merely specified — the load-bearing check is that a
+// peer refuses `**` at write rather than silently omitting it from its matcher.
+func validExcludePattern(pattern string) bool {
+	switch strings.Count(pattern, "*") {
+	case 0: // form 4 — exact
+		return true
+	case 1:
+		return pattern == "*" || // form 1
+			strings.HasSuffix(pattern, "/*") || // form 2 — final char, preceded by "/"
+			strings.HasPrefix(pattern, "*") // form 3 — first char
+	default: // two or more `*`
 		return false
 	}
-	matched, _ := path.Match(pattern, name)
-	return matched
 }

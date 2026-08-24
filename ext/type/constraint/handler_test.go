@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"go.entitychurch.org/entity-core-go/core/capability"
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/types"
 
@@ -293,24 +294,36 @@ func TestUnknownConstraintFailsClosed(t *testing.T) {
 	}
 }
 
-func TestGlobMatch(t *testing.T) {
+// §4.6 type_pattern uses ENTITY-CORE-PROTOCOL §5.4 `matches_pattern` (arch
+// ROUTING-2026-08-18-m §1 / TYPE §4.6, folded at b962043): exact / `prefix/*`
+// subtree that crosses `/` / bare `*` match-all. There is NO segment-scoped
+// wildcard and NO `**`. This replaces the pre-fold doublestar matcher all three
+// impls carried — the `-i` "doublestar dependency removed" ack was given against
+// a surface we had not been pointed at, and this was it.
+func TestTypePatternMatchesPattern(t *testing.T) {
 	cases := []struct {
-		pat, in string
-		want    bool
+		pat, typeName string
+		want          bool
 	}{
+		// The behaviour change: `*` in a subtree pattern crosses `/` at any depth.
 		{"system/capability/*", "system/capability/grant-entry", true},
-		{"system/capability/*", "system/capability/path-scope/foo", false},
-		{"system/capability/**", "system/capability/path-scope/foo", true},
-		{"system/capability/**", "system/capability", true},
-		{"*/leaf", "ns/leaf", true},
-		{"*/leaf", "leaf", false},
+		{"system/capability/*", "system/capability/path-scope/foo", true}, // was FALSE pre-fold
+		{"system/capability/*", "system/capability", false},               // §5.4 has NO bare-prefix self-match (ROUTING-2026-08-18-o §4)
+		{"system/capability/*", "system/capabilityx", false},              // retained `/` blocks the sibling prefix
+		// `**` is no longer a grammar — it is an exact literal that matches nothing real.
+		{"system/capability/**", "system/capability/path-scope/foo", false},
+		{"**", "system/capability/path-scope/foo", false},
+		// No leading-`*` (trailing-literal) form in §5.4 — that is revision-only; here it is exact.
+		{"*/leaf", "ns/leaf", false},
+		// match-all and exact.
+		{"*", "anything/at/all/deep", true},
 		{"app/user", "app/user", true},
 		{"app/user", "app/admin", false},
 	}
 	for _, tc := range cases {
-		t.Run(tc.pat+"_vs_"+tc.in, func(t *testing.T) {
-			if got := globMatch(tc.pat, tc.in); got != tc.want {
-				t.Errorf("globMatch(%q, %q) = %v, want %v", tc.pat, tc.in, got, tc.want)
+		t.Run(tc.pat+"_vs_"+tc.typeName, func(t *testing.T) {
+			if got := capability.MatchesPattern(tc.typeName, tc.pat); got != tc.want {
+				t.Errorf("MatchesPattern(%q, %q) = %v, want %v", tc.typeName, tc.pat, got, tc.want)
 			}
 		})
 	}

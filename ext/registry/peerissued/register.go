@@ -416,6 +416,36 @@ func (i *Issuer) handleRegisterRequest(_ context.Context, req *handler.Request) 
 		ttl = &v
 	}
 
+	// D12 (arch ROUTING-2026-08-18-d §1 / proposal §12): fail closed when the
+	// resolved ttl is null — the request omitted requested_ttl AND the stored
+	// policy defines no default_ttl. D11 refuses such a policy at
+	// set-issuer-policy, but §6a.9.2's store-first rule makes a policy reachable
+	// via CLI flag, direct tree write, or predating the rule, so this is the
+	// backstop. Minting would produce a null-ttl binding D3 makes unresolvable;
+	// substituting an implementation-chosen default is the §6a.9.2
+	// default-synthesis mistake on a security-relevant field (two registries would
+	// answer identically-stored policies with different binding lifetimes — a §5.10
+	// determinism split the operator never sees). Refuse, mint nothing, before
+	// both the manual-queue and the direct-issue paths below.
+	if ttl == nil {
+		return handler.NewErrorResponse(403, types.RegistryErrPolicyRejected,
+			"resolved ttl is null: the request omitted requested_ttl and the issuer policy defines no default_ttl. Refusing rather than minting a null-ttl binding (unresolvable per CAP registry D3) or substituting an implementation-chosen default (CAP registry D12). Set default_ttl on the issuer policy.")
+	}
+
+	// Issuer-side ceiling (REGISTRY §6a.9, v1.11): clamp the resolved ttl to
+	// max_ttl — CLAMP, not refuse (REG-TTL-CLAMP-1). Refusing would bill a
+	// well-formed request for a policy the requester cannot read (§6a.9.2's
+	// reason) and teach requesters to probe for the ceiling; DNS caps a long
+	// TTL, it does not NXDOMAIN it. The clamp is silent — the issued binding
+	// carries the clamped value, which is signed, published and readable.
+	// max_ttl is REQUIRED at set-issuer-policy; it is only nil here for a policy
+	// stored out-of-band (§6a.9.2 store-first backdoor), where there is no
+	// ceiling to apply and the clamp is a correct no-op.
+	if policy.MaxTTL != nil && *ttl > *policy.MaxTTL {
+		v := *policy.MaxTTL
+		ttl = &v
+	}
+
 	// Manual mode: queue (we accept but do not sign). The operator decides
 	// via approve-request / deny-request (§6a.9.3).
 	if policy.Mode == types.IssuerPolicyModeManual {
@@ -581,6 +611,15 @@ func replayKey(targetPeerID string, nonce []byte) string {
 // applyAdmission runs Layer-2 per §6a.9.1.
 func (i *Issuer) applyAdmission(policy types.IssuerPolicyData, body types.RegistryRegisterRequestData, normalized string) (uint, string, string) {
 	if policy.NameConstraints != nil && *policy.NameConstraints != "" {
+		// DELIBERATE, NAMED divergence from name_format_dispatch's matcher
+		// (registry.matchDispatchName, ruled [REGISTRY 1.13]): name_constraints
+		// (§6a.9, "<glob>") is a SEPARATE field whose grammar arch has NOT
+		// ruled, so its matcher is not converged onto the §4.1a grammar here.
+		// Both fields glob the same user-facing name, so this is exactly the
+		// silently-diverging-matcher shape — routed rather than shipped
+		// unilaterally: docs/validation/spec-issues/2026-08-18-e-name-constraints-grammar-vs-dispatch.md.
+		// Until ruled, name_constraints keeps path.Match (note the err→500 arm
+		// below, which the §4.1a grammar cannot reach).
 		matched, err := path.Match(*policy.NameConstraints, normalized)
 		if err != nil {
 			return 500, "internal_error",
@@ -659,6 +698,41 @@ func (i *Issuer) handleSetIssuerPolicy(_ context.Context, req *handler.Request) 
 		return handler.NewErrorResponse(400, "invalid_params",
 			"mode \"allowlist\" requires a non-empty allowlist — an empty one denies every "+
 				"request, which is what mode \"manual\" is for")
+	}
+
+	// D11 (arch ROUTING-2026-08-18-d §1 / proposal §12): a live-registration
+	// policy MUST define default_ttl. Every storable mode reaching this point
+	// (open, allowlist, manual) can issue a binding, and a request omitting
+	// requested_ttl against a policy with no default_ttl resolves to a null ttl —
+	// a binding D3 makes unresolvable. Refuse at policy-write, where the operator's
+	// field lives and is the only place the missing value can be supplied, rather
+	// than storing a policy that can only mint invalid bindings — §6a.9.2's own
+	// move for domain-control, one bullet up.
+	if policy.DefaultTTL == nil {
+		return handler.NewErrorResponse(400, "invalid_params",
+			"a live-registration issuer policy MUST define default_ttl: a request omitting "+
+				"requested_ttl would otherwise mint a null-ttl binding, unresolvable per CAP "+
+				"registry D3. Set default_ttl rather than storing a policy that can only mint "+
+				"invalid bindings.")
+	}
+
+	// §6a.9 / REGISTRY v1.11: max_ttl is REQUIRED on any live-registration
+	// policy — the same trigger, site and reason as default_ttl (it is the
+	// operator's field, set through the operator's operation, and this is where
+	// the missing input lives). It is the issuer-side ceiling: a resolved ttl
+	// above it is CLAMPED, not refused (REG-TTL-CLAMP-1), so the requester is
+	// never billed for a policy it cannot read. default_ttl MUST NOT exceed it.
+	if policy.MaxTTL == nil {
+		return handler.NewErrorResponse(400, "invalid_params",
+			"a live-registration issuer policy MUST define max_ttl: it is the ceiling a "+
+				"resolved binding ttl is clamped to (REGISTRY §6a.9, v1.11). Set max_ttl "+
+				"rather than storing a policy with no bound on issued lifetime.")
+	}
+	if *policy.DefaultTTL > *policy.MaxTTL {
+		return handler.NewErrorResponse(400, "invalid_params",
+			fmt.Sprintf("issuer policy default_ttl (%d ms) exceeds max_ttl (%d ms): "+
+				"default_ttl MUST NOT exceed the ceiling (REGISTRY §6a.9, v1.11)",
+				*policy.DefaultTTL, *policy.MaxTTL))
 	}
 
 	// Store the submitted entity verbatim. Re-encoding via ToEntity would
@@ -1232,14 +1306,57 @@ func (i *Issuer) handleRenewRequest(_ context.Context, req *handler.Request) (*h
 		return handler.NewErrorResponse(status, code, msg)
 	}
 
-	// TTL resolution: explicit > issuer-policy default > no expiry.
+	// TTL resolution — the three-step cascade (§6a.9, v1.9; ruled from go's
+	// spec-issue 2026-08-18-c, SA-PY-13): the request's own ttl, then the issuer
+	// policy's default_ttl, then the SUPERSEDED BINDING'S OWN ttl.
+	//
+	// Step 2 above step 3 is load-bearing: an operator who lowers default_ttl must
+	// see renewals pick it up, else every existing name renews forever at its old
+	// duration and the knob is inert on the population it matters for. Step 3 is a
+	// RECOVERY of the registry's own prior signed act on this exact name — one
+	// value, already published, byte-identical at every conformant peer — not an
+	// implementation-chosen default, so the §6a.9.2 default-synthesis ban (which
+	// exists because an invented number splits determinism) does not reach it.
+	policy, armed := i.loadPolicy(hctx)
 	var ttlPtr *uint64
 	if body.TTL != nil {
 		t := *body.TTL
 		ttlPtr = &t
-	} else if p, armed := i.loadPolicy(hctx); armed && p.DefaultTTL != nil {
-		t := *p.DefaultTTL
+	} else if armed && policy.DefaultTTL != nil {
+		t := *policy.DefaultTTL
 		ttlPtr = &t
+	} else if existing.TTL != nil {
+		// Step 3 — the predecessor's ttl, non-null on any conformant mint path.
+		t := *existing.TTL
+		ttlPtr = &t
+	}
+
+	// Terminal refusal (REGISTRY v1.10, restored per ROUTING-2026-08-18-{n,o} §3).
+	// v1.9 asserted the cascade was total *because* §6a.3 guarantees step 3 is
+	// non-null. That reads an invariant as a fact about stored bytes and is wrong:
+	// a predecessor carrying `ttl: null` can be ALREADY there — seeded out-of-band,
+	// written directly to the tree, or predating these rules — the identical
+	// "stored state is already bad" case §6a.9.2's write-time refusal does not
+	// answer and D12's backstop exists for. When all three steps yield null we MUST
+	// refuse with 403 policy_rejected and publish NOTHING, never mint a null-ttl
+	// successor (D3-unresolvable) nor substitute a default. An unreachable branch
+	// asserted rather than enforced is how the forbidden shape gets minted — a
+	// deref guard that falls through produces exactly the null-ttl binding.
+	if ttlPtr == nil {
+		return handler.NewErrorResponse(403, types.RegistryErrPolicyRejected,
+			"renew resolved a null ttl: the request omitted ttl, the issuer policy defines "+
+				"no default_ttl, and the superseded binding itself carries a null ttl (an "+
+				"out-of-band write §6a.3 forbids). Refusing rather than minting a null-ttl "+
+				"successor (unresolvable per CAP registry D3) or substituting a default (D12).")
+	}
+
+	// Issuer-side ceiling (REGISTRY §6a.9, v1.11): clamp after the cascade
+	// resolves — CLAMP, not refuse (REG-TTL-CLAMP-1), for the same reason as
+	// register. Nil max_ttl only for an out-of-band-stored policy, where there is
+	// no ceiling and the clamp is a correct no-op.
+	if armed && policy.MaxTTL != nil && *ttlPtr > *policy.MaxTTL {
+		v := *policy.MaxTTL
+		ttlPtr = &v
 	}
 
 	successor := existing

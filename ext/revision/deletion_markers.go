@@ -111,7 +111,7 @@ func applyMergedBindingToTree(hctx *handler.HandlerContext, path string, h hash.
 // (absent from both tracker root and index), per the "absence = preserve,
 // marker = delete" model. li may be nil (callers without an index); the guard
 // is simply skipped, preserving the prior diff-only behavior.
-func emitDeletionMarkers(cs store.ContentStore, parentRoot, liveRoot hash.Hash, li store.LocationIndex, prefix string) (hash.Hash, error) {
+func emitDeletionMarkers(cs store.ContentStore, parentRoot, liveRoot hash.Hash, li store.LocationIndex, prefix string, cfg types.RevisionConfigData) (hash.Hash, error) {
 	// Edge case: empty parent root (rare — parent was an empty-trie version).
 	// No deletions can be inferred; liveRoot is already correct.
 	if parentRoot.IsZero() {
@@ -155,11 +155,31 @@ func emitDeletionMarkers(cs store.ContentStore, parentRoot, liveRoot hash.Hash, 
 	// positive (see the doc comment): carry its live binding forward instead of
 	// emitting a phantom marker, so the emitted version reflects the real tree.
 	for path := range removed {
+		var liveHash hash.Hash
+		var stillLive bool
 		if li != nil {
-			if liveHash, ok := li.Get(prefix + path); ok && !types.IsDeletionMarker(liveHash) {
-				newBindings = append(newBindings, tree.Binding{Path: path, Hash: liveHash})
+			if h, ok := li.Get(prefix + path); ok && !types.IsDeletionMarker(h) {
+				liveHash, stillLive = h, true
+			}
+		}
+		// D1 (SA-PY-8): an excluded path must NOT enter the version trie — not as
+		// a carried-forward binding and not as a deletion marker. In steady state
+		// an excluded path is absent from both a filtered parent and the filtered
+		// live root, so it never reaches `removed`; this handles the transition
+		// where the parent predates the exclude and still carries the path (the
+		// staleness carry-forward below would otherwise resurrect it straight out
+		// of the live index).
+		if matchesAnyPattern(path, cfg.Exclude) {
+			continue
+		}
+		if stillLive && len(cfg.ExcludeTypes) > 0 {
+			if ent, ok := cs.Get(liveHash); ok && matchesAnyPattern(ent.Type, cfg.ExcludeTypes) {
 				continue
 			}
+		}
+		if stillLive {
+			newBindings = append(newBindings, tree.Binding{Path: path, Hash: liveHash})
+			continue
 		}
 		newBindings = append(newBindings, tree.Binding{Path: path, Hash: markerHash})
 	}
@@ -379,7 +399,8 @@ func resolveDeletionStrategy(hctx *handler.HandlerContext, configPrefix, relPath
 	}
 	configEntries := hctx.LocationIndex.List("system/revision/config/merge/path/")
 	var bestMatch deletionStrategy
-	bestSpecificity := -1
+	var bestKey mergeConfigKey
+	haveBest := false
 	for _, entry := range configEntries {
 		ent, ok := hctx.Store.Get(entry.Hash)
 		if !ok {
@@ -397,15 +418,20 @@ func resolveDeletionStrategy(hctx *handler.HandlerContext, configPrefix, relPath
 		if ValidateDeletionResolution(cfg.DeletionResolution) != nil {
 			continue
 		}
-		if mergePatternMatch(cfg.Pattern, relPath) {
-			specificity := patternSpecificity(cfg.Pattern)
-			if specificity > bestSpecificity {
-				bestMatch = deletionStrategy(cfg.DeletionResolution)
-				bestSpecificity = specificity
-			}
+		if !mergePatternMatch(cfg.Pattern, relPath) {
+			continue
+		}
+		// v3.12 total order — the SAME determinism guarantee as findMergeStrategy;
+		// deletion_resolution config selects the winner by the pinned order, never
+		// by store-enumeration order.
+		key := mergeConfigKeyOf(cfg.Pattern, mergeConfigName(entry.Path))
+		if !haveBest || key.moreSpecific(bestKey) {
+			bestMatch = deletionStrategy(cfg.DeletionResolution)
+			bestKey = key
+			haveBest = true
 		}
 	}
-	if bestSpecificity >= 0 {
+	if haveBest {
 		return bestMatch
 	}
 	return defaultDeletionStrategy

@@ -385,7 +385,7 @@ func TestAutoVersion_SelfExclude(t *testing.T) {
 func TestAutoVersion_Exclude(t *testing.T) {
 	f := newAutoVersionFixture(t)
 	f.enableTracking(t, "data/")
-	f.enableAutoVersion(t, "data/", []string{"tmp/**"})
+	f.enableAutoVersion(t, "data/", []string{"tmp/*"})
 
 	f.putEntity(t, "data/tmp/cache", "test/doc", map[string]string{"v": "t"})
 	if _, ok := f.head("data/"); ok {
@@ -393,8 +393,24 @@ func TestAutoVersion_Exclude(t *testing.T) {
 	}
 
 	f.putEntity(t, "data/real/file", "test/doc", map[string]string{"v": "r"})
-	if _, ok := f.head("data/"); !ok {
+	head, ok := f.head("data/")
+	if !ok {
 		t.Fatal("head did not advance on non-excluded path")
+	}
+
+	// D1 (SA-PY-8): the excluded path was written first, so it IS in the tracked
+	// root — but the version fired by the non-excluded write must NOT carry it in
+	// its trie. Before exclude parity, auto-version adopted the tracked root
+	// wholesale and the excluded path leaked into the version (exactly what
+	// `commit` would have filtered). Excludes must reach the trie, not just
+	// dispatch.
+	ver := f.loadVersion(t, head)
+	bindings := trieToBindings(f.cs, ver.Root)
+	if _, present := bindings["tmp/cache"]; present {
+		t.Fatalf("version trie carries the excluded path tmp/cache — D1 exclude parity regressed; excludes must reach the auto-version trie, not only commit")
+	}
+	if _, present := bindings["real/file"]; !present {
+		t.Fatal("version trie is missing the non-excluded path real/file")
 	}
 }
 
@@ -477,7 +493,7 @@ func TestAutoVersion_ActiveBranchAdvances(t *testing.T) {
 func TestAutoVersion_RejectsUniversalWithoutExcludes(t *testing.T) {
 	f := newAutoVersionFixture(t)
 
-	// auto_version: true with prefix "/" but NO exclude covering system/**.
+	// auto_version: true with prefix "/" but NO exclude covering system/*.
 	trueVal := true
 	cfg := types.RevisionConfigData{
 		Prefix:      "/",
@@ -509,7 +525,7 @@ func TestAutoVersion_AcceptsSystemPrefixWithExcludes(t *testing.T) {
 	cfg := types.RevisionConfigData{
 		Prefix:      resolvePrefix("system/", f.nsID),
 		AutoVersion: &trueVal,
-		Exclude:     []string{"system/**"},
+		Exclude:     []string{"system/*"},
 	}
 	f.putEntity(t, configPath(f.prefixHash("system/")), types.TypeRevisionConfig, cfg)
 

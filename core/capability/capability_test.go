@@ -46,8 +46,15 @@ func TestMatchesPatternSubtree(t *testing.T) {
 	}{
 		{"system/tree/foo/bar", "system/tree/*", true},
 		{"system/tree/", "system/tree/*", true},
-		{"system/tree", "system/tree/*", true},
 		{"system/type/foo", "system/tree/*", false},
+		// §5.4 has NO bare-prefix self-match: `prefix = pattern without trailing
+		// "*"` keeps the "/", so `pattern/*` requires at least the trailing slash.
+		// A grant on `X/*` must NOT reach the bare `X` (authorization would widen
+		// in the permissive direction; rust+py refuse it). ROUTING-2026-08-18-o §4.
+		{"system/tree", "system/tree/*", false}, // bare prefix — NO self-match
+		{"a/b/c", "a/b/*", true},                // arch §5.4 vector: subtree hit
+		{"a/b", "a/b/*", false},                 // arch §5.4 vector: bare prefix miss
+		{"a/b/", "a/b/*", true},                 // trailing slash is in-prefix
 	}
 	for _, tt := range tests {
 		got := MatchesPattern(tt.uri, tt.pattern)

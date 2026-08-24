@@ -195,7 +195,8 @@ func cmdStart(args []string) {
 	issuerPolicyMode := fs.String("issuer-policy-mode", "", "EXTENSION-REGISTRY §6a.9 — run this peer as a peer-issued LIVE registry, accepting `register-request` / `revoke-request` / `renew-request`. Value is the issuer-policy mode: `open`, `allowlist` (needs --issuer-policy-allowlist), or `manual` (requests queue as 202 pending_review). Empty disables. ARMING DIVERGES ACROSS THE COHORT, but ONLY at the CLI: Go gates handler *registration* on this flag (cmd/entity-peer --issuer-policy-mode), while Python AND Rust both register the handler unconditionally and leave it inert until an issuer-policy is written (rust: RegisterRequestHandler in core/peer/src/lib.rs, ops bootstrapped at system/registry/peer-issued; python: packages/entity-handlers/.../registry.py). All three implement §6a.9.2 `set-issuer-policy`, so the validator arms either sibling over the wire and `registry_issuer` needs no flag from us — measured 2026-08-12 (e): python 19/19, rust 17/19 (the two failures are the arch-ruled register-result gap, not arming). This note previously said rust \"exposes no CLI arming flag\" AND that set-issuer-policy was python-only that \"go and rust do not implement\" — the first is true and irrelevant, the second was false twice over. Forwarded to Go peers only; dropped with a warning otherwise, and the warning now says why nothing is lost."+siblingSurfaceVerifiedAt())
 	issuerPolicyAllowlist := fs.String("issuer-policy-allowlist", "", "EXTENSION-REGISTRY §6a.9.1 — comma-separated target_peer_ids permitted to register when --issuer-policy-mode=allowlist. Ignored in other modes. Go-only, see --issuer-policy-mode.")
 	issuerPolicyNameConstraints := fs.String("issuer-policy-name-constraints", "", "EXTENSION-REGISTRY §6a.9.1 — POSIX glob narrowing which names this registry will issue (e.g. \"*.lab\"); a non-matching name is rejected 403 not_entitled. Empty = no constraint. Go-only, see --issuer-policy-mode.")
-	issuerPolicyDefaultTTL := fs.String("issuer-policy-default-ttl", "", "EXTENSION-REGISTRY §6a.9.1 — Go duration (e.g. 1h) the registry signs when register-request omits requested_ttl. Empty/zero = no expiry. Go-only, see --issuer-policy-mode.")
+	issuerPolicyDefaultTTL := fs.String("issuer-policy-default-ttl", "", "EXTENSION-REGISTRY §6a.9.1 — Go duration (e.g. 1h) the registry signs when register-request omits requested_ttl. REQUIRED for a live registry (a null default_ttl mints unresolvable bindings). Go-only, see --issuer-policy-mode.")
+	issuerPolicyMaxTTL := fs.String("issuer-policy-max-ttl", "", "EXTENSION-REGISTRY §6a.9 (v1.11) — Go duration issuer-side TTL ceiling; a resolved binding ttl above it is CLAMPED (not refused). REQUIRED for a live registry. Go-only, see --issuer-policy-mode.")
 	reflectionEndpoints := fs.String("reflection-endpoint", "", "EXTENSION-SIGNALING §4.5.1 (v1.1): comma-separated RFC 7064 STUN URI(s) this node advertises as its OWN §9.3 reflection listener(s), in `advertise`'s top-level reflection_endpoints. Pair with --signaling-node. Go-only for now: the field is unbuilt in rust and py as of 2026-08-15 (source-read, docs/validation/reports/2026-08-15-reflection-endpoints-*.md) — arch routed it P0 to entity-core-rust. Dropped with a warning for those peer types rather than passed and rejected.")
 	fs.Parse(args)
 
@@ -247,6 +248,7 @@ func cmdStart(args []string) {
 		issuerPolicyAllowlist:       *issuerPolicyAllowlist,
 		issuerPolicyNameConstraints: *issuerPolicyNameConstraints,
 		issuerPolicyDefaultTTL:      *issuerPolicyDefaultTTL,
+		issuerPolicyMaxTTL:          *issuerPolicyMaxTTL,
 		reflectionEndpoints:         *reflectionEndpoints,
 	}
 
@@ -398,6 +400,7 @@ type chunkEFlags struct {
 	issuerPolicyAllowlist       string
 	issuerPolicyNameConstraints string
 	issuerPolicyDefaultTTL      string
+	issuerPolicyMaxTTL          string
 }
 
 // enabled reports whether serving-mode was requested.
@@ -565,6 +568,9 @@ func startGoPeer(name, addr string, debug, openAccess bool, files, history, stor
 		}
 		if poll.issuerPolicyDefaultTTL != "" {
 			cmdArgs = append(cmdArgs, "-issuer-policy-default-ttl", poll.issuerPolicyDefaultTTL)
+		}
+		if poll.issuerPolicyMaxTTL != "" {
+			cmdArgs = append(cmdArgs, "-issuer-policy-max-ttl", poll.issuerPolicyMaxTTL)
 		}
 	}
 	if poll.peerIssuedRegistry != "" {

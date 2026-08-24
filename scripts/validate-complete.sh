@@ -480,8 +480,18 @@ fi
 echo
 echo "==> PASS 3/3 — registry_issuer against a peer that is a registry (§6a.9 is default-off)"
 REG_TARGET="vcreg-${STAMP}"
+# --issuer-policy-default-ttl is REQUIRED post-CAP-D11: a live registry with no
+# default_ttl can only mint null-ttl bindings (D3 makes them unresolvable), and
+# set-issuer-policy/register now refuse that configuration. An armed registry
+# with no default_ttl would fail its own register vectors at D12.
+# --issuer-policy-max-ttl is REQUIRED post-v1.11: a live policy MUST carry the
+# issuer-side ceiling, and REG-TTL-CLAMP-1 exercises clamping against it. The
+# ceiling is set well above the default so it never clamps the default-path
+# bindings the other register vectors assert on.
 REG_ADDR=$(go run ./cmd/peer-manager start --name "$REG_TARGET" --type "$TYPE" --debug \
     --issuer-policy-mode open \
+    --issuer-policy-default-ttl 720h \
+    --issuer-policy-max-ttl 8760h \
     "${HASH_ARGS_PEER[@]}" \
     | sed -n 's/.*addr=\([^ ]*\).*/\1/p')
 set +e

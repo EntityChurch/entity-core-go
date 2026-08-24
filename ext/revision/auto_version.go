@@ -252,13 +252,26 @@ func (a *AutoVersioner) fire(cfg types.RevisionConfigData, parentDepth uint64) {
 		//
 		// First-emit: liveRoot is the new root directly. No parent to diff;
 		// `removed` set is empty by definition.
-		versionRoot := liveRoot
+		// D1 (SA-PY-8, PROPOSAL-REVISION-AUTO-VERSION-EXCLUDE-PARITY): excludes
+		// reach the trie on the auto-version path too, not only at `commit`. The
+		// tracked root is produced by EXTENSION-TREE's structural summary, which
+		// has no knowledge of the revision `exclude` — so adopting it wholesale
+		// (the pre-fix behavior) emitted versions whose trie carried excluded
+		// paths that `commit` would have filtered. Filter before emitting. The
+		// O(1) fast path is preserved inside filteredRoot: with no exclude and no
+		// exclude_types the filtered trie IS the tracked root, adopted directly.
+		filteredLive, ferr := a.filteredRoot(liveRoot, cfg)
+		if ferr != nil {
+			a.debugf("fire %s: filter tracked root: %v (falling back to liveRoot)", prefix, ferr)
+			filteredLive = liveRoot
+		}
+		versionRoot := filteredLive
 		if hasHead {
 			parentVer, parentOK := loadVersionFromStore(a.cs, currentHead)
 			if parentOK {
-				augmented, err := emitDeletionMarkers(a.cs, parentVer.Root, liveRoot, li, prefix)
+				augmented, err := emitDeletionMarkers(a.cs, parentVer.Root, filteredLive, li, prefix, cfg)
 				if err != nil {
-					a.debugf("fire %s: emit markers: %v (falling back to liveRoot)", prefix, err)
+					a.debugf("fire %s: emit markers: %v (falling back to filteredLive)", prefix, err)
 				} else {
 					versionRoot = augmented
 				}
@@ -350,6 +363,32 @@ func (a *AutoVersioner) fire(cfg types.RevisionConfigData, parentDepth uint64) {
 	// happening if it ever does in practice.
 	a.debugf("fire %s: exhausted %d CAS retries — emit abandoned; next event will retry",
 		prefix, maxFireRetries)
+}
+
+// filteredRoot applies the config's exclude / exclude_types to the tracked root
+// so an auto-version's emitted trie matches what `commit` builds for the same
+// state and config (SA-PY-8 / D1: excludes reach the trie on BOTH paths that
+// emit a version). The O(1) adoption is preserved: with neither exclude nor
+// exclude_types configured the filtered trie IS the tracked root, returned
+// directly with no walk or rebuild — every non-filtering config pays nothing.
+func (a *AutoVersioner) filteredRoot(liveRoot hash.Hash, cfg types.RevisionConfigData) (hash.Hash, error) {
+	if len(cfg.Exclude) == 0 && len(cfg.ExcludeTypes) == 0 {
+		return liveRoot, nil // O(1) — tracked root is already the filtered trie
+	}
+	bindings := trieToBindings(a.cs, liveRoot) // relPath → hash
+	filtered := make([]tree.Binding, 0, len(bindings))
+	for relPath, h := range bindings {
+		if matchesAnyPattern(relPath, cfg.Exclude) {
+			continue
+		}
+		if len(cfg.ExcludeTypes) > 0 {
+			if ent, ok := a.cs.Get(h); ok && matchesAnyPattern(ent.Type, cfg.ExcludeTypes) {
+				continue
+			}
+		}
+		filtered = append(filtered, tree.Binding{Path: relPath, Hash: h})
+	}
+	return tree.BuildTrie(a.cs, filtered)
 }
 
 func (a *AutoVersioner) lockFor(prefix string) *sync.Mutex {
@@ -534,17 +573,21 @@ func missingRequiredExcludes(cfg types.RevisionConfigData) []string {
 		return nil
 	}
 
+	// §2.4 form 2 (<literal>/*) is a subtree match that crosses "/" at any
+	// depth, so system/revision/* already covers system/revision/head/{H}/… —
+	// the §6.1 Reentrancy case needs no second wildcard. (Was "**" until the
+	// glob rule was pinned to four forms, arch 9ee84f3.)
 	required := []string{
-		"system/revision/**",
-		"system/tree/root/**",
-		"system/tree/tracking-config/**",
-		"system/history/**",
-		"system/clock/**",
+		"system/revision/*",
+		"system/tree/root/*",
+		"system/tree/tracking-config/*",
+		"system/history/*",
+		"system/clock/*",
 	}
 	coveredBy := func(pattern string) bool {
-		// Treat "system/**" as the shorthand that covers everything.
+		// Treat "system/*" as the shorthand that covers everything under system/.
 		for _, e := range cfg.Exclude {
-			if e == "system/**" || e == pattern {
+			if e == "system/*" || e == pattern {
 				return true
 			}
 		}

@@ -79,12 +79,16 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("layer1_unsigned_request_rejected", "EXTENSION-REGISTRY §6a.9 layer 1 — a register-request with no system/signature at its invariant pointer MUST be refused; ownership proof is the floor beneath every policy mode")
 	r.Declare("revoke_request_publishes_revocation", "EXTENSION-REGISTRY §6a.9 — revoke-request MUST publish a verifying revocation at the by-target index, which is the §2.1 step-4 signal a resolver excludes the binding on. Revocation is ADDITIVE: the immutable binding and its by-name pointer stay put.")
 	r.Declare("renew_request_accepted", "EXTENSION-REGISTRY §6a.9 — renew-request extends an existing binding's expiry")
+	r.Declare("register_ttl_clamped_to_max", "EXTENSION-REGISTRY §6a.9 v1.11 REG-TTL-CLAMP-1 (register) — a register-request carrying requested_ttl above the policy max_ttl is CLAMPED not refused: 200, and the issued binding carries exactly max_ttl. Asserted on the binding's value, since a refusing peer also returns non-200 and is otherwise indistinguishable")
+	r.Declare("renew_ttl_clamped_to_max", "EXTENSION-REGISTRY §6a.9 v1.11 REG-TTL-CLAMP-1 (renew) — a renew carrying ttl above max_ttl is likewise clamped: 200/202, successor carries exactly max_ttl")
 	r.Declare("layer1_unsigned_revoke_rejected", "EXTENSION-REGISTRY §6a.9 REG-REVOKE-PROOF-1 [added 2026-08-11] — revoke-request is \"Signed by target_peer_id or the operator\". An unsigned revoke MUST be refused: revocation is monotonic and cannot be undone, so an unauthenticated one is a permanent denial-of-name against any binding in the registry")
 	r.Declare("layer1_unsigned_renew_rejected", "EXTENSION-REGISTRY §6a.9 REG-RENEW-PROOF-1 [added 2026-08-11] — renew-request is \"Signed by target_peer_id (layer-1)\". Replay defense is not authorization: it stops a CAPTURED request being re-run while leaving a fresh unsigned one accepted")
 	r.Declare("unknown_operation_rejected", "EXTENSION-REGISTRY §6a.9 — an operation the issuer does not implement MUST be refused, not silently accepted")
 	r.Declare("set_issuer_policy_round_trip", "EXTENSION-REGISTRY §6a.9.2 — set-issuer-policy stores the policy and get-issuer-policy returns it as written. Before this ruling the capability system/capability/registry-manage-issuer-policy named an act the corpus never defined, and a client had nothing to call")
 	r.Declare("set_issuer_policy_replaces_whole", "EXTENSION-REGISTRY §6a.9.2 [MUST] — set replaces the policy WHOLE; an absent optional field means *unset*, not *unchanged*. A merge would make the result depend on write order, which two peers cannot reconstruct")
 	r.Declare("set_issuer_policy_domain_control_rejected", "EXTENSION-REGISTRY §6a.9.2 — mode \"domain-control\" MUST be refused 400 unsupported_mode and NOT stored, rather than arming a mode the issuer cannot enforce. The negative half is checked too: a 400 that stored anyway passes a status-only assertion")
+	r.Declare("set_issuer_policy_null_default_ttl_rejected", "EXTENSION-REGISTRY §6a.9.2 CAP registry D11 (arch 2026-08-18) — a live-registration policy with default_ttl=null can only mint null-ttl bindings, which CAP D3 makes unresolvable; set-issuer-policy MUST refuse it 400 and NOT store it, the same move as domain-control. Owed by py/rust; go implements it")
+	r.Declare("set_issuer_policy_max_ttl_ceiling", "EXTENSION-REGISTRY §6a.9 v1.11 REG-TTL-CEILING-1 — set-issuer-policy MUST reject a live policy whose max_ttl is absent (400) and one whose default_ttl exceeds max_ttl (400); control: both present with default_ttl <= max_ttl is accepted 200. Same trigger and site as the default_ttl gate. Owed by py/rust; go implements it")
 	r.Declare("get_issuer_policy_unset_404", "EXTENSION-REGISTRY §6a.9.2 — unset is not a mode: with no policy stored, get MUST answer 404 not_found and MUST NOT synthesize a default `open`, which would silently turn a curated registry into a first-come-first-serve one")
 
 	// --- surface reachability -------------------------------------------
@@ -891,6 +895,96 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 		return PassCheck(fmt.Sprintf("renew-request accepted (%d) and the binding still resolves", renewStatus))
 	}))
 
+	// REG-TTL-CLAMP-1 (register half) — REGISTRY §6a.9, v1.11. A register-request
+	// carrying requested_ttl ABOVE the policy max_ttl is CLAMPED, not refused: the
+	// call returns 200 and the issued binding carries EXACTLY max_ttl. Asserted on
+	// the binding's value, not the status — a peer that refuses instead of clamping
+	// also returns non-200 and would be indistinguishable on status alone.
+	r.Run("register_ttl_clamped_to_max", gate(func() CheckOutcome {
+		defTTL := uint64(1_000)
+		maxTTL := uint64(10_000)
+		if out := setIssuerPolicy(ctx, client, types.IssuerPolicyData{
+			Mode: types.IssuerPolicyModeOpen, DefaultTTL: &defTTL, MaxTTL: &maxTTL,
+		}); out != nil {
+			return *out
+		}
+		name := issuerName("clamp-reg")
+		above := uint64(999_999_999)
+		status, code, resp, _, err := issuerRegisterRespTTL(ctx, client, uri, name, &above)
+		if err != nil {
+			return FailCheck("register-request: " + err.Error())
+		}
+		if status != 200 {
+			return FailCheck(fmt.Sprintf("register above the ceiling → %d/%q, want 200 (CLAMP, not refuse) — v1.11 clamps rather than billing a request for a policy it cannot read", status, code))
+		}
+		var resultEnt entity.Entity
+		if err := ecf.Decode(resp.Result, &resultEnt); err != nil {
+			return FailCheck("decode bind result: " + err.Error())
+		}
+		bindRes, err := types.LocalNameBindResultDataFromEntity(resultEnt)
+		if err != nil {
+			return FailCheck("decode binding_hash: " + err.Error())
+		}
+		gotTTL, err := issuerBindingTTL(ctx, client, bindRes.BindingHash)
+		if err != nil {
+			return FailCheck("read back issued binding: " + err.Error())
+		}
+		if gotTTL == nil || *gotTTL != maxTTL {
+			return FailCheck(fmt.Sprintf("issued binding ttl = %v, want clamped to max_ttl %d (requested %d) — the ceiling was not applied", gotTTL, maxTTL, above))
+		}
+		return PassCheck(fmt.Sprintf("register above the ceiling accepted 200 and the binding carries exactly max_ttl (%d), not the requested %d", maxTTL, above))
+	}))
+
+	// REG-TTL-CLAMP-1 (renew half) — a renew carrying ttl above max_ttl is likewise
+	// clamped: 200/202 and the successor carries exactly max_ttl.
+	r.Run("renew_ttl_clamped_to_max", gate(func() CheckOutcome {
+		defTTL := uint64(1_000)
+		maxTTL := uint64(10_000)
+		if out := setIssuerPolicy(ctx, client, types.IssuerPolicyData{
+			Mode: types.IssuerPolicyModeOpen, DefaultTTL: &defTTL, MaxTTL: &maxTTL,
+		}); out != nil {
+			return *out
+		}
+		name := issuerName("clamp-renew")
+		status, code, bindingHash, err := issuerRegisterBound(ctx, client, uri, name)
+		if err != nil || status != 200 {
+			return FailCheck(fmt.Sprintf("setup: register %q → %d/%q err=%v", name, status, code, err))
+		}
+		above := uint64(999_999_999)
+		renewEnt, err := types.RegistryRenewRequestData{
+			BindingHash: bindingHash, TTL: &above, Nonce: issuerNonce(), IssuedAt: uint64(time.Now().UnixMilli()),
+		}.ToEntity()
+		if err != nil {
+			return FailCheck("build renew-request: " + err.Error())
+		}
+		if err := publishOwnershipProof(ctx, client, renewEnt); err != nil {
+			return FailCheck("publish ownership proof: " + err.Error())
+		}
+		rStatus, rCode, rResp, err := issuerDispatchFull(ctx, client, uri, peerissued.OpRenewRequest, renewEnt)
+		if err != nil {
+			return FailCheck("renew-request: " + err.Error())
+		}
+		if rStatus != 200 && rStatus != 202 {
+			return FailCheck(fmt.Sprintf("renew above the ceiling → %d/%q, want 200/202 (CLAMP, not refuse)", rStatus, rCode))
+		}
+		var resultEnt entity.Entity
+		if err := ecf.Decode(rResp.Result, &resultEnt); err != nil {
+			return FailCheck("decode renew result: " + err.Error())
+		}
+		bindRes, err := types.LocalNameBindResultDataFromEntity(resultEnt)
+		if err != nil {
+			return FailCheck("decode successor binding_hash: " + err.Error())
+		}
+		gotTTL, err := issuerBindingTTL(ctx, client, bindRes.BindingHash)
+		if err != nil {
+			return FailCheck("read back successor binding: " + err.Error())
+		}
+		if gotTTL == nil || *gotTTL != maxTTL {
+			return FailCheck(fmt.Sprintf("successor ttl = %v, want clamped to max_ttl %d (requested %d)", gotTTL, maxTTL, above))
+		}
+		return PassCheck(fmt.Sprintf("renew above the ceiling accepted and the successor carries exactly max_ttl (%d)", maxTTL))
+	}))
+
 	// The two negative halves. These are the checks whose absence let an
 	// unauthenticated revocation path ship green: the positive checks above
 	// asserted only that revoke/renew were ACCEPTED, so a peer that skipped
@@ -990,10 +1084,12 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 
 	r.Run("set_issuer_policy_round_trip", gate(func() CheckOutcome {
 		ttl := uint64(3_600_000)
+		maxTTL := uint64(86_400_000)
 		want := types.IssuerPolicyData{
 			Mode:       types.IssuerPolicyModeAllowlist,
 			Allowlist:  []string{string(client.LocalPeerID())},
 			DefaultTTL: &ttl,
+			MaxTTL:     &maxTTL, // v1.11: REQUIRED on a live policy dispatched through set-issuer-policy
 		}
 		ent, err := want.ToEntity()
 		if err != nil {
@@ -1023,13 +1119,23 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 		if got.DefaultTTL == nil || *got.DefaultTTL != ttl {
 			return FailCheck("get lost default_ttl — the round-trip is not returning the policy as written")
 		}
+		if got.MaxTTL == nil || *got.MaxTTL != maxTTL {
+			return FailCheck("get lost max_ttl — the round-trip is not returning the policy as written (v1.11)")
+		}
 		return PassCheck(fmt.Sprintf("set-issuer-policy (%s) round-trips through get-issuer-policy", want.Mode))
 	}))
 
 	r.Run("set_issuer_policy_replaces_whole", gate(func() CheckOutcome {
-		// Previous check left mode=allowlist WITH default_ttl and a
-		// non-empty allowlist. Write mode=open carrying neither.
-		bare, err := types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen}.ToEntity()
+		// Previous check left mode=allowlist WITH default_ttl=3_600_000 and a
+		// non-empty allowlist. Write mode=open dropping the allowlist and carrying
+		// a DIFFERENT default_ttl. CAP registry D11 makes default_ttl mandatory for
+		// a live policy, so it can no longer be the "cleared optional field" — the
+		// whole-replace property is shown by the allowlist clearing AND the
+		// default_ttl taking the new value (a merge would keep the old allowlist or
+		// the old ttl).
+		replTTL := uint64(7_200_000)
+		replMaxTTL := uint64(86_400_000)
+		bare, err := types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen, DefaultTTL: &replTTL, MaxTTL: &replMaxTTL}.ToEntity()
 		if err != nil {
 			return FailCheck("build issuer-policy: " + err.Error())
 		}
@@ -1051,10 +1157,10 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 		if len(got.Allowlist) != 0 {
 			return FailCheck(fmt.Sprintf("allowlist %v survived a whole-replace — §6a.9.2 [MUST] an absent optional field is *unset*, not *unchanged*; this is merge semantics", got.Allowlist))
 		}
-		if got.DefaultTTL != nil {
-			return FailCheck(fmt.Sprintf("default_ttl %d survived a whole-replace — this is merge semantics", *got.DefaultTTL))
+		if got.DefaultTTL == nil || *got.DefaultTTL != replTTL {
+			return FailCheck(fmt.Sprintf("default_ttl not replaced whole: got %v want %d — a merge would keep the prior value", got.DefaultTTL, replTTL))
 		}
-		return PassCheck("set-issuer-policy replaces the policy whole; absent optional fields are unset")
+		return PassCheck("set-issuer-policy replaces the policy whole; the allowlist cleared and default_ttl took the new value")
 	}))
 
 	r.Run("set_issuer_policy_domain_control_rejected", gate(func() CheckOutcome {
@@ -1080,6 +1186,93 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 			}
 		}
 		return PassCheck(fmt.Sprintf("domain-control refused %d/%q and not stored", status, code))
+	}))
+
+	r.Run("set_issuer_policy_null_default_ttl_rejected", gate(func() CheckOutcome {
+		// CAP registry D11: a live-registration policy with no default_ttl can
+		// only mint null-ttl bindings (a request omitting requested_ttl resolves
+		// to null), which D3 makes unresolvable. set-issuer-policy MUST refuse it
+		// 400 and store nothing — §6a.9.2's domain-control move, the party whose
+		// field is missing (the operator) is exactly who set-issuer-policy speaks
+		// for. An open policy carrying no default_ttl.
+		ent, err := types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen}.ToEntity()
+		if err != nil {
+			return FailCheck("build issuer-policy: " + err.Error())
+		}
+		status, code, err := issuerDispatch(ctx, client, uri, peerissued.OpSetIssuerPolicy, ent)
+		if err != nil {
+			return FailCheck("set-issuer-policy dispatch: " + err.Error())
+		}
+		if status != 400 {
+			return FailCheck(fmt.Sprintf("set-issuer-policy accepted a live policy with null default_ttl (%d/%q) — CAP registry D11 requires 400: such a policy can only mint null-ttl bindings, unresolvable per D3, and the missing field is the operator's to supply here", status, code))
+		}
+		// Negative half: the rejected policy must not have overwritten the stored
+		// (valid) one. A conformant peer still returns a policy carrying a
+		// default_ttl; a peer that stored the null-ttl one returns default_ttl=null.
+		getStatus, _, resp, err := issuerDispatchFull(ctx, client, uri, peerissued.OpGetIssuerPolicy, issuerNoParams())
+		if err != nil {
+			return FailCheck("get-issuer-policy after rejection: " + err.Error())
+		}
+		if getStatus == 200 {
+			if got, derr := issuerPolicyFromResponse(resp); derr == nil && got.DefaultTTL == nil {
+				return FailCheck("a null-default_ttl policy was refused 400 but stored anyway (get returns default_ttl=null) — a status-only check would have passed this")
+			}
+		}
+		// Re-arm a valid policy so nothing downstream inherits a rejected write.
+		if out := setIssuerPolicy(ctx, client, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen}); out != nil {
+			return *out
+		}
+		return PassCheck(fmt.Sprintf("live policy with null default_ttl refused %d/%q and not stored — CAP registry D11", status, code))
+	}))
+
+	// REG-TTL-CEILING-1 (REGISTRY §6a.9, v1.11) — set-issuer-policy MUST reject a
+	// live policy whose max_ttl is absent (400) and one whose default_ttl exceeds
+	// max_ttl (400); the control is a policy with both, default_ttl <= max_ttl,
+	// accepted 200. Same trigger and site as the default_ttl gate: it is the
+	// operator's field, and this is where the missing value is supplied.
+	r.Run("set_issuer_policy_max_ttl_ceiling", gate(func() CheckOutcome {
+		def := uint64(3_600_000)
+		big := uint64(7_200_000)
+		small := uint64(1_800_000)
+
+		// (1) live mode, default_ttl present but max_ttl ABSENT → 400.
+		absent, err := types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen, DefaultTTL: &def}.ToEntity()
+		if err != nil {
+			return FailCheck("build policy: " + err.Error())
+		}
+		if status, code, err := issuerDispatch(ctx, client, uri, peerissued.OpSetIssuerPolicy, absent); err != nil {
+			return FailCheck("set-issuer-policy (absent max_ttl): " + err.Error())
+		} else if status != 400 {
+			return FailCheck(fmt.Sprintf("live policy with absent max_ttl → %d/%q, want 400 — v1.11 makes max_ttl REQUIRED on a live policy", status, code))
+		}
+
+		// (2) default_ttl > max_ttl → 400.
+		inverted, err := types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen, DefaultTTL: &big, MaxTTL: &small}.ToEntity()
+		if err != nil {
+			return FailCheck("build policy: " + err.Error())
+		}
+		if status, code, err := issuerDispatch(ctx, client, uri, peerissued.OpSetIssuerPolicy, inverted); err != nil {
+			return FailCheck("set-issuer-policy (default>max): " + err.Error())
+		} else if status != 400 {
+			return FailCheck(fmt.Sprintf("policy with default_ttl > max_ttl → %d/%q, want 400", status, code))
+		}
+
+		// (3) control — both present, default_ttl <= max_ttl → 200.
+		ok, err := types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen, DefaultTTL: &def, MaxTTL: &big}.ToEntity()
+		if err != nil {
+			return FailCheck("build policy: " + err.Error())
+		}
+		if status, code, err := issuerDispatch(ctx, client, uri, peerissued.OpSetIssuerPolicy, ok); err != nil {
+			return FailCheck("set-issuer-policy (control): " + err.Error())
+		} else if status != 200 {
+			return FailCheck(fmt.Sprintf("control policy (default_ttl <= max_ttl) → %d/%q, want 200", status, code))
+		}
+
+		// Re-arm a valid policy so nothing downstream inherits this one.
+		if out := setIssuerPolicy(ctx, client, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen}); out != nil {
+			return *out
+		}
+		return PassCheck("set-issuer-policy enforces the max_ttl ceiling: absent → 400, default_ttl > max_ttl → 400, both valid → 200 (REG-TTL-CEILING-1)")
 	}))
 
 	r.Run("get_issuer_policy_unset_404", gate(func() CheckOutcome {
@@ -1202,6 +1395,27 @@ func isHandlerMissing(status uint, code string) bool {
 // The Issuer resolves policy store-first, so this is what selects the mode
 // under test. Returns nil on success, or a ready-made failing outcome.
 func setIssuerPolicy(ctx context.Context, client *PeerClient, policy types.IssuerPolicyData) *CheckOutcome {
+	// CAP registry D11/D12 (arch ROUTING-2026-08-18-d §1): a live-registration
+	// policy MUST define default_ttl, else a register omitting requested_ttl
+	// resolves to a null ttl and the issuer fails closed (403 policy_rejected).
+	// This helper seeds via tree:put (bypassing D11's set-issuer-policy gate), so
+	// default a ttl here for the positive register-flow checks; the D11/D12
+	// conformance behaviour is exercised explicitly by
+	// set_issuer_policy_null_default_ttl_rejected.
+	if policy.DefaultTTL == nil {
+		d := uint64(1_000_000_000)
+		policy.DefaultTTL = &d
+	}
+	// REGISTRY v1.11: a live policy MUST also carry max_ttl (the issuer-side
+	// ceiling). This helper seeds via tree:put (bypassing set-issuer-policy's
+	// REG-TTL-CEILING-1 gate), so default a max here for the positive
+	// register-flow checks — well above default_ttl so it never clamps the
+	// bindings those checks assert on. The ceiling/clamp behaviour is exercised
+	// explicitly by set_issuer_policy_null_max_ttl_rejected and register_ttl_clamped.
+	if policy.MaxTTL == nil {
+		m := uint64(100_000_000_000)
+		policy.MaxTTL = &m
+	}
 	ent, err := policy.ToEntity()
 	if err != nil {
 		out := FailCheck("build issuer-policy entity: " + err.Error())
@@ -1428,6 +1642,22 @@ func issuerDispatchFull(ctx context.Context, client *PeerClient, uri, op string,
 		return 0, "", types.ExecuteResponseData{}, err
 	}
 	return extractStatusAndCode(respEnv)
+}
+
+// issuerBindingTTL reads the ttl off a published binding, by its hash — the
+// observable REG-TTL-CLAMP-1 asserts on. The binding is served at its storage
+// path; a peer that clamped writes the clamped value here (it is signed), and a
+// peer that ignored the ceiling writes the requested one.
+func issuerBindingTTL(ctx context.Context, client *PeerClient, bindingHash hash.Hash) (*uint64, error) {
+	ent, _, err := client.TreeGet(ctx, types.BindingStoragePath(bindingHash))
+	if err != nil {
+		return nil, err
+	}
+	bd, err := types.BindingDataFromEntity(ent)
+	if err != nil {
+		return nil, fmt.Errorf("decode binding: %w", err)
+	}
+	return bd.TTL, nil
 }
 
 // issuerNameResolves reports whether the registry currently binds `name` in
