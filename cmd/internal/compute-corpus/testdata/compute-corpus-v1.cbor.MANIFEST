@@ -1,0 +1,42 @@
+# compute-conformance corpus MANIFEST
+# GUIDE-CONFORMANCE §7c. Inputs only — expected answers are
+# established by cross-bless, not by the fixture-builder.
+
+corpus_version:    v1
+generator_version: 1
+prng:              splitmix64
+seed:              20260716
+sweep_cases:       300
+profile:           inproc
+spec_version:      3.20
+vectors:           350 (worked 50, sweep 300)
+bytes:             518796
+sha256:            c1fb657841fd5a3ec67530b9d60573a714b7fad7a310207bfa32b1d4eda9f6e6
+
+# feature coverage (vectors carrying each tag)
+  assoc                        3
+  bit-reinterpretation         4
+  budget                       1
+  builtin-alias                2
+  closure                      119
+  deep-navigation              1
+  empty-collection             1
+  error-path                   23
+  error-value                  2
+  group-by                     2
+  heterogeneous-array          1
+  invalid-expression           2
+  major-type-is-not-intent     2
+  materialized-error           2
+  materialized-hash-readback   1
+  nested-collection            1
+  nested-construct             4
+  propagated-error             1
+  range                        2
+  rule11-negative              1
+  store-crossing               3
+  tail-recursion               1
+  tree-lookup                  3
+  unsigned-at-use-site         158
+  v325-corner                  7
+  value-form-error             9

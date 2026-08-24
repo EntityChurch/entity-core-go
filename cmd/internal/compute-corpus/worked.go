@@ -71,8 +71,9 @@ type workedVector struct {
 // vector's own bindings map is emptied — the expression is closed, so a peer
 // evaluating it from an empty scope sees the same program.
 func buildWorked(profile string) ([]Vector, error) {
-	out := make([]Vector, 0, len(workedVectors))
-	for _, wv := range workedVectors {
+	all := append(append([]workedVector{}, workedVectors...), v325CornerVectors...)
+	out := make([]Vector, 0, len(all))
+	for _, wv := range all {
 		bindings := wv.bindings
 		if bindings == nil {
 			bindings = stdBindings()

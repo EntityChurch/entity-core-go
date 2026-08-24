@@ -24,6 +24,11 @@ const (
 	ErrInstallationGrantInvalid = "installation_grant_invalid"
 	ErrIndexOutOfRange          = "index_out_of_range"
 	ErrCastOutOfRange           = "cast_out_of_range"
+	// v3.25 §9.1: range(n) with a negative n, or an n exceeding the maximum
+	// representable array length, is count_out_of_range — following
+	// cast_out_of_range's precedent rather than overloading type_mismatch
+	// (an out-of-domain magnitude is not a type error, §2.2) or index_out_of_range.
+	ErrCountOutOfRange = "count_out_of_range"
 	// v3.19b N8 (§9.1): a kind:"entity" scope binding's hash resolves in
 	// neither the local content store nor the envelope `included`. Returned
 	// as an error VALUE at status 200 per F10, not a transport failure.

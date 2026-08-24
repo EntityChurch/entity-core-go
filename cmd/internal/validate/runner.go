@@ -43,6 +43,7 @@ type CheckRunner struct {
 	selfChecks map[string]bool
 	results    map[string]CheckResult
 	data       map[string]any
+	gates      []string
 }
 
 // CheckOutcome is returned by check functions to indicate the result.
@@ -101,6 +102,30 @@ func (r *CheckRunner) Run(name string, fn func() CheckOutcome) {
 	}
 	if _, already := r.results[name]; already {
 		panic(fmt.Sprintf("CheckRunner: Run(%q) called twice", name))
+	}
+
+	// Gate: a category may declare (via Gate) prerequisites that ALL
+	// subsequent checks implicitly depend on. When a gate is unmet the
+	// body is NOT invoked; the check records the propagated outcome —
+	// Skip if a gate prerequisite was skipped (e.g. an optional handler is
+	// absent), Block/Fail otherwise — the same semantics as an explicit
+	// Require, applied to a whole trailing section so a category with many
+	// independent behavioral roots skips uniformly instead of FAILing each
+	// one against a handler that isn't there (S1).
+	if len(r.gates) > 0 {
+		if out, ok := r.Require(r.gates...); !ok {
+			fmt.Fprintf(progressOut, "%-4s %s.%s (gated)\n", out.severity, r.category, name)
+			r.results[name] = CheckResult{
+				Category:  r.category,
+				Name:      name,
+				Severity:  out.severity,
+				Message:   out.message,
+				SpecRef:   specRef,
+				Details:   out.details,
+				SelfCheck: r.selfChecks[name],
+			}
+			return
+		}
 	}
 
 	fmt.Fprintf(progressOut, "RUN  %s.%s\n", r.category, name)
@@ -177,6 +202,18 @@ func (r *CheckRunner) Require(deps ...string) (CheckOutcome, bool) {
 		return BlockCheck(dep), false
 	}
 	return CheckOutcome{}, true
+}
+
+// Gate sets prerequisite checks that every SUBSEQUENT Run implicitly
+// depends on, until changed or cleared (Gate() with no args). Use it for an
+// optional-extension category (S1): run the handler-present check(s) first,
+// then Gate on them — an absent handler makes the presence check SKIP, and
+// every behavioral check Run afterward inherits that skip without invoking
+// its body, so the whole category SKIPs instead of FAILing every
+// independent behavioral root against a handler that isn't there. Checks
+// that must run regardless belong before the Gate call.
+func (r *CheckRunner) Gate(deps ...string) {
+	r.gates = deps
 }
 
 // Store saves a value for retrieval by later checks.

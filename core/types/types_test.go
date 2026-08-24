@@ -509,12 +509,15 @@ func TestRegistryCoreTypes(t *testing.T) {
 	// definition for them — see RegisterCoreTypes.) → 212 (a prior bump).
 	// EXTENSION-REGISTRY §4.3 [v1.18] adds system/registry/set-resolver-config-request
 	// (the set-resolver-config wrapper carrying acknowledge_name_disclosure) → 213.
-	if len(defs) != 213 {
+	// EXTENSION-COMPUTE v3.24 adds the four collection-primitive args types
+	// system/compute/{range,group-by,concat,assoc}-args (§3.5 "The v3.24
+	// collection primitives") — count +4 → 217.
+	if len(defs) != 217 {
 		names := make([]string, len(defs))
 		for i, d := range defs {
 			names[i] = d.Name
 		}
-		t.Fatalf("expected 211 core type definitions, got %d: %v", len(defs), names)
+		t.Fatalf("expected 217 core type definitions, got %d: %v", len(defs), names)
 	}
 
 	seen := make(map[string]bool)
@@ -588,13 +591,15 @@ func TestReflectedTypesMatchSpec(t *testing.T) {
 	// EXTENSION-REGISTRY v1.3 §6a.9.3 adds system/registry/pending-binding
 	// → 216 total. → 217 (a prior bump).
 	// EXTENSION-REGISTRY §4.3 [v1.18] set-resolver-config-request → 218 total.
+	// EXTENSION-COMPUTE v3.24 §3.5 collection-primitive args
+	// system/compute/{range,group-by,concat,assoc}-args → 222 total.
 	all := r.All()
-	if len(all) != 218 {
+	if len(all) != 222 {
 		names := make([]string, len(all))
 		for i, d := range all {
 			names[i] = d.Name
 		}
-		t.Fatalf("expected 216 total type definitions, got %d: %v", len(all), names)
+		t.Fatalf("expected 222 total type definitions, got %d: %v", len(all), names)
 	}
 
 	// Verify specific types have correct fields.

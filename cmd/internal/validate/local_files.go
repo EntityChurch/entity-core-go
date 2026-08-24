@@ -126,12 +126,7 @@ func runLocalFiles(ctx context.Context, client *PeerClient) []CheckResult {
 	// --- Step 1: Handler manifest ---
 
 	r.Run("handler_manifest_present", func() CheckOutcome {
-		ent, _, err := client.TreeGet(ctx, "system/handler/local/files")
-		if err != nil {
-			return FailCheck("failed to fetch local/files handler manifest: " + err.Error())
-		}
-		r.Store("manifest_entity", ent)
-		return PassCheck(fmt.Sprintf("local/files handler manifest present (type: %s)", ent.Type))
+		return optionalManifestPresent(ctx, client, r, "system/handler/local/files", "local/files")
 	})
 
 	r.Run("handler_manifest_decode", func() CheckOutcome {

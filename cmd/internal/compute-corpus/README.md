@@ -197,3 +197,35 @@ respect, because every impl can check it from the artifact with no instrumentati
 `entity-core-protocol/specs/test-vectors/compute-conformance/`, vendored into keystone. That repo is
 operator-coordinated and not writable from here — the expected split, per §7c.5's own note that "arch
 guides; the impl work lands in the cohort repos." Build and pin here; route the artifact.
+
+## Frozen artifact + the C-8 drift guard (2026-08-20)
+
+C-8 was filed because the corpus was *regenerable but never frozen*: `TestCorpusIsReproducible` only
+proves same-process determinism (two builds in one run agree — it cannot see a `gen.go` change that
+shifts both), and the SHA that *would* catch a shift lived in a spec header, not beside the bytes.
+Nothing noticed the corpus had already drifted **330 → 343** since the 2026-07-23 cross-bless.
+
+Now pinned:
+
+- **Frozen artifact:** `testdata/compute-corpus-v1.cbor` (+ `.MANIFEST`) — regenerate with
+  `generate --out testdata/compute-corpus-v1.cbor`.
+- **Mechanical guard:** `frozen_test.go` `TestFrozenCorpusSHAPinned` — regeneration MUST hash to the
+  pinned `goldenCorpusSHA256`, and the committed bytes MUST match it. A generator change that shifts
+  the corpus now fails a test, deliberately; re-freeze + re-pin + re-cross-bless is the required
+  ritual, not a silent regeneration.
+
+**Honest scope of this freeze — read before treating it as complete:**
+
+- Pinned state: **350 vectors, SHA `c1fb6578…`, `spec_version 3.20`.**
+- **The v3.25 corner vectors CV-1…CV-6 (C-5) are partially seeded:** **7 of the 9 arms** are in the
+  corpus (`worked/v325-corner/*`) and verified against arch's §7c.6 outcomes (`TestV325CornerOutcomes`).
+  **CV-4a and CV-5 are held, not seeded** (`v325BlockedOnMaterialization`): they put a `compute/error`
+  in a contained data-position, which go's `materialize()` guard rejects — routed as **spec-issue
+  2026-08-20-f**. They seed once ruled + go's `materialize()` is fixed (a re-freeze).
+- The broader **sweep** still does not cover the v3.24/v3.25 primitives beyond these corners, and
+  `spec_version` is still `3.20` — extending the sweep re-freezes under the guard.
+- The last **three-way cross-bless** was at the older 330-vector corpus; a fresh three-way bless at
+  350 is gated on `entity-core-rust` / `entity-core-py` building v3.25 (C-6). The frozen artifact is
+  **inputs only** — freezing it does not bless outcomes.
+- **Vendor** into `entity-core-protocol/specs/test-vectors/compute-conformance/` routes out (boundary
+  repo); the frozen bytes + MANIFEST here are what gets vendored.

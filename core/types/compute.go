@@ -54,6 +54,22 @@ const (
 	TypeComputeFilterArgs = "system/compute/filter-args"
 	TypeComputeFoldArgs   = "system/compute/fold-args"
 
+	// v3.24 collection primitives args types (§3.5 "The v3.24 collection
+	// primitives"). MUST-given-COMPUTE (§10.1): they produce boundary bytes,
+	// so a divergent result is a divergent peer.
+	TypeComputeRangeArgs   = "system/compute/range-args"
+	TypeComputeGroupByArgs = "system/compute/group-by-args"
+	TypeComputeConcatArgs  = "system/compute/concat-args"
+	TypeComputeAssocArgs   = "system/compute/assoc-args"
+
+	// TypeComputeGroup is group-by's result element (§3.5, v3.25):
+	// system/compute/group{key, members}. Per arch's ruling it is a pinned
+	// type NAME, not a type-extension registration — a constructed entity
+	// encoded by the runtime kind of its evaluated values (§2.3 N1 / §4.1),
+	// so a peer with no type extension produces byte-identical groups. It is
+	// therefore NOT reflect-registered (no schema, no type-count entry).
+	TypeComputeGroup = "system/compute/group"
+
 	// v3.19b §2.3: kind-tagged scope binding value model.
 	TypeComputeScopeBinding = "system/compute/scope-binding"
 )
@@ -533,4 +549,65 @@ func (d ComputeFoldArgsData) ToEntity() (entity.Entity, error) {
 		return entity.Entity{}, err
 	}
 	return entity.NewEntity(TypeComputeFoldArgs, cbor.RawMessage(raw))
+}
+
+// --- v3.24 collection primitives args (§3.5) ---
+
+// ComputeRangeArgsData is `system/compute/range-args`: n is the hash of a
+// non-negative integer expression. range(n) → [0 … n-1].
+type ComputeRangeArgsData struct {
+	N hash.Hash `cbor:"n"`
+}
+
+func (d ComputeRangeArgsData) ToEntity() (entity.Entity, error) {
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(TypeComputeRangeArgs, cbor.RawMessage(raw))
+}
+
+// ComputeGroupByArgsData is `system/compute/group-by-args`: fn is a unary
+// closure element→key; elements are grouped by derived key in one pass.
+type ComputeGroupByArgsData struct {
+	Collection hash.Hash `cbor:"collection"`
+	Fn         hash.Hash `cbor:"fn"`
+}
+
+func (d ComputeGroupByArgsData) ToEntity() (entity.Entity, error) {
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(TypeComputeGroupByArgs, cbor.RawMessage(raw))
+}
+
+// ComputeConcatArgsData is `system/compute/concat-args`: collections is an
+// array of hashes of array expressions, joined order-preserving one level.
+type ComputeConcatArgsData struct {
+	Collections []hash.Hash `cbor:"collections"`
+}
+
+func (d ComputeConcatArgsData) ToEntity() (entity.Entity, error) {
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(TypeComputeConcatArgs, cbor.RawMessage(raw))
+}
+
+// ComputeAssocArgsData is `system/compute/assoc-args`: returns a new array
+// identical to collection except at index, which carries value.
+type ComputeAssocArgsData struct {
+	Collection hash.Hash `cbor:"collection"`
+	Index      hash.Hash `cbor:"index"`
+	Value      hash.Hash `cbor:"value"`
+}
+
+func (d ComputeAssocArgsData) ToEntity() (entity.Entity, error) {
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(TypeComputeAssocArgs, cbor.RawMessage(raw))
 }

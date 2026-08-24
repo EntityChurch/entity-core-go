@@ -190,10 +190,11 @@ func runRevision(ctx context.Context, client *PeerClient) []CheckResult {
 	// --- Step 1: Handler manifest ---
 
 	r.Run("handler_manifest_present", func() CheckOutcome {
-		ent, _, err := client.TreeGet(ctx, "system/handler/system/revision")
-		if err != nil {
-			return FailCheck("failed to fetch revision handler manifest: " + err.Error())
+		out := optionalManifestPresent(ctx, client, r, "system/handler/system/revision", "revision")
+		if out.Severity() != Pass {
+			return out
 		}
+		ent := r.Load("manifest_entity").(entity.Entity)
 		handlerData, err := types.HandlerInterfaceDataFromEntity(ent)
 		if err != nil {
 			return FailCheck("could not decode handler manifest: " + err.Error())

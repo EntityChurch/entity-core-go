@@ -103,12 +103,7 @@ func runQuery(ctx context.Context, client *PeerClient) []CheckResult {
 	// --- Step 1: Handler manifest ---
 
 	r.Run("handler_manifest_present", func() CheckOutcome {
-		ent, _, err := client.TreeGet(ctx, "system/handler/system/query")
-		if err != nil {
-			return FailCheck("failed to fetch query handler manifest: " + err.Error())
-		}
-		r.Store("manifest_entity", ent)
-		return PassCheck(fmt.Sprintf("query handler manifest present (type: %s)", ent.Type))
+		return optionalManifestPresent(ctx, client, r, "system/handler/system/query", "query")
 	})
 
 	r.Run("handler_manifest_decode", func() CheckOutcome {

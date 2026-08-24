@@ -359,3 +359,77 @@ func TestCheckRunner_PassedAndOK(t *testing.T) {
 		t.Error("OK should be false for FAIL")
 	}
 }
+
+// TestCheckRunner_GateSkipsTrailingSection is the teeth for the S1 gate: when
+// a gate prerequisite SKIPs (an optional handler is absent), every check Run
+// afterward SKIPs without invoking its body — the whole behavioral section
+// degrades to SKIP, not FAIL. Checks Run before Gate are unaffected. A gate
+// that FAILs (or never ran) blocks the trailing checks as FAIL, so a genuine
+// defect is never laundered into a skip.
+func TestCheckRunner_GateSkipsTrailingSection(t *testing.T) {
+	r := NewCheckRunner("test")
+	r.Declare("before_gate", "§0")
+	r.Declare("handler_present", "§1")
+	r.Declare("behavioral_root", "§2")
+	r.Declare("behavioral_body_ran", "§3")
+
+	before := false
+	r.Run("before_gate", func() CheckOutcome { before = true; return PassCheck("ran before gate") })
+
+	// Handler absent → the presence check SKIPs.
+	r.Run("handler_present", func() CheckOutcome { return SkipCheck("handler not present (optional extension)") })
+
+	r.Gate("handler_present")
+
+	// Neither behavioral body may run once the gate is skipped.
+	bodyRan := false
+	r.Run("behavioral_root", func() CheckOutcome { bodyRan = true; return PassCheck("should not be reached") })
+	r.Run("behavioral_body_ran", func() CheckOutcome { bodyRan = true; return FailCheck("should not be reached") })
+
+	if !before {
+		t.Fatal("check before Gate() must run")
+	}
+	if bodyRan {
+		t.Fatal("a gated check's body must NOT be invoked when the gate skipped")
+	}
+	sev := map[string]Severity{}
+	for _, c := range r.Results() {
+		sev[c.Name] = c.Severity
+	}
+	if sev["before_gate"] != Pass {
+		t.Errorf("before_gate: want PASS, got %s", sev["before_gate"])
+	}
+	if sev["handler_present"] != Skip {
+		t.Errorf("handler_present: want SKIP, got %s", sev["handler_present"])
+	}
+	if sev["behavioral_root"] != Skip {
+		t.Errorf("behavioral_root: want SKIP (gate propagated), got %s", sev["behavioral_root"])
+	}
+	if sev["behavioral_body_ran"] != Skip {
+		t.Errorf("behavioral_body_ran: want SKIP, got %s — a FAIL here is the pre-S1 spurious-fail defect", sev["behavioral_body_ran"])
+	}
+}
+
+// TestCheckRunner_GateFailBlocksNotSkips proves the gate does not launder a
+// genuine failure into a skip: a FAILed gate prerequisite blocks trailing
+// checks as FAIL (present-but-broken handler is a real defect, not an absence).
+func TestCheckRunner_GateFailBlocksNotSkips(t *testing.T) {
+	r := NewCheckRunner("test")
+	r.Declare("handler_present", "§1")
+	r.Declare("behavioral_root", "§2")
+
+	r.Run("handler_present", func() CheckOutcome { return FailCheck("handler present but manifest is corrupt") })
+	r.Gate("handler_present")
+
+	bodyRan := false
+	r.Run("behavioral_root", func() CheckOutcome { bodyRan = true; return PassCheck("unreached") })
+
+	if bodyRan {
+		t.Fatal("gated body must not run when the gate failed")
+	}
+	for _, c := range r.Results() {
+		if c.Name == "behavioral_root" && c.Severity != Fail {
+			t.Errorf("behavioral_root: want FAIL (gate failed, not skipped), got %s", c.Severity)
+		}
+	}
+}

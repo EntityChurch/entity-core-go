@@ -27,10 +27,19 @@ import (
 // probes). A peer that ALLOWS (2xx) fails; a peer that crashes/closes the
 // connection fails (and that is itself the F5 fail-closed signal).
 //
-// Revocation (register §3 item 7) is intentionally NOT added here: it is gated
-// on arch decision D-VOC (V-1 tree-unbind vs V-2 list) and no impl yet
-// implements is_revoked. Adding a probe before the mechanism is pinned would
-// assert a behavior the spec has not settled. Tracked in the handoff doc.
+// Revocation (register §3 item 7) is intentionally NOT added here — but the
+// reason is now "vector owed," not "mechanism unpinned": D-VOC was RULED at
+// V7 v7.62 (§5.1/§6.2 — an explicit marker check at
+// system/capability/revocations/{root_hash_hex}, not the old V-1-tree-unbind
+// vs V-2-list framing this comment used to cite). The owed work is the two
+// go-authored conformance vectors in GUIDE-CONFORMANCE §9's capability-handler
+// register — item (i) wire-only cap revocation distinguishing (request → revoke
+// → re-present in EXECUTE, expect marker-check rejection) and item (o)
+// AUTHZ-REVOKED-1 (revoked cap on use → 401 capability_revoked). Deferred here
+// until those are authored; tracked in TRACKER-RELEASE-PUSH-2026-08-20.md (S4
+// residual). (Do NOT re-add "no impl implements is_revoked" — a sibling-impl
+// build-state claim this file must not carry unverified; the spec ruling is the
+// settled fact.)
 
 // runSecurityChain runs the chain/attenuation probes and returns their results.
 // Called from runSecurity so they join the `security` category.

@@ -123,22 +123,17 @@ func runSubscriptions(ctx context.Context, client *PeerClient) []CheckResult {
 	// --- Step 1: Handler manifests ---
 
 	r.Run("subscription_handler_present", func() CheckOutcome {
-		subManifestPath := "system/handler/system/subscription"
-		ent, _, err := client.TreeGet(ctx, subManifestPath)
-		if err != nil {
-			return FailCheck("failed to fetch subscription handler manifest: " + err.Error())
-		}
-		return PassCheck(fmt.Sprintf("subscription handler manifest present (type: %s)", ent.Type))
+		return optionalManifestPresent(ctx, client, r, "system/handler/system/subscription", "subscription")
 	})
 
 	r.Run("inbox_handler_present", func() CheckOutcome {
-		inboxManifestPath := "system/handler/system/inbox"
-		ent, _, err := client.TreeGet(ctx, inboxManifestPath)
-		if err != nil {
-			return FailCheck("failed to fetch inbox handler manifest: " + err.Error())
-		}
-		return PassCheck(fmt.Sprintf("inbox handler manifest present (type: %s)", ent.Type))
+		return optionalManifestPresent(ctx, client, r, "system/handler/system/inbox", "inbox")
 	})
+
+	// S1: every behavioral check below exercises the subscription/inbox
+	// handlers; if either is absent (an optional extension a conformant peer
+	// need not ship), SKIP the section rather than FAIL each root.
+	r.Gate("subscription_handler_present", "inbox_handler_present")
 
 	// --- Step 2: Subscribe to a test path pattern ---
 

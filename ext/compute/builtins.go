@@ -22,6 +22,11 @@ const (
 	BuiltinFilter     = builtinPrefix + "filter"
 	BuiltinFold       = builtinPrefix + "fold"
 	BuiltinStore      = builtinPrefix + "store"
+	// v3.24 collection primitives.
+	BuiltinRange   = builtinPrefix + "range"
+	BuiltinGroupBy = builtinPrefix + "group-by"
+	BuiltinConcat  = builtinPrefix + "concat"
+	BuiltinAssoc   = builtinPrefix + "assoc"
 )
 
 // IsBuiltinPath reports whether a path is a system/compute/builtins/* address.
@@ -77,6 +82,14 @@ func evalBuiltin(d types.ComputeApplyData, scope *Scope, budget *Budget, ctx *Ev
 		return builtinFilter(d, scope, budget, ctx)
 	case BuiltinFold:
 		return builtinFold(d, scope, budget, ctx)
+	case BuiltinRange:
+		return builtinRange(d, scope, budget, ctx)
+	case BuiltinGroupBy:
+		return builtinGroupBy(d, scope, budget, ctx)
+	case BuiltinConcat:
+		return builtinConcat(d, scope, budget, ctx)
+	case BuiltinAssoc:
+		return builtinAssoc(d, scope, budget, ctx)
 	case BuiltinStore:
 		return builtinStore(d, scope, budget, ctx)
 	default:

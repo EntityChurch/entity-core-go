@@ -509,6 +509,11 @@ func RegisterCoreTypes(r *TypeRegistry) {
 	r.ReflectType(TypeComputeMapArgs, reflect.TypeOf(ComputeMapArgsData{}))
 	r.ReflectType(TypeComputeFilterArgs, reflect.TypeOf(ComputeFilterArgsData{}))
 	r.ReflectType(TypeComputeFoldArgs, reflect.TypeOf(ComputeFoldArgsData{}))
+	// v3.24 collection primitives args ([]hash.Hash → array_of system/hash).
+	r.ReflectType(TypeComputeRangeArgs, reflect.TypeOf(ComputeRangeArgsData{}))
+	r.ReflectType(TypeComputeGroupByArgs, reflect.TypeOf(ComputeGroupByArgsData{}))
+	r.ReflectType(TypeComputeConcatArgs, reflect.TypeOf(ComputeConcatArgsData{}))
+	r.ReflectType(TypeComputeAssocArgs, reflect.TypeOf(ComputeAssocArgsData{}))
 
 	// Phase 5f: EXTENSION-CONTENT v3.6 §2 entity types. Reflected from Go
 	// structs; []hash.Hash → array_of {type_ref: "system/hash"} per the

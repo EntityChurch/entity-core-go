@@ -77,12 +77,7 @@ func runHistory(ctx context.Context, client *PeerClient) []CheckResult {
 	// --- Step 1: Handler manifest ---
 
 	r.Run("handler_manifest_present", func() CheckOutcome {
-		ent, _, err := client.TreeGet(ctx, "system/handler/system/history")
-		if err != nil {
-			return FailCheck("failed to fetch history handler manifest: " + err.Error())
-		}
-		r.Store("manifest_entity", ent)
-		return PassCheck(fmt.Sprintf("history handler manifest present (type: %s)", ent.Type))
+		return optionalManifestPresent(ctx, client, r, "system/handler/system/history", "history")
 	})
 
 	r.Run("handler_manifest_decode", func() CheckOutcome {

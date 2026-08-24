@@ -574,18 +574,15 @@ func runContinuations(ctx context.Context, client *PeerClient) []CheckResult {
 	// --- Step 1: Handler manifests ---
 
 	r.Run("inbox_handler_present", func() CheckOutcome {
-		ent, _, err := client.TreeGet(ctx, "system/handler/system/inbox")
-		if err != nil {
-			return FailCheck("failed to fetch inbox handler manifest: " + err.Error())
-		}
-		return PassCheck(fmt.Sprintf("inbox handler manifest present (type: %s)", ent.Type))
+		return optionalManifestPresent(ctx, client, r, "system/handler/system/inbox", "inbox")
 	})
 
 	r.Run("continuation_handler_present", func() CheckOutcome {
-		ent, _, err := client.TreeGet(ctx, "system/handler/system/continuation")
-		if err != nil {
-			return FailCheck("failed to fetch continuation handler manifest: " + err.Error())
+		out := optionalManifestPresent(ctx, client, r, "system/handler/system/continuation", "continuation")
+		if out.Severity() != Pass {
+			return out
 		}
+		ent := r.Load("manifest_entity").(entity.Entity)
 		handlerData, decErr := types.HandlerInterfaceDataFromEntity(ent)
 		if decErr != nil {
 			return PassCheck(fmt.Sprintf("continuation handler manifest present (type: %s) but could not decode operations", ent.Type))
@@ -593,6 +590,11 @@ func runContinuations(ctx context.Context, client *PeerClient) []CheckResult {
 		r.Store("continuation_handler_data", handlerData)
 		return PassCheck(fmt.Sprintf("continuation handler manifest present (type: %s)", ent.Type))
 	})
+
+	// S1: every behavioral check below exercises the continuation/inbox
+	// handlers; if either is absent (an optional extension a conformant peer
+	// need not ship), SKIP the section rather than FAIL each root.
+	r.Gate("inbox_handler_present", "continuation_handler_present")
 
 	for _, op := range []string{"advance", "resume", "abandon"} {
 		op := op
