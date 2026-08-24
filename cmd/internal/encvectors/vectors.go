@@ -61,7 +61,18 @@ import (
 // these rows add required coverage. A refused schema says "your verifier needs
 // a change" in one line; a superset says "your resolver is wrong" in four, and
 // is lying.
-const Schema = "encryption-resolve-order/3"
+//
+// Bumped to /4 when §4.4's Tier-C two-step walk (step 1a/1b) landed. A row now
+// carries a fourth carrier list, `tier_c_relationship` — the per-relationship
+// step, walked before the public certs — and rows that exercise it are new
+// required coverage (§16.6). This is a real bump for the same reason /2 was: a
+// /3 verifier that ignored the new field would silently merge the relationship
+// step into the public one and pass a row that gates precisely against that
+// merge, reporting "your resolver is right" when it has not read the input the
+// row turns on. A refused schema is the honest answer; the field is additive on
+// the wire (a /3 row simply has it empty), but the CONTRACT is not, so the
+// string moves. Go leads here (§4.4 step 1a); rust + py adopt /4 downstream.
+const Schema = "encryption-resolve-order/4"
 
 // VectorFile is the contract shape, following the vector contract agreed with
 // entity-core-rust on 2026-08-03: schema + emitter + emitter_commit provenance,
@@ -154,9 +165,16 @@ type ResolveVector struct {
 	// file alone rather than from the emitter's source tree.
 	Why string `cbor:"why"`
 
-	TierC []Carrier `cbor:"tier_c"`
-	TierB []Carrier `cbor:"tier_b"`
-	TierA []Carrier `cbor:"tier_a"`
+	// TierCRelationship is §4.4 step 1a — the per-relationship carriers, walked
+	// before TierC (step 1b, the public certs). The two are SEPARATE candidate
+	// sets, most-specific first: a live carrier here binds even over a newer
+	// live public one. Empty on every row that does not exercise the sub-walk,
+	// which is the common case and the shape a sender with no prior relationship
+	// always sees.
+	TierCRelationship []Carrier `cbor:"tier_c_relationship"`
+	TierC             []Carrier `cbor:"tier_c"`
+	TierB             []Carrier `cbor:"tier_b"`
+	TierA             []Carrier `cbor:"tier_a"`
 
 	// Pubkeys are the authored inner entities. PRESENCE IS RETRIEVABILITY:
 	// §4.4 makes keeping the attested inner entity readable a publisher MUST,
@@ -233,6 +251,14 @@ var (
 	certB1 = fillHash(0xB1)
 	certLo = fillHash(0x02)
 	certHi = fillHash(0xFD)
+
+	// The Tier-C sub-walk cast (§4.4 step 1a/1b): a per-relationship key and
+	// carrier vs. the public handle's, kept distinct so a row can assert which
+	// step bound the key.
+	pkRel   = fillHash(0x71)
+	pkPub   = fillHash(0x72)
+	certRel = fillHash(0xD1)
+	certPub = fillHash(0xD2)
 
 	// The mixed-algorithm cast. Named for what they do to the two readings
 	// rather than for their bytes, because the bytes are the trap: pk384Low
@@ -446,6 +472,43 @@ func Rows() []ResolveVector {
 			},
 			Pubkeys: []PubkeyEntity{key(pkShared, 20), key(pkOther, 10)},
 			Expect:  selected(pkShared, "C"),
+		},
+
+		// --- the Tier-C sub-walk (§4.4 step 1a/1b, most-specific first) ---
+		{
+			Name: "tier-c-sub-walk/relationship-outranks-newer-public",
+			Why: "§4.4 step 1a/1b: Tier C is two steps, most-specific first `[MUST]`. The " +
+				"per-relationship key is bound OVER a strictly NEWER public one — precedence, " +
+				"not recency. A resolver that merged 1a and 1b into one ordered set picks the " +
+				"newer public key and fails ONLY this row; that merge is the divergence the " +
+				"step split exists to prevent",
+			TierCRelationship: []Carrier{cert(certRel, pkRel)},
+			TierC:             []Carrier{cert(certPub, pkPub)},
+			Pubkeys:           []PubkeyEntity{key(pkRel, 1), key(pkPub, 99)},
+			Expect:            selected(pkRel, "C"),
+		},
+		{
+			Name: "tier-c-sub-walk/dead-relationship-falls-through-to-public",
+			Why: "§4.4 step 1a `[MUST]`: a per-relationship subtree that is non-empty but WHOLLY " +
+				"DEAD falls through to 1b, exactly as a dead tier falls through — it does not " +
+				"terminate the walk. The relationship key is the newer one, so a resolver that " +
+				"failed to drop it would bind it",
+			TierCRelationship: []Carrier{cert(certRel, pkRel)},
+			TierC:             []Carrier{cert(certPub, pkPub)},
+			Pubkeys:           []PubkeyEntity{key(pkRel, 99), key(pkPub, 1)},
+			RevokedPubkeys:    []hash.Hash{pkRel},
+			Expect:            selected(pkPub, "C"),
+		},
+		{
+			Name: "tier-c-sub-walk/absent-relationship-resolves-at-public",
+			Why: "§4.4 step 1a `[MUST]`: an absent or unreadable relationships subtree is NOT an " +
+				"error — it means no per-relationship key was published to this sender and the " +
+				"walk continues at 1b. This is the shape every sender-without-a-prior-relationship " +
+				"sees, so it must resolve cleanly at the public handle",
+			// TierCRelationship deliberately empty.
+			TierC:   []Carrier{cert(certPub, pkPub)},
+			Pubkeys: []PubkeyEntity{key(pkPub, 5)},
+			Expect:  selected(pkPub, "C"),
 		},
 
 		// --- revocation, at both granularities ---
@@ -666,13 +729,14 @@ func ToPublications(v ResolveVector) encryption.RecipientPublications {
 		revCar[h] = true
 	}
 	return encryption.RecipientPublications{
-		TierC:           conv(v.TierC),
-		TierB:           conv(v.TierB),
-		TierA:           conv(v.TierA),
-		Pubkeys:         keys,
-		RevokedPubkeys:  revPk,
-		RevokedCarriers: revCar,
-		Now:             v.Now,
+		TierCRelationship: conv(v.TierCRelationship),
+		TierC:             conv(v.TierC),
+		TierB:             conv(v.TierB),
+		TierA:             conv(v.TierA),
+		Pubkeys:           keys,
+		RevokedPubkeys:    revPk,
+		RevokedCarriers:   revCar,
+		Now:               v.Now,
 	}
 }
 
@@ -753,6 +817,7 @@ func VerifyRows(rows []ResolveVector, resolve ResolverFn) *Report {
 			continue
 		}
 		flipped := v
+		flipped.TierCRelationship = reversed(v.TierCRelationship)
 		flipped.TierC = reversed(v.TierC)
 		flipped.TierB = reversed(v.TierB)
 		flipped.TierA = reversed(v.TierA)

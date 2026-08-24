@@ -95,6 +95,8 @@ func runAuthz(ctx context.Context, client *PeerClient) []CheckResult {
 		"V7 §5.2 / F40 — operations/peers are id-scope (literal match): an operations exclude \"/*/get\" is a literal string that MUST NOT be canonicalized as a §5.4 path and block a real `get`. Scored on the A→B differential (VECTOR-SPEC-2026-07-27): (ALLOW,ALLOW)=PASS literal · (ALLOW,DENY)=FAIL canonicalization · (DENY,DENY)=unrelated deny, not F40.")
 	r.Declare("f40_id_scope_include_no_overgrant",
 		"V7 §5.2 / F40 — a path-syntax operations include (probed across /*/get, /{local}/get, /*/*, /*/{peer}) matches only the literal op string; none may canonicalize as a path and over-grant a real `get` (reject-path complement; a canonicalizing peer wrongly allows at least one)")
+	r.Declare("authz_peers_target_from_uri",
+		"V7 §5.2 peers dimension — target_peer = extract_peer(execute.uri, local), NOT local; and an absent `peers` field defaults to {include:[local]} and is STILL checked. Self-checking trio on a foreign-namespace URI: peers={R} ALLOWs (P-1 control), peers={local} DENYs (P-2 escalation), peers absent DENYs (P-3 escalation). A peer that tests local_peer_id or skips the absent field ALLOWs P-2/P-3 — a foreign-namespace privilege escalation.")
 
 	roleURI := fmt.Sprintf("entity://%s/system/role", client.RemotePeerID())
 	treeURI := fmt.Sprintf("entity://%s/system/tree", client.RemotePeerID())
@@ -719,6 +721,60 @@ func runAuthz(ctx context.Context, client *PeerClient) []CheckResult {
 		return PassCheck("`get` DENIED under all four path-syntax operations includes (" + strings.Join(passed, ", ") + ") — id-scope matched literally, no path over-grant (F40 §5.2)")
 	})
 
+	r.Run("authz_peers_target_from_uri", func() CheckOutcome {
+		if len(client.Grants()) == 0 {
+			return SkipCheck("no authenticated grants to attenuate from")
+		}
+		// L = the responder itself, which is §5.2 local_peer_id on the peer under
+		// test. R = a syntactic-but-unowned foreign peer id: exactly 46 Base58
+		// chars so every impl's is_peer_id recognizes it (spec ≥46; rust/py ==46).
+		localID := string(client.RemotePeerID())
+		const foreignID = "1FZfarForeignPeerRRRRRRRRRRRRRRRRRRRRRRRRRRRRR"
+		if foreignID == localID {
+			return SkipCheck("synthetic foreign peer id collides with the responder id")
+		}
+		foreignURI := fmt.Sprintf("entity://%s/system/tree", foreignID)
+
+		// P-1 control: grant scoped to R, target R → ALLOW (the harmless direction).
+		allow1, s1, c1, err := probePeersRow(client, foreignURI, &types.CapabilityScope{Include: []string{foreignID}})
+		if err != nil {
+			return FailCheck("P-1 (peers={R}): " + err.Error())
+		}
+		// P-2: grant scoped to LOCAL, target R → MUST DENY (local-scoped grant must
+		// not reach a foreign namespace).
+		allow2, s2, c2, err := probePeersRow(client, foreignURI, &types.CapabilityScope{Include: []string{localID}})
+		if err != nil {
+			return FailCheck("P-2 (peers={L}): " + err.Error())
+		}
+		// P-3: peers ABSENT, target R → MUST DENY (absent defaults to {include:[L]}
+		// and is still checked; skipping the check ALLOWs a foreign namespace).
+		allow3, s3, c3, err := probePeersRow(client, foreignURI, nil)
+		if err != nil {
+			return FailCheck("P-3 (peers absent): " + err.Error())
+		}
+		det := map[string]any{
+			"P1_grant_R_uri_R": map[string]any{"allow": allow1, "status": s1, "code": c1},
+			"P2_grant_L_uri_R": map[string]any{"allow": allow2, "status": s2, "code": c2},
+			"P3_absent_uri_R":  map[string]any{"allow": allow3, "status": s3, "code": c3},
+		}
+		switch {
+		case allow2 || allow3:
+			return FailCheck(fmt.Sprintf(
+				"§5.2 peers dimension FAIL — privilege escalation: a local-scoped or absent-peers grant authorized a FOREIGN namespace (P2 grant={L} uri=/R/: allow=%v s=%d %q; P3 absent uri=/R/: allow=%v s=%d %q). The peer tested local_peer_id instead of extract_peer(execute.uri), or skipped the check on an absent peers field. §5.2 requires target_peer=extract_peer(execute.uri) and absent peers→{include:[local]}, still checked.",
+				allow2, s2, c2, allow3, s3, c3)).WithDetails(det)
+		case allow1 && !allow2 && !allow3:
+			return PassCheck(fmt.Sprintf(
+				"§5.2 peers dimension correct: foreign-scoped grant ALLOWs the foreign target (P1 s=%d), while local-scoped (P2 s=%d %q) and absent-peers (P3 s=%d %q) grants DENY it — target read from the URI, absent defaulted-and-checked",
+				s1, s2, c2, s3, c3)).WithDetails(det)
+		case !allow1 && !allow2 && !allow3:
+			return WarnCheck(fmt.Sprintf(
+				"§5.2 peers: all three rows DENIED (P1 s=%d %q, P2 s=%d %q, P3 s=%d %q) — the foreign-scoped control (P1) also denied, so the denials are unattributable to the peers dimension (unrelated deny, or the peer refuses all foreign-namespace targets). This is NOT the local_peer_id escalation bug, which ALLOWs P2/P3. Investigate the P1 control before scoring.",
+				s1, c1, s2, c2, s3, c3)).WithDetails(det)
+		default: // !allow1 && (allow2||allow3) is already caught above; defensive.
+			return WarnCheck(fmt.Sprintf("§5.2 peers: incoherent verdict (P1=%v P2=%v P3=%v) — investigate harness/setup", allow1, allow2, allow3)).WithDetails(det)
+		}
+	})
+
 	return r.Results()
 }
 
@@ -861,6 +917,45 @@ func probeF40Row(client *PeerClient, treeURI string, withExclude bool) (allowed 
 		return false, 0, "", fmt.Errorf("build params: %w", err)
 	}
 	env, err := buildDelegatedExecute(client, childCap, childSig, treeURI, "get", params, resource)
+	if err != nil {
+		return false, 0, "", fmt.Errorf("build delegated execute: %w", err)
+	}
+	respEnv, _, err := client.SendRawEnvelope(env)
+	if err != nil {
+		return false, 0, "", fmt.Errorf("send: %w", err)
+	}
+	status, code, _, err = extractStatusAndCode(respEnv)
+	if err != nil {
+		return false, 0, "", fmt.Errorf("extract response: %w", err)
+	}
+	return status >= 200 && status < 300, status, code, nil
+}
+
+// probePeersRow presents a child cap carrying the given `peers` scope on an
+// EXECUTE `get` whose URI names a foreign peer, isolating the §5.2 peers
+// dimension. handlers/operations/resources are held constant (resources "/*/*"
+// covers any target), so the peers field is the ONLY variable across rows.
+// A nil peers argument omits the field entirely — the absent-peers case, which
+// §5.2 defaults to {include:[local]} and STILL checks (it must not skip). The
+// EXECUTE targets the foreign namespace; the responder's extract_peer reads the
+// foreign peer from the URI while ExtractHandlerPath strips the prefix so the
+// local system/tree handler serves the request — thus an ALLOW row returns 2xx.
+func probePeersRow(client *PeerClient, foreignURI string, peers *types.CapabilityScope) (allowed bool, status uint, code string, err error) {
+	child := types.GrantEntry{
+		Handlers:   types.CapabilityScope{Include: []string{"system/tree"}},
+		Resources:  types.CapabilityScope{Include: []string{"/*/*"}},
+		Operations: types.CapabilityScope{Include: []string{"get"}},
+		Peers:      peers,
+	}
+	childCap, childSig, err := buildAttenuatedChildCap(client, child)
+	if err != nil {
+		return false, 0, "", fmt.Errorf("build child cap: %w", err)
+	}
+	params, resource, err := buildSimpleGetParams()
+	if err != nil {
+		return false, 0, "", fmt.Errorf("build params: %w", err)
+	}
+	env, err := buildDelegatedExecute(client, childCap, childSig, foreignURI, "get", params, resource)
 	if err != nil {
 		return false, 0, "", fmt.Errorf("build delegated execute: %w", err)
 	}

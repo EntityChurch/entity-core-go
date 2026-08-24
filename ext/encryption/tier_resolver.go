@@ -121,6 +121,28 @@ type PubkeyEntity struct {
 // gathered per §4.2.a/b/c. A tier the recipient does not run is simply
 // empty — that is a valid configuration, not a defect (§4.0).
 type RecipientPublications struct {
+	// TierCRelationship is §4.4 step 1a — the per-relationship carriers a
+	// sender finds under system/identity/relationships/{contact_id}/cert/,
+	// where {contact_id} is the SENDER's own peer-identity hash (§4.3, the
+	// subtree's audience is exactly one contact). Tier C is a two-step walk,
+	// most-specific first `[MUST]`: this step is tried BEFORE TierC (1b, the
+	// public handle), and a live candidate here ends the walk. An absent or
+	// wholly-dead relationships subtree is NOT an error — it falls through to
+	// 1b exactly as a tier falls through to the one below it.
+	//
+	// The two steps are separate candidate sets, never merged: a live
+	// per-relationship key is bound over a NEWER live public key, because
+	// "most-specific first" is precedence, not recency. Merging them into one
+	// ordered set would silently pick the newer public key — the exact
+	// divergence §4.4's step split exists to prevent.
+	//
+	// Populated only at Tier C; every lower tier leaves it nil, which is a
+	// valid configuration (§4.0), not a defect.
+	TierCRelationship []Carrier
+
+	// TierC is §4.4 step 1b — the public identity certs under
+	// system/identity/public/cert/, the only Tier-C shape a sender with no
+	// prior relationship can reach. Walked after TierCRelationship.
 	TierC []Carrier
 	TierB []Carrier
 	TierA []Carrier
@@ -226,13 +248,22 @@ type candidate struct {
 // revoked key — there the caller named a specific key and that key is
 // dead; here the caller asked "who is this recipient," and a dead
 // publication is simply not an answer.
+//
+// Tier C is itself TWO steps, most-specific first (§4.4 step 1a/1b `[MUST]`):
+// TierCRelationship (the per-relationship cert this sender was handed) is
+// walked before TierC (the public handle), and a live per-relationship
+// candidate is bound even over a NEWER live public one — precedence, not
+// recency. The two are separate candidate sets, never merged; a wholly-dead
+// per-relationship step falls through to the public step exactly as one tier
+// falls through to the next. Both resolve at Tier C.
 func ResolveRecipientKey(pubs RecipientPublications) (Resolution, error) {
 	res := Resolution{}
 	ladder := []struct {
 		tier     Tier
 		carriers []Carrier
 	}{
-		{TierC, pubs.TierC},
+		{TierC, pubs.TierCRelationship}, // §4.4 step 1a — per-relationship, most-specific first
+		{TierC, pubs.TierC},             // §4.4 step 1b — the public handle
 		{TierB, pubs.TierB},
 		{TierA, pubs.TierA},
 	}
@@ -241,7 +272,11 @@ func ResolveRecipientKey(pubs RecipientPublications) (Resolution, error) {
 		if len(rung.carriers) == 0 {
 			continue
 		}
-		res.Examined = append(res.Examined, rung.tier)
+		// Tier C spans two rungs (1a then 1b); record the tier once so a
+		// caller reading Examined sees "Tier C was walked," not the sub-steps.
+		if n := len(res.Examined); n == 0 || res.Examined[n-1] != rung.tier {
+			res.Examined = append(res.Examined, rung.tier)
+		}
 
 		// Project surviving carriers onto the keys they name, preserving
 		// first-seen order so the pre-order pass is deterministic. (The

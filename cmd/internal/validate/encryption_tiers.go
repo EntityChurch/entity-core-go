@@ -46,6 +46,7 @@ import (
 	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/types"
 	"go.entitychurch.org/entity-core-go/ext/encryption"
+	"go.entitychurch.org/entity-core-go/ext/identity"
 	identitysdk "go.entitychurch.org/entity-core-go/ext/identity/sdk"
 )
 
@@ -61,9 +62,9 @@ func encTierBAttestationPath(h hash.Hash) string {
 	return "system/encryption/attestation/" + hex.EncodeToString(h.Bytes())
 }
 
-// encTierCCertPath is where a Tier-C encryption cert lands — IDENTITY's
-// canonical mode-derived path, per the ruling of 2026-08-09 (arch
-// `a19234e`).
+// encTierCCertPath is where a Tier-C encryption cert lands — the §4.4 step
+// 1b PUBLIC handle, IDENTITY's canonical mode-derived path, per the ruling
+// of 2026-08-09 (arch `a19234e`).
 //
 // This shipped as a documented divergence with a filed spec issue; the
 // ruling adopted it and went further. **ENCRYPTION MUST NOT define, name
@@ -73,6 +74,13 @@ func encTierBAttestationPath(h hash.Hash) string {
 // encryption cert is found by enumerating certs at the mode-derived path
 // and filtering `properties.function == "encryption"` — a filter, never a
 // per-function subtree.
+//
+// So this REFERENCES IDENTITY's owned path function rather than restating
+// the string. The restated literal it used to carry was itself the §4.3
+// ownership smell in miniature — a copy that reads correct and silently
+// drifts if IDENTITY ever moves the segment. `identity.PublicCertPath`
+// hashes with `h.Bytes()` (the full multihash-prefixed form), byte-identical
+// to what shipped.
 //
 // Worth recording what the ruling corrected beyond what we filed: we
 // reported two sites, arch found six. The other four are in unbuilt
@@ -84,7 +92,23 @@ func encTierBAttestationPath(h hash.Hash) string {
 // dependency. Naming it as a dependency would have pointed at
 // re-architecting the ladder.
 func encTierCCertPath(h hash.Hash) string {
-	return "system/identity/public/cert/" + hex.EncodeToString(h.Bytes())
+	return identity.PublicCertPath(h)
+}
+
+// encTierCRelationshipCertPath is the §4.4 step 1a enumeration path — the
+// per-relationship cert subtree a SENDER walks ahead of the public handle.
+//
+// `contactID` is the SENDER's own `system/peer` identity hash (§4.3 / §4.4
+// step 1a: "the sender's own id names it, never the recipient's"), because
+// the subtree's audience is exactly one contact and the recipient keyed it
+// by who may read it. Like the public path, this REFERENCES IDENTITY's owned
+// `RelationshipCertPath` rather than restating `system/identity/relationships/
+// {contact}/cert/…` — enumerating IDENTITY's namespace to READ is what §4.4
+// step 1a directs; defining or writing a segment inside it is what §4.3
+// forbids, and deferring to IDENTITY's function keeps us on the right side of
+// that line by construction.
+func encTierCRelationshipCertPath(contactID, certHash hash.Hash) string {
+	return identity.RelationshipCertPath(contactID, certHash)
 }
 
 // encFunctionEncryption is ENCRYPTION §4.2.c's required cert function.
@@ -444,6 +468,93 @@ func runEncTierCResolution() CheckOutcome {
 			"re-checked with candidates enumerated in reverse. SELF-CHECK — exercises this validator's "+
 			"resolver, not the peer's; the cross-impl crossing is the vector file, not this row",
 		rep.Pass, len(rows)))
+}
+
+// runEncTierCRelationshipPath gates §4.4 step 1a — the Tier-C two-step walk.
+//
+// Split from tier_c_resolution for the same reason that one was split from the
+// lifecycle vector: the ordering rows exercise the RESOLVER given carrier sets,
+// but they cannot catch a discovery side that never constructs the step-1a
+// enumeration path, or constructs it keyed by the wrong peer. Go holds the
+// cohort's only §4.4 resolver, and until the Q5 encryption fold this resolver
+// walked the public handle only; this check is the standing guard that step 1a
+// exists, is keyed by the SENDER's own id, and outranks a newer public key.
+//
+// Declared with DeclareSelf: it contacts no peer. §4.4 resolution happens
+// sender-side before anything is sent, so — like tier_c_resolution — the only
+// cross-impl crossing is the vector file, and a PASS here measures core-go's
+// own discovery construction, not the peer's.
+func runEncTierCRelationshipPath() CheckOutcome {
+	// Distinct fixture hashes: a sender identity, a per-relationship cert, and
+	// a public cert. Minting pubkeys is just a convenient source of authored,
+	// distinct content hashes here — nothing is published.
+	_, senderEnt, err := mintEncPubkey(1)
+	if err != nil {
+		return FailCheck(err.Error())
+	}
+	_, otherSenderEnt, err := mintEncPubkey(2)
+	if err != nil {
+		return FailCheck(err.Error())
+	}
+	senderID, otherSenderID := senderEnt.ContentHash, otherSenderEnt.ContentHash
+
+	_, relCertEnt, err := mintEncPubkey(3)
+	if err != nil {
+		return FailCheck(err.Error())
+	}
+	relCert := relCertEnt.ContentHash
+
+	// 1. The step-1a path is the per-relationship subtree, keyed by the
+	//    sender's OWN id (§4.4 step 1a: "the sender's own id names it, never
+	//    the recipient's"), and it is IDENTITY's namespace referenced, not a
+	//    literal restated here.
+	relPath := encTierCRelationshipCertPath(senderID, relCert)
+	wantRel := "system/identity/relationships/" + hex.EncodeToString(senderID.Bytes()) +
+		"/cert/" + hex.EncodeToString(relCert.Bytes())
+	if relPath != wantRel {
+		return FailCheck(fmt.Sprintf("§4.4 step 1a path = %q, want %q", relPath, wantRel))
+	}
+
+	// 2. It is genuinely keyed by the sender: a different sender walks a
+	//    different subtree. A resolver that keyed it by the recipient (the
+	//    natural mistake) would produce the same path for every sender.
+	if same := encTierCRelationshipCertPath(otherSenderID, relCert); same == relPath {
+		return FailCheck("§4.4 step 1a path does not vary with the sender id — it must be namespaced by the sender's own peer id")
+	}
+
+	// 3. Step 1a and step 1b are different paths: the per-relationship subtree
+	//    is not the public handle. A discovery side that only knew the public
+	//    path (the pre-fold Go state) would collapse these two.
+	if pubPath := encTierCCertPath(relCert); pubPath == relPath {
+		return FailCheck("§4.4 step 1a and step 1b resolve to the same path — the per-relationship walk is missing")
+	}
+
+	// 4. The resolution proof: with a per-relationship candidate present, it is
+	//    bound OVER a strictly NEWER public one — most-specific first, not most
+	//    recent. This is the resolver behavior the paths above feed.
+	relPub, pubPub := relCertEnt.ContentHash, senderEnt.ContentHash
+	res, err := encryption.ResolveRecipientKey(encryption.RecipientPublications{
+		TierCRelationship: []encryption.Carrier{{Hash: relCert, Pubkey: relPub, Live: true}},
+		TierC:             []encryption.Carrier{{Hash: otherSenderID, Pubkey: pubPub, Live: true}},
+		Pubkeys: map[hash.Hash]encryption.PubkeyEntity{
+			relPub: {Created: 1},  // relationship key: OLDER
+			pubPub: {Created: 99}, // public key: newer
+		},
+	})
+	if err != nil {
+		return FailCheck("§4.4 step 1a resolution: " + err.Error())
+	}
+	if res.Tier != encryption.TierC || res.Pubkey != relPub {
+		return FailCheck(fmt.Sprintf(
+			"§4.4 step 1a: bound (%q, %s), want (C, %s) — the per-relationship key must outrank a newer public one",
+			res.Tier, res.Pubkey, relPub))
+	}
+
+	return PassCheck(fmt.Sprintf(
+		"§4.4 step 1a/1b: per-relationship enumeration path built via IDENTITY's RelationshipCertPath "+
+			"(%s…), keyed by the sender's own id and distinct from the step-1b public handle; the resolver "+
+			"binds the per-relationship key over a newer public one. SELF-CHECK — the cross-impl crossing is "+
+			"the vector file's tier-c-sub-walk rows, not this row", relPath[:48]))
 }
 
 // assertTierCLadder is the shared §4.4 assertion: with a revoked

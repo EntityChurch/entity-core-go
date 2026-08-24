@@ -146,6 +146,74 @@ func TestResolveRecipientKeyFallsThroughDeadTier(t *testing.T) {
 	}
 }
 
+// §4.4 step 1a/1b: Tier C is a two-step walk, most-specific first. A live
+// per-relationship candidate is bound OVER a newer live public one —
+// "most-specific first" is precedence, not recency. A resolver that merged
+// the two sets into one ordered candidate list would pick the newer public
+// key and fail this row; that merge is the exact divergence the step split
+// exists to prevent.
+func TestResolveRecipientKeyRelationshipStepOutranksNewerPublic(t *testing.T) {
+	rel, pub := testHash(0x71), testHash(0x72)
+	got, err := ResolveRecipientKey(RecipientPublications{
+		TierCRelationship: []Carrier{attests(testHash(0xD1), rel)},
+		TierC:             []Carrier{attests(testHash(0xD2), pub)},
+		// The public key is strictly NEWER, so a recency merge would choose it.
+		Pubkeys: keys(rel, 1, pub, 99),
+	})
+	if err != nil {
+		t.Fatalf("ResolveRecipientKey: %v", err)
+	}
+	if got.Tier != TierC || got.Pubkey != rel {
+		t.Errorf("resolved (%q, %s), want (C, %s) — step 1a is most-specific-first, not most-recent",
+			got.Tier, got.Pubkey, rel)
+	}
+	// Tier C is walked as one tier even though it spans two steps.
+	if len(got.Examined) != 1 || got.Examined[0] != TierC {
+		t.Errorf("Examined = %v, want [C] once — the two steps are one tier", got.Examined)
+	}
+}
+
+// A per-relationship subtree that is non-empty but WHOLLY DEAD falls through
+// to the public handle (§4.4 step 1a `[MUST]`), exactly as a dead tier falls
+// through to the one below it — it does not terminate the walk.
+func TestResolveRecipientKeyDeadRelationshipFallsThroughToPublic(t *testing.T) {
+	rel, pub := testHash(0x73), testHash(0x74)
+	got, err := ResolveRecipientKey(RecipientPublications{
+		TierCRelationship: []Carrier{attests(testHash(0xD3), rel)},
+		TierC:             []Carrier{attests(testHash(0xD4), pub)},
+		Pubkeys:           keys(rel, 99, pub, 1),
+		RevokedPubkeys:    map[hash.Hash]bool{rel: true},
+	})
+	if err != nil {
+		t.Fatalf("ResolveRecipientKey: %v", err)
+	}
+	if got.Tier != TierC || got.Pubkey != pub {
+		t.Errorf("resolved (%q, %s), want (C, %s) — a dead 1a must fall through to 1b, not terminate",
+			got.Tier, got.Pubkey, pub)
+	}
+	if got.Dropped.PubkeyRevoked != 1 {
+		t.Errorf("Dropped.PubkeyRevoked = %d, want 1 — the dead relationship carrier is counted", got.Dropped.PubkeyRevoked)
+	}
+}
+
+// An ABSENT relationships subtree resolves at 1b with no error (§4.4 step 1a
+// `[MUST]`: "a subtree that is absent or unreadable is not an error"). This
+// is the default shape every sender-without-a-prior-relationship sees.
+func TestResolveRecipientKeyAbsentRelationshipResolvesAtPublic(t *testing.T) {
+	pub := testHash(0x75)
+	got, err := ResolveRecipientKey(RecipientPublications{
+		// TierCRelationship deliberately nil.
+		TierC:   []Carrier{attests(testHash(0xD5), pub)},
+		Pubkeys: keys(pub, 5),
+	})
+	if err != nil {
+		t.Fatalf("ResolveRecipientKey: %v — an absent relationships subtree must not error", err)
+	}
+	if got.Tier != TierC || got.Pubkey != pub {
+		t.Errorf("resolved (%q, %s), want (C, %s)", got.Tier, got.Pubkey, pub)
+	}
+}
+
 // Q1 (ruled 2026-08-09-b): a candidate is the inner PUBKEY entity, and the
 // order runs over pubkeys — never over the carriers that name them.
 //

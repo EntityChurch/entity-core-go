@@ -92,6 +92,7 @@ func runEncryption(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("cert_lifecycle_tier_b", "ENCRYPTION §16 ENC-CERT-LIFECYCLE-1 — Tier-B (+ATTESTATION) publish/supersede/revoke")
 	r.Declare("cert_lifecycle_tier_c", "ENCRYPTION §16 ENC-CERT-LIFECYCLE-1 — Tier-C (+IDENTITY) identity-cert publish/rotate/revoke")
 	r.DeclareSelf("tier_c_resolution", "ENCRYPTION §4.4 — the pinned ENC-RESOLVE-ORDER rows (tier ladder + total order)")
+	r.DeclareSelf("tier_c_relationship_path", "ENCRYPTION §4.4 step 1a/1b — the Tier-C two-step walk: per-relationship enumeration path keyed by the sender's own id, bound over a newer public key")
 	r.Declare("multi_device_tier_c", "ENCRYPTION §4.4 multi-device — two agents under one identity; the tie-break selects WHICH device receives")
 	r.Declare("tier_interop", "ENCRYPTION §16 ENC-TIER-INTEROP-1 — one authored pubkey binds byte-equal recipient_key across tiers (F2-3)")
 	r.Declare("roundtrip_format", "ENCRYPTION §16 ENC-ROUNDTRIP-FORMAT-1 — a reference is the recipient's AUTHORED content_hash, never re-derived under the sender's home format (V7 §1.8 / v7.69 §4.5a)")
@@ -143,6 +144,7 @@ func runEncryption(ctx context.Context, client *PeerClient) []CheckResult {
 		return runEncCertLifecycleTierC(ctx, client)
 	})
 	r.Run("tier_c_resolution", runEncTierCResolution)
+	r.Run("tier_c_relationship_path", runEncTierCRelationshipPath)
 	// Depends on cert_lifecycle_tier_c having brought identity up (quorum →
 	// controller cert → configure): a Tier-C claim is only real with identity
 	// configured, and configuring twice in one run is not the thing under

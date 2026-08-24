@@ -117,6 +117,17 @@ func FindMatchingGrant(execute types.ExecuteData, cap types.CapabilityTokenData,
 		return types.GrantEntry{}, false
 	}
 
+	// §5.2 extract_peer: the peer under test for the peers dimension is
+	// read from the request URI, not the local peer. Wire dispatch
+	// (check_permission) populates execute.uri; the compute grant-probe
+	// form (check_grant_covers, EXTENSION-COMPUTE §3.3) leaves it empty and
+	// passes the target as handlerPattern — use whichever the caller set.
+	targetLocator := execute.URI
+	if targetLocator == "" {
+		targetLocator = handlerPattern
+	}
+	targetPeer := extractPeer(targetLocator, localPeerID)
+
 	for _, grant := range cap.Grants {
 		// Dimension 1: Operations (include AND exclude — F2 / §5.2 / §5.6).
 		if !operationsAllow(grant.Operations, execute.Operation) {
@@ -135,11 +146,17 @@ func FindMatchingGrant(execute types.ExecuteData, cap types.CapabilityTokenData,
 			}
 		}
 
-		// Dimension 4: Peers (when specified on grant).
+		// Dimension 4: Peers (§5.2). An absent peers field defaults to
+		// {include:[local_peer_id]} and is STILL checked — it authorizes the
+		// local namespace only, it does not skip the peer dimension. The peer
+		// tested is the request's target peer (extract_peer above), so a
+		// local-scoped grant cannot authorize a foreign namespace.
+		peersScope := types.CapabilityScope{Include: []string{string(localPeerID)}}
 		if grant.Peers != nil {
-			if !MatchesPeerScope(string(localPeerID), *grant.Peers, localPeerID) {
-				continue
-			}
+			peersScope = *grant.Peers
+		}
+		if !MatchesPeerScope(string(targetPeer), peersScope, localPeerID) {
+			continue
 		}
 
 		return grant, true
@@ -176,6 +193,44 @@ func IsCoveredBy(target string, patternSet []string, localPeerID, granterPeerID 
 		}
 	}
 	return false
+}
+
+// base58 alphabet (§8.5) — omits 0, O, I, l.
+const base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+// isPeerID reports whether a path segment is a syntactic peer_id per §5.2
+// is_peer_id: Base58 alphabet, length ≥ 46 (the Ed25519 + SHA-256 floor of
+// 34 bytes → 46 Base58 chars; longer algorithms only add bytes, so 46 is the
+// minimum, not an equality — §5.2 `is_peer_id`). This is a SYNTACTIC check,
+// deliberately NOT crypto validation: extract_peer runs on every dispatch and
+// must not turn on whether the segment decodes to a currently-supported key.
+func isPeerID(segment string) bool {
+	if len(segment) < 46 {
+		return false
+	}
+	for _, r := range segment {
+		if !strings.ContainsRune(base58Alphabet, r) {
+			return false
+		}
+	}
+	return true
+}
+
+// extractPeer resolves the target peer of a request locator per §5.2
+// extract_peer: the first path segment when it is a syntactic peer_id, else
+// the local peer (short-form / peer-relative paths belong to the local peer).
+// Accepts entity:// URIs and absolute /{peer}/rest paths alike; a bare handler
+// pattern ("system/tree") has a non-peer first segment and resolves to local.
+func extractPeer(locator string, localPeerID crypto.PeerID) crypto.PeerID {
+	norm := strings.TrimPrefix(entity.NormalizePath(locator), "/")
+	first := norm
+	if idx := strings.IndexByte(norm, '/'); idx >= 0 {
+		first = norm[:idx]
+	}
+	if isPeerID(first) {
+		return crypto.PeerID(first)
+	}
+	return localPeerID
 }
 
 // MatchesPeerScope checks if a peer ID is covered by the peers scope.

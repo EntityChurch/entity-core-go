@@ -21,20 +21,20 @@ func TestValidateReflectionEndpoint(t *testing.T) {
 	}
 
 	invalid := []string{
-		"",                          // empty
-		"stun.example.org:3478",     // bare host, no scheme
-		"stun://stun.example.org",   // hierarchical — the // is forbidden
-		"stuns://stun.example.org",  // hierarchical, tls scheme
-		"http:stun.example.org",     // wrong scheme
-		"turn:relay.example.org",    // turn is not served here (§3.3)
-		"stun:",                     // scheme only, no host
-		"stun::3478",                // port with no host
-		"stun:stun.example.org:0",   // port out of range
+		"",                         // empty
+		"stun.example.org:3478",    // bare host, no scheme
+		"stun://stun.example.org",  // hierarchical — the // is forbidden
+		"stuns://stun.example.org", // hierarchical, tls scheme
+		"http:stun.example.org",    // wrong scheme
+		"turn:relay.example.org",   // turn is not served here (§3.3)
+		"stun:",                    // scheme only, no host
+		"stun::3478",               // port with no host
+		"stun:stun.example.org:0",  // port out of range
 		"stun:stun.example.org:70000",
-		"stun:stun.example.org:abc", // non-numeric port
-		"stun:[2001:db8::1",         // unterminated IPv6 literal
-		"stun:[]:3478",              // empty IPv6 literal
-		"stun:2001:db8::1",          // unbracketed IPv6 literal — must be [..] (rust correction, 2026-08-15-c)
+		"stun:stun.example.org:abc",    // non-numeric port
+		"stun:[2001:db8::1",            // unterminated IPv6 literal
+		"stun:[]:3478",                 // empty IPv6 literal
+		"stun:2001:db8::1",             // unbracketed IPv6 literal — must be [..] (rust correction, 2026-08-15-c)
 		"stun:stun:relay.example:3478", // doubled scheme — §4.5.1's named failure mode (rust correction)
 	}
 	for _, s := range invalid {

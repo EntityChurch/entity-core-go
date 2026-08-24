@@ -99,7 +99,51 @@ type remoteState struct {
 	// its result, so the map is bounded by the number of concurrently-dialing
 	// peers; waiters hold the *dialGate directly and need no entry to read it.
 	dialing map[crypto.PeerID]*dialGate
+	// seamConsult bounds NETWORK §10.3 obligation-6 (v1.7) consultation FREQUENCY
+	// of the live-establishment seam, per target peer. Obligations 4 and 5 bound the
+	// retry and fan-in faces of "bounded third-party load per peer"; this is the
+	// SEQUENTIAL face — a dispatch pool-miss driven by an application poll can
+	// re-enter the seam without limit, and every consultation is individually
+	// conformant, so §11.5 (which bounds deposits per establishment) cannot see the
+	// series. After a small grace window of consecutive consultations that pool
+	// nothing, further consultations for that peer are spaced by a non-decreasing
+	// interval up to a cap; any connection to the peer reaching the pool clears its
+	// entry (resetConsultLocked), resetting the sequence. Charged when a
+	// consultation STARTS (obligation 6's MUST), so a caller that cancels mid-flight
+	// is still counted for the deposit its negotiation already made at the carrier.
+	// Guarded by mu; lazily created like dialing.
+	seamConsult map[crypto.PeerID]*consultState
 }
+
+// consultState is one peer's §10.3 obligation-6 consultation schedule. misses
+// counts consecutive dispatch consultations that pooled nothing; nextAllowed is
+// the earliest wall-time the next consultation may start once the grace window is
+// exhausted. Both fields are advanced only by chargeSeamConsult and cleared only by
+// resetConsultLocked, both under remote.mu.
+type consultState struct {
+	misses      int
+	nextAllowed time.Time
+}
+
+// The §10.3 obligation-6 schedule. The values are IMPLEMENTATION-DEFINED (v1.7
+// leaves cap, growth curve, and grace-window size to the impl, exactly as
+// obligation 5 leaves its coalescing mechanism idiomatic); these bound third-party
+// consultation load without making a counterpart that becomes reachable wait more
+// than one cap to be consulted again.
+const (
+	// defaultSeamConsultGrace is how many consecutive consultations for one peer run
+	// UNSPACED before the interval engages — "a small number" (v1.7), kept low so a
+	// genuinely-unreachable peer stops hammering the shared carrier within a few
+	// pool-misses.
+	defaultSeamConsultGrace = 3
+	// defaultSeamConsultBase is the first spacing interval after the grace window;
+	// it doubles per subsequent consultation up to defaultSeamConsultCap.
+	defaultSeamConsultBase = 1 * time.Second
+	// defaultSeamConsultCap is the ceiling on the spacing interval — a counterpart
+	// that becomes reachable is consulted again at most this late (obligation 6's
+	// "noticed within the cap", which binds a caller that KEEPS consulting).
+	defaultSeamConsultCap = 30 * time.Second
+)
 
 // dialGate is one in-flight establishment. The leader fills conn/err and then
 // closes done; every waiter reads them only after done is closed, so the close
@@ -304,6 +348,75 @@ func (p *Peer) prefersRelay(peerID crypto.PeerID) bool {
 	return p.remote.preferRelay[peerID]
 }
 
+// chargeSeamConsult applies NETWORK §10.3 obligation 6 (v1.7) to a dispatch-path
+// consultation of the live-establishment seam for peerID, and reports whether the
+// consultation may proceed. It is the SEQUENTIAL-face bound: the dispatch arm can be
+// re-entered on every application-driven pool-miss, and without spacing each entry
+// deposits a fresh negotiation at the shared carrier — every one conformant, the sum
+// a denial of service.
+//
+// It charges at the START, not at the return — obligation 6's MUST. Advancing the
+// schedule is a side effect of ALLOWING a consultation, done here before the seam is
+// ever called, so a caller that abandons the consultation mid-flight is still charged
+// for the deposit its negotiation has already made. (Charging at the outcome exempts
+// exactly the attempts a loaded caller makes most of.)
+//
+// The first defaultSeamConsultGrace consecutive consultations that pool nothing run
+// unspaced; after that, at most one consultation is allowed per non-decreasing
+// interval up to the cap. A refusal is a "fall through to §10.2" signal, identical to
+// a seam decline — never a hard error. Rate zero is bounded trivially: a peer never
+// consulted has no entry, and obligation 6 is a ceiling, not a floor.
+func (p *Peer) chargeSeamConsult(peerID crypto.PeerID) bool {
+	now := time.Now()
+	p.remote.mu.Lock()
+	defer p.remote.mu.Unlock()
+	if p.remote.seamConsult == nil {
+		p.remote.seamConsult = make(map[crypto.PeerID]*consultState)
+	}
+	st := p.remote.seamConsult[peerID]
+	if st == nil {
+		st = &consultState{}
+		p.remote.seamConsult[peerID] = st
+	}
+	// Past the grace window, refuse a consultation that arrives before the peer's
+	// next-allowed time — this is the spacing.
+	if st.misses >= defaultSeamConsultGrace && now.Before(st.nextAllowed) {
+		return false
+	}
+	// Charge at start: count this consultation and schedule the next one now,
+	// regardless of how the seam call turns out.
+	st.misses++
+	st.nextAllowed = now.Add(seamConsultInterval(st.misses - defaultSeamConsultGrace))
+	return true
+}
+
+// resetConsultLocked clears any §10.3 obligation-6 consultation schedule for peerID.
+// Called with remote.mu held from every pool-insert site: "any connection to that
+// peer reaching the pool resets the sequence" (v1.7), so a counterpart that becomes
+// reachable is consulted freely again — at most one cooldown after it did. delete on
+// a nil map is a no-op, so it is safe before the map's first use.
+func (p *Peer) resetConsultLocked(peerID crypto.PeerID) {
+	delete(p.remote.seamConsult, peerID)
+}
+
+// seamConsultInterval is the obligation-6 spacing schedule: step 1 (the first
+// consultation past the grace window) gets the base interval, and each subsequent
+// step doubles it up to the cap. Non-decreasing and capped by construction — the two
+// observable properties v1.7 requires; the exact numbers are implementation-defined.
+func seamConsultInterval(step int) time.Duration {
+	if step < 1 {
+		step = 1
+	}
+	d := defaultSeamConsultBase
+	for i := 1; i < step; i++ {
+		d *= 2
+		if d >= defaultSeamConsultCap {
+			return defaultSeamConsultCap
+		}
+	}
+	return d
+}
+
 // RegisterRemote registers a remote peer's transport address in the
 // tree as a TCPProfileData entity at
 // system/peer/transport/{peer_id}/{profile-id}, per EXTENSION-NETWORK
@@ -474,6 +587,7 @@ func (p *Peer) AddRemoteConnection(peerID crypto.PeerID, conn *Connection) (*Con
 		return existingTCP, nil
 	}
 	p.remote.conns[peerID] = conn
+	p.resetConsultLocked(peerID) // §10.3 obligation 6: a pooled connection resets the sequence.
 	p.remote.mu.Unlock()
 
 	// Pool insert = liveness tracking begins (§5 keepalive, Amendment 12
@@ -868,8 +982,19 @@ func (p *Peer) dialOrEstablish(ctx context.Context, peerID crypto.PeerID, mode e
 		// dispatch_fallback (the normative "live first, store-and-forward last"
 		// ordering). On success the connection is pooled and the ladder
 		// re-enters ordinary dispatch through it.
-		if live := p.tryEstablishLive(ctx, peerID); live != nil {
-			return live, nil
+		//
+		// Obligation 6 (v1.7): bound the CONSULTATION FREQUENCY. This arm is the one
+		// an application poll re-enters on every pool-miss — the unbounded sequential
+		// series is latent here — so a repeat consultation for the same peer is
+		// spaced after a small grace window. chargeSeamConsult charges at the START
+		// of a consultation (obligation 6's MUST) and, when it refuses, we fall
+		// through to §10.2 exactly as a seam decline does. The reconnect arm below is
+		// already rate-zero-bounded (prefer-relay memo + §4.1's own backoff) and is
+		// left unchanged, per the ruling.
+		if p.chargeSeamConsult(peerID) {
+			if live := p.tryEstablishLive(ctx, peerID); live != nil {
+				return live, nil
+			}
 		}
 	case establishReconnect:
 		// No seam registered, or this peer is memoed prefer-relay: preserve the
@@ -954,6 +1079,7 @@ func (p *Peer) getRemoteConnection(ctx context.Context, peerID crypto.PeerID) (r
 		return existing, nil
 	}
 	p.remote.conns[peerID] = endpoint
+	p.resetConsultLocked(peerID) // §10.3 obligation 6: a pooled connection resets the sequence.
 	p.remote.mu.Unlock()
 
 	// Pool insert = liveness tracking begins: start the §5 keepalive loop

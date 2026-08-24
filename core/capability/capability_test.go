@@ -601,6 +601,92 @@ func TestCheckPermissionWithPeers(t *testing.T) {
 	}
 }
 
+// TestCheckPermissionPeersFromURI exercises the §5.2 peers dimension as the
+// spec defines it: the peer under test is extract_peer(execute.uri), NOT the
+// local peer, and an absent `peers` field DEFAULTS to {include:[local]} and is
+// still checked — it does not skip the dimension. Before the fix, Go tested
+// localPeerID and skipped absent-peers, so P-2 and P-3 below (a local-scoped
+// grant / an absent field authorizing a FOREIGN namespace) both wrongly
+// ALLOWed — a privilege escalation invisible to the old test, which only ever
+// set target == local via an empty URI. Peer IDs here are valid 46-char Base58
+// so extract_peer recognizes them (the older 45-char test constants do not).
+func TestCheckPermissionPeersFromURI(t *testing.T) {
+	const local = crypto.PeerID("2KZFlocalPeerLAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")  // 46
+	const remote = crypto.PeerID("3MbGremotePeerRBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB") // 46
+	if len(local) != 46 || len(remote) != 46 {
+		t.Fatalf("test peer ids must be 46 chars: local=%d remote=%d", len(local), len(remote))
+	}
+
+	mkCap := func(peers *types.CapabilityScope) types.CapabilityTokenData {
+		return types.CapabilityTokenData{
+			Grants: []types.GrantEntry{{
+				Handlers:   types.CapabilityScope{Include: []string{"*"}},
+				Resources:  types.CapabilityScope{Include: []string{"*"}},
+				Operations: types.CapabilityScope{Include: []string{"get"}},
+				Peers:      peers,
+			}},
+		}
+	}
+	exec := func(uri string) types.ExecuteData {
+		return types.ExecuteData{Operation: "get", URI: uri}
+	}
+	localURI := "/" + string(local) + "/system/tree"
+	remoteURI := "/" + string(remote) + "/system/tree"
+
+	tests := []struct {
+		name  string
+		peers *types.CapabilityScope
+		uri   string
+		want  bool
+	}{
+		// P-1: foreign-scoped grant, foreign target — allowed (the harmless direction).
+		{"P1_grant_R_uri_R", &types.CapabilityScope{Include: []string{string(remote)}}, remoteURI, true},
+		// P-2: local-scoped grant, foreign target — DENY (escalation via wrong operand).
+		{"P2_grant_L_uri_R", &types.CapabilityScope{Include: []string{string(local)}}, remoteURI, false},
+		// P-3: absent peers, foreign target — DENY (absent defaults to {include:[local]}).
+		{"P3_absent_uri_R", nil, remoteURI, false},
+		// Sanity: absent peers, local target — allowed (the common single-peer cap).
+		{"absent_uri_L", nil, localURI, true},
+		// Sanity: foreign-scoped grant, local target — DENY.
+		{"grant_R_uri_L", &types.CapabilityScope{Include: []string{string(remote)}}, localURI, false},
+		// Wildcard peers authorizes any target.
+		{"wildcard_uri_R", &types.CapabilityScope{Include: []string{"*"}}, remoteURI, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CheckPermission(exec(tc.uri), mkCap(tc.peers), "system/tree", local, local)
+			if got != tc.want {
+				t.Fatalf("CheckPermission(uri=%s, peers=%v) = %v, want %v", tc.uri, tc.peers, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExtractPeer pins the §5.2 extract_peer contract: first segment when a
+// syntactic peer_id (≥46 Base58 chars), else local. Short-form handler paths
+// and sub-46 segments resolve to local.
+func TestExtractPeer(t *testing.T) {
+	const local = crypto.PeerID("2KZFlocalPeerLAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")  // 46
+	const remote = crypto.PeerID("3MbGremotePeerRBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB") // 46
+	cases := []struct {
+		in   string
+		want crypto.PeerID
+	}{
+		{"/" + string(remote) + "/system/tree", remote},
+		{"entity://" + string(remote) + "/system/tree", remote},
+		{"/" + string(remote), remote},
+		{"system/tree", local},        // short-form → local
+		{"", local},                   // empty → local
+		{"/short/system/tree", local}, // sub-46 first segment → local
+		{"/" + string(local) + "/x", local},
+	}
+	for _, c := range cases {
+		if got := extractPeer(c.in, local); got != c.want {
+			t.Errorf("extractPeer(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestMatchesPeerScope(t *testing.T) {
 	pid := testPeerID
 

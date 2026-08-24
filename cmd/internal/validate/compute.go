@@ -146,6 +146,15 @@ func runCompute(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("v310_f5_eval_capability_without_resource", "COMPUTE §4.1 F5")
 	r.Declare("v310_f5_install_capability_without_resource", "COMPUTE §3.3 F5")
 
+	// Q23 install-time (arch 67708b1 / ROUTING-2026-08-16-j §2): a static-literal
+	// builtin-path compute/apply carrying capability/resource MUST be rejected at
+	// INSTALL (invalid_expression), not install-clean-and-fail-per-eval — the
+	// static/dynamic split §2.1 already applies to store paths, applied to the
+	// structural class F5 is in. Two sub-shapes, per the routing's gate: carrying
+	// capability+resource, and carrying resource alone.
+	r.Declare("q23_install_builtin_apply_capability_resource", "COMPUTE §2.1 Q23 / §3.3 (arch 67708b1) — install-time reject: static-literal builtin-path apply carrying capability+resource MUST fail install (invalid_expression)")
+	r.Declare("q23_install_builtin_apply_resource_only", "COMPUTE §2.1 Q23 / §3.3 (arch 67708b1) — install-time reject: static-literal builtin-path apply carrying resource alone MUST fail install (invalid_expression)")
+
 	// CP1 — re-cited 2026-08-13 to the LANDED sections (arch
 	// ROUTING-2026-08-13-f §2, read at arch `7a71dea`). These named
 	// PROPOSAL-COHERENT-CAPABILITY-AUTHORITY, now in the legacy tree's
@@ -1903,6 +1912,77 @@ func runCompute(ctx context.Context, client *PeerClient) []CheckResult {
 		return PassCheck(fmt.Sprintf(
 			"install of capability-without-resource subgraph correctly rejected (status=%d) (F5)",
 			respData.Status))
+	})
+
+	// Q23 install-time gate (arch 67708b1 / ROUTING-2026-08-16-j §2). Analog of
+	// the F5 install probe above: install a subgraph rooted at a static-literal
+	// BUILTIN-path apply that illegally carries capability/resource, and assert
+	// the install is REFUSED (invalid_expression) rather than installing clean.
+	// Benign string literals for the carried fields (matching the eval-time Q23
+	// corpus vectors) — the rejection is a shape check on presence, decided
+	// before the field is evaluated, so it locks under either ordering.
+	q23InstallRejects := func(sp, builtinPath string, withCap, withRes bool) CheckOutcome {
+		applyData := types.ComputeApplyData{Path: builtinPath, Operation: "eval"}
+		if withCap {
+			capLit, _ := types.ComputeLiteralData{Value: "q23-benign-cap"}.ToEntity()
+			applyData.Capability = putCE(ctx, client, sp+"/cap", capLit)
+		}
+		if withRes {
+			resLit, _ := types.ComputeLiteralData{Value: "q23-benign-res"}.ToEntity()
+			applyData.Resource = putCE(ctx, client, sp+"/res", resLit)
+		}
+		applyExpr, _ := applyData.ToEntity()
+		exprPath := sp + "/expr"
+		if _, err := client.TreePut(ctx, exprPath, applyExpr); err != nil {
+			return FailCheck("put expr: " + err.Error())
+		}
+		qualExpr := fmt.Sprintf("/%s/%s", peerID, exprPath)
+		reqEnt, err := types.ComputeInstallRequestData{}.ToEntity()
+		if err != nil {
+			return FailCheck("build install request: " + err.Error())
+		}
+		uri := fmt.Sprintf("entity://%s/system/compute", peerID)
+		env, _, err := client.SendExecute(ctx, uri, "install", reqEnt,
+			&types.ResourceTarget{Targets: []string{qualExpr}})
+		if err != nil {
+			return FailCheck("install call failed: " + err.Error())
+		}
+		respData, decErr := types.ExecuteResponseDataFromEntity(env.Root)
+		if decErr != nil {
+			return FailCheck("decode install response: " + decErr.Error())
+		}
+		if respData.Status >= 200 && respData.Status < 300 {
+			return FailCheck(fmt.Sprintf(
+				"install of builtin-apply-carrying-capability/resource subgraph MUST fail (Q23), got status=%d — installed clean",
+				respData.Status))
+		}
+		if code, codeErr := decodeComputeErrorCode(respData); codeErr == nil {
+			if code != "invalid_expression" {
+				return FailCheck(fmt.Sprintf(
+					"expected invalid_expression at install (Q23), got code=%q", code))
+			}
+		}
+		return PassCheck(fmt.Sprintf(
+			"install of builtin-apply-carrying-capability/resource subgraph correctly rejected (status=%d) (Q23)",
+			respData.Status))
+	}
+
+	r.Run("q23_install_builtin_apply_capability_resource", func() CheckOutcome {
+		if out, ok := r.Require("handler_op_install"); !ok {
+			return out
+		}
+		// The security-critical impure builtin — the field arch's fail-closed
+		// argument turns on (store writes to a caller-specified path).
+		return q23InstallRejects(tp+"/q23-install-cap-res", "system/compute/builtins/store", true, true)
+	})
+
+	r.Run("q23_install_builtin_apply_resource_only", func() CheckOutcome {
+		if out, ok := r.Require("handler_op_install"); !ok {
+			return out
+		}
+		// A pure builtin carrying resource alone — the sub-shape that installed
+		// clean before the ruling.
+		return q23InstallRejects(tp+"/q23-install-res-only", "system/compute/builtins/arithmetic", false, true)
 	})
 
 	// CP1 §10: install of a compute/apply with a static-literal capability

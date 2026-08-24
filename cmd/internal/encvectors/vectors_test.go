@@ -44,6 +44,7 @@ type faults struct {
 	IgnoreCarrierLive   bool // ignore liveness filter 1
 	TieBreakBareDigest  bool // Q2's rejected reading: compare digests, not the full form
 	FormatIsPrecedence  bool // read content_hash_format as a preference, not a sort input
+	MergeSubWalk        bool // §4.4 step 1a/1b: merge the relationship + public certs into one ordered Tier-C set
 }
 
 func resolverFor(f faults) ResolverFn {
@@ -62,15 +63,37 @@ func resolveWith(p encryption.RecipientPublications, f faults) (encryption.Resol
 		created uint64
 	}
 
+	// Tier C is a two-step walk (§4.4 step 1a/1b): the per-relationship certs
+	// are a SEPARATE, higher-precedence candidate set walked before the public
+	// ones. Modelled as two Tier-C rungs so the fall-through machinery below is
+	// reused unchanged. MergeSubWalk collapses them into one ordered set — the
+	// wrong reading the step split exists to forbid.
 	rungs := []struct {
 		tier encryption.Tier
 		cs   []encryption.Carrier
 	}{
-		{encryption.TierC, p.TierC}, {encryption.TierB, p.TierB}, {encryption.TierA, p.TierA},
+		{encryption.TierC, p.TierCRelationship}, // step 1a
+		{encryption.TierC, p.TierC},             // step 1b
+		{encryption.TierB, p.TierB},
+		{encryption.TierA, p.TierA},
+	}
+	if f.MergeSubWalk {
+		merged := append(append([]encryption.Carrier{}, p.TierCRelationship...), p.TierC...)
+		rungs = []struct {
+			tier encryption.Tier
+			cs   []encryption.Carrier
+		}{
+			{encryption.TierC, merged},
+			{encryption.TierB, p.TierB},
+			{encryption.TierA, p.TierA},
+		}
 	}
 	if f.GlobalRecency {
-		all := append(append(append([]encryption.Carrier{}, p.TierC...), p.TierB...), p.TierA...)
+		all := append(append(append(append([]encryption.Carrier{}, p.TierCRelationship...), p.TierC...), p.TierB...), p.TierA...)
 		tierOf := map[hash.Hash]encryption.Tier{}
+		for _, c := range p.TierCRelationship {
+			tierOf[c.Pubkey] = encryption.TierC
+		}
 		for _, c := range p.TierC {
 			tierOf[c.Pubkey] = encryption.TierC
 		}
@@ -309,6 +332,17 @@ func TestShippedRowsCatchWrongResolvers(t *testing.T) {
 			wantRow: "tiebreak/mixed-format-created-still-outranks",
 			blindTo: "both mixed TIE rows, which it answers correctly — for the wrong reason",
 		},
+		{
+			// §4.4 step 1a/1b: the relationship step and the public step are
+			// separate candidate sets, most-specific first. A resolver that
+			// merges them into one ordered Tier-C set picks the newer public key
+			// and fails only where a per-relationship key is bound over a newer
+			// public one — the row written for exactly that.
+			name:    "Tier-C sub-walk merged into one ordered set",
+			fault:   faults{MergeSubWalk: true},
+			wantRow: "tier-c-sub-walk/relationship-outranks-newer-public",
+			blindTo: "every row without a per-relationship carrier, and the two sub-walk rows where 1a is empty or dead",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			rep := VerifyRows(rows, resolverFor(tt.fault))
@@ -522,7 +556,7 @@ func TestEmittedFileVerifies(t *testing.T) {
 // coverage.
 func TestRowsStayNeutralOnDeclaredExclusions(t *testing.T) {
 	for _, v := range Rows() {
-		all := append(append(append([]Carrier{}, v.TierC...), v.TierB...), v.TierA...)
+		all := append(append(append(append([]Carrier{}, v.TierCRelationship...), v.TierC...), v.TierB...), v.TierA...)
 		// The declared-unreachable clause: no row may contain a pair where
 		// one hash is a proper prefix of the other. `excludes` states this
 		// is impossible with the allocated formats rather than untested, so
@@ -648,7 +682,7 @@ func TestEveryReferencedPubkeyIsAuthoredOrDeliberatelyAbsent(t *testing.T) {
 		for _, k := range v.Pubkeys {
 			authored[k.Pubkey] = true
 		}
-		all := append(append(append([]Carrier{}, v.TierC...), v.TierB...), v.TierA...)
+		all := append(append(append(append([]Carrier{}, v.TierCRelationship...), v.TierC...), v.TierB...), v.TierA...)
 		for _, c := range all {
 			if !authored[c.Pubkey] {
 				t.Errorf("%s: carrier %s names pubkey %s with no authored entity — if that is "+
