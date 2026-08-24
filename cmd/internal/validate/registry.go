@@ -26,6 +26,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/fxamacker/cbor/v2"
 
@@ -56,7 +57,7 @@ func runRegistry(ctx context.Context, client *PeerClient) []CheckResult {
 	r.DeclareSelf("v12_unknown_binding_kind_skip", "REGISTRY §3.0a — unknown binding kind still decodes")
 	r.Declare("v13_invalidate_cache", "REGISTRY §2.1 — :invalidate-cache returns 200")
 	r.DeclareSelf("v14_resolution_log_shape", "REGISTRY §11.2 — log entry decodes")
-	r.Declare("v15_dispatch_config_refused", "REGISTRY §4.1 step 2 + §4.3 REG-DISPATCH-CONFIG-REFUSED-1 [v1.17/v1.18] — set-resolver-config MUST refuse 403 policy_rejected a config that makes a name-transmitting kind eligible for an unscoped name, and store nothing (get returns prior bytes). KIND-SCOPED: row (b) — a broad `*`→did-web rule with NO did-web chain entry is STILL refused (chain-scoped would accept). Rows: (a) broad+chain, (b) broad+no-chain, (c) no-dispatch+did-web-in-chain, (d) control scoped `did:web:*`→accepted, (e) read-back byte-identical after refusal, (f) acknowledge_name_disclosure override → accepted. New surface [v1.18], unimplemented in rust/py until they land §4.3")
+	r.Declare("v15_dispatch_config_refused", "REGISTRY §4.1 step 2 + §4.1b + §4.3 REG-DISPATCH-CONFIG-REFUSED-1 [v1.17/v1.18/v1.19] — set-resolver-config MUST refuse 403 policy_rejected a config that makes a name-transmitting kind eligible for an unscoped name, and store nothing (get returns prior bytes). KIND-SCOPED: row (b) — a broad `*`→did-web rule with NO did-web chain entry is STILL refused (chain-scoped would accept). Rows: (a) broad+chain, (b) broad+no-chain, (c) no-dispatch+did-web-in-chain, (d) control scoped `did:web:*`→accepted, (e) read-back byte-identical after refusal, (f) acknowledge_name_disclosure override → accepted, (7) §4.1b classifier: `*.*`/`*.e*`/`*.lab`→refused, `*.eth`/`a.b`→accepted, (8) §4.3 pin-delta [v1.19, R-27]: a pin change under a configure-only cap → 403 not_entitled + nothing written, under a configure+`pin-bindings` cap → 200, a byte-identical write under configure-only → 200 (the harness mints both caps in the ruled `pin-bindings` encoding)")
 	r.Declare("v16_ttl_ceiling_reread", "REGISTRY §6a.9.1 REG-TTL-CEILING-REREAD-1 [v1.17] — the resolver ceiling is READ AT RESOLUTION, not latched at start. One peer process, three resolutions, resolver-config rewritten via set-resolver-config between them: hints.max_ttl absent→present→lower; the surfaced lifetime MUST track the currently-stored config each time. A latching peer passes row 1 and fails 2/3. Constructible only via §4.3's write op [v1.18]")
 
 	r.Run("v1_bind_round_trip", func() CheckOutcome { return runRegBindRoundTrip(ctx, client) })
@@ -450,7 +451,217 @@ func runRegDispatchConfigRefused(ctx context.Context, client *PeerClient) CheckO
 	if fEnt.ContentHash != wantEnt.ContentHash {
 		return FailCheck(fmt.Sprintf("row (f): stored config hash %s != the acknowledged config %s (a rewrite-on-store, not a byte-exact write)", fEnt.ContentHash, wantEnt.ContentHash))
 	}
-	return PassCheck("set-resolver-config refuses name-disclosure 403/policy_rejected kind-scoped (a,b,c), scoped control accepted (d), refusal writes nothing (e), acknowledge override stores byte-exact (f)")
+
+	// Row 7 — §4.1b classifier rows [MUST, v1.19]. Each names did-web (a
+	// transmitting kind) with a did-web chain entry present, so the ONLY thing
+	// deciding accept/refuse is whether the pattern is broad. These five are
+	// where independent readings of the old undefined predicate diverged: a peer
+	// classifying by "does any literal exist" passes rows a-f and fails `*.*`
+	// and `*.lab`. Read the stored hash before each refusal so the read-back
+	// assertion holds regardless of what the accepted rows stored.
+	classifierRow := func(pattern string, wantRefused bool) *CheckOutcome {
+		cfg := types.ResolverConfigData{
+			ResolverChain:      []types.ResolverChainEntry{localEntry, didwebEntry},
+			NameFormatDispatch: []types.DispatchEntry{{Pattern: pattern, BackendKinds: transmit}},
+		}
+		var priorHash hash.Hash
+		if wantRefused {
+			pSt, pEnt, err := regGetResolverConfig(ctx, client)
+			if err != nil || pSt != 200 {
+				o := FailCheck(fmt.Sprintf("row 7 %q: baseline get status=%d err=%v", pattern, pSt, err))
+				return &o
+			}
+			priorHash = pEnt.ContentHash
+		}
+		st, code, err := regSetResolverConfig(ctx, client, cfg, false)
+		if err != nil {
+			o := FailCheck(fmt.Sprintf("row 7 %q set: %v", pattern, err))
+			return &o
+		}
+		if wantRefused {
+			if st != 403 || code != types.RegistryErrPolicyRejected {
+				o := FailCheck(fmt.Sprintf("row 7 %q → %d/%q, want 403/policy_rejected — a BROAD pattern (§4.1b) naming did-web discloses unscoped names", pattern, st, code))
+				return &o
+			}
+			gSt, gEnt, err := regGetResolverConfig(ctx, client)
+			if err != nil || gSt != 200 || gEnt.ContentHash != priorHash {
+				o := FailCheck(fmt.Sprintf("row 7 %q: refusal moved the stored config (status=%d %s vs %s) — must write nothing", pattern, gSt, gEnt.ContentHash, priorHash))
+				return &o
+			}
+		} else if st != 200 {
+			o := FailCheck(fmt.Sprintf("row 7 %q → %d/%q, want 200 — a NARROW pattern (§4.1b) discloses nothing and MUST be accepted", pattern, st, code))
+			return &o
+		}
+		return nil
+	}
+	for _, cr := range []struct {
+		pattern string
+		refused bool
+	}{
+		{"*.*", true},    // '.' is not a typed suffix → matches bare dotted names
+		{"*.e*", true},   // trailing '*' → no fixed suffix
+		{"*.eth", false}, // enumerated typed suffix (§4.1b.1) → narrow
+		{"a.b", false},   // no '*' → exactly one name (rule a)
+		{"*.lab", true},  // `.lab` is NOT enumerated → broad ("any literal" is not the line)
+	} {
+		if o := classifierRow(cr.pattern, cr.refused); o != nil {
+			return *o
+		}
+	}
+
+	// Row 8 — §4.3 pin-delta [MUST, v1.19], NOW ON THE WIRE. RULED (R-27, arch
+	// 08841d8, ex spec-issue 2026-08-20-a): pin authority is the non-dispatchable
+	// operation `pin-bindings`, the sole PORTABLE discriminator (V7: a grant
+	// scopes on path-scope + id-scope only, and the path axis is explicitly
+	// non-portable). All three seats independently ship `pin-bindings`, so the
+	// discriminator is a settled cross-impl observable — the deceptive-green
+	// deferral reason is discharged (the forward half of the deferral rule: land
+	// once the discriminator is settled AND every conformant impl agrees). The
+	// harness mints the cap in the ruled encoding and presents it.
+	if o := runPinDeltaWireRows(ctx, client, localEntry); o != nil {
+		return *o
+	}
+
+	return PassCheck("set-resolver-config: name-disclosure refused 403/policy_rejected kind-scoped (a,b,c), scoped control accepted (d), refusal writes nothing (e), acknowledge override stores byte-exact (f), §4.1b classifier *.*/*.e*/*.lab refused & *.eth/a.b accepted (7), pin-delta cap-gated on the ruled `pin-bindings` op: differ+configure-only→403 not_entitled+nothing-written, differ+configure+pin→200, byte-identical+configure-only→200 (8)")
+}
+
+// runPinDeltaWireRows drives REG-DISPATCH-CONFIG-REFUSED-1 row 8 (§4.3 pin-delta
+// [v1.19], R-27). It seeds a clean no-pin config as the baseline, then presents
+// pin-changing writes under a configure-ONLY child cap (refused 403 not_entitled,
+// nothing written) and under a configure+pin child cap (accepted), plus the
+// byte-identical control (configure-only accepted — without it a peer that
+// demands pin on every write passes the other two).
+func runPinDeltaWireRows(ctx context.Context, client *PeerClient, localEntry types.ResolverChainEntry) *CheckOutcome {
+	base := types.ResolverConfigData{ResolverChain: []types.ResolverChainEntry{localEntry}}
+	if st, code, err := regSetResolverConfig(ctx, client, base, false); err != nil || st != 200 {
+		o := FailCheck(fmt.Sprintf("row 8 baseline (no-pin) set → %d/%q err=%v", st, code, err))
+		return &o
+	}
+	baseSt, baseEnt, err := regGetResolverConfig(ctx, client)
+	if err != nil || baseSt != 200 {
+		o := FailCheck(fmt.Sprintf("row 8 baseline get status=%d err=%v", baseSt, err))
+		return &o
+	}
+
+	pinned := base
+	pinned.PinnedBindings = []types.PinnedEntry{{Name: "pindelta-" + randomSuffix(), TargetPeerID: regSamplePeerID}}
+
+	configureOnly, coSig, err := mintRegChildCap(client, regConfigureGrants()...)
+	if err != nil {
+		o := FailCheck("row 8 mint configure-only cap: " + err.Error())
+		return &o
+	}
+	configurePlusPin, cpSig, err := mintRegChildCap(client, append(regConfigureGrants(), regPinGrants()...)...)
+	if err != nil {
+		o := FailCheck("row 8 mint configure+pin cap: " + err.Error())
+		return &o
+	}
+
+	// 8a — differ + configure-only → 403 not_entitled, nothing written.
+	st, code, err := regSetResolverConfigVia(ctx, client, pinned, false, configureOnly, coSig)
+	if err != nil {
+		o := FailCheck("row 8a set: " + err.Error())
+		return &o
+	}
+	if st != 403 || code != types.RegistryErrNotEntitled {
+		o := FailCheck(fmt.Sprintf("row 8a (pin change, configure-only) → %d/%q, want 403/not_entitled — a pin write needs registry-pin (op `pin-bindings`, R-27)", st, code))
+		return &o
+	}
+	if gSt, gEnt, err := regGetResolverConfig(ctx, client); err != nil || gSt != 200 || gEnt.ContentHash != baseEnt.ContentHash {
+		o := FailCheck(fmt.Sprintf("row 8a: refused pin write moved the stored config (status=%d %s vs %s) — must write nothing", gSt, gEnt.ContentHash, baseEnt.ContentHash))
+		return &o
+	}
+
+	// 8b — differ + configure+pin → 200.
+	st, code, err = regSetResolverConfigVia(ctx, client, pinned, false, configurePlusPin, cpSig)
+	if err != nil {
+		o := FailCheck("row 8b set: " + err.Error())
+		return &o
+	}
+	if st != 200 {
+		o := FailCheck(fmt.Sprintf("row 8b (pin change, configure+pin) → %d/%q, want 200 — pin authority present", st, code))
+		return &o
+	}
+
+	// 8c — control: byte-identical pins under configure-only → 200. Change only a
+	// non-pin field so pinned_bindings is unchanged from what 8b stored.
+	identical := pinned
+	identical.ResolutionLogCapacity = 64
+	st, code, err = regSetResolverConfigVia(ctx, client, identical, false, configureOnly, coSig)
+	if err != nil {
+		o := FailCheck("row 8c set: " + err.Error())
+		return &o
+	}
+	if st != 200 {
+		o := FailCheck(fmt.Sprintf("row 8c (pin-identical, configure-only) → %d/%q, want 200 — a write leaving pins byte-identical needs only registry-configure; a peer demanding pin on every write fails here", st, code))
+		return &o
+	}
+	return nil
+}
+
+// regConfigureGrants / regPinGrants are the two registry authorities as ruled
+// wire contracts (R-27): configure names the §4.3 operations, pin names the
+// non-dispatchable operation `pin-bindings`. Written with the literal wire
+// strings, not go's constants — the harness tests the ruled contract and drives
+// rust/py peers, which check the SAME operation names.
+func regConfigureGrants() []types.GrantEntry {
+	return []types.GrantEntry{{
+		Handlers:   types.CapabilityScope{Include: []string{"system/registry"}},
+		Resources:  types.CapabilityScope{Include: []string{"system/registry/*"}},
+		Operations: types.CapabilityScope{Include: []string{"set-resolver-config", "get-resolver-config"}},
+	}}
+}
+
+func regPinGrants() []types.GrantEntry {
+	return []types.GrantEntry{{
+		Handlers:   types.CapabilityScope{Include: []string{"system/registry"}},
+		Resources:  types.CapabilityScope{Include: []string{"system/registry/*"}},
+		Operations: types.CapabilityScope{Include: []string{"pin-bindings"}}, // R-27 ruled discriminator
+	}}
+}
+
+// mintRegChildCap mints a child capability carrying `grants`, attenuated from the
+// harness's connection cap and signed by our identity — the portable way to
+// present "configure-only" vs "configure+pin" authority to any conformant peer.
+func mintRegChildCap(client *PeerClient, grants ...types.GrantEntry) (entity.Entity, entity.Entity, error) {
+	kp := client.Keypair()
+	identity := client.IdentityEntity()
+	parentCap := client.CapEntity()
+	now := uint64(time.Now().UnixMilli())
+	exp := now + 5*60*1000
+	td := types.CapabilityTokenData{
+		Grants:    grants,
+		Granter:   types.SingleSigGranter(identity.ContentHash),
+		Grantee:   identity.ContentHash,
+		Parent:    &parentCap.ContentHash,
+		CreatedAt: now,
+		ExpiresAt: &exp,
+	}
+	return createCapabilityToken(td, kp, identity)
+}
+
+// regSetResolverConfigVia drives set-resolver-config presenting a specific child
+// capability (childCap/childSig) rather than the harness's default owner cap.
+func regSetResolverConfigVia(ctx context.Context, client *PeerClient, cfg types.ResolverConfigData, ack bool, childCap, childSig entity.Entity) (uint, string, error) {
+	cfgEnt, err := cfg.ToEntity()
+	if err != nil {
+		return 0, "", fmt.Errorf("cfg ToEntity: %w", err)
+	}
+	reqEnt, err := types.SetResolverConfigRequestData{Config: cfgEnt, AcknowledgeNameDisclosure: ack}.ToEntity()
+	if err != nil {
+		return 0, "", fmt.Errorf("request ToEntity: %w", err)
+	}
+	uri := fmt.Sprintf("entity://%s/%s", client.RemotePeerID(), "system/registry")
+	env, err := buildDelegatedExecute(client, childCap, childSig, uri, "set-resolver-config", reqEnt, nil)
+	if err != nil {
+		return 0, "", fmt.Errorf("build delegated execute: %w", err)
+	}
+	respEnv, _, err := client.SendRawEnvelope(env)
+	if err != nil {
+		return 0, "", err
+	}
+	status, code, _, err := extractStatusAndCode(respEnv)
+	return status, code, err
 }
 
 // runRegTTLCeilingReread drives REG-TTL-CEILING-REREAD-1 (§6a.9.1) — the
@@ -596,12 +807,14 @@ func runRegFilterFailClosed(ctx context.Context, client *PeerClient) CheckOutcom
 //
 // Wire-observable rows here use LOCAL-NAME, which is fully armable over the wire
 // (bind + resolver-config + resolve):
-//   (a) binding content-hash UNCHANGED under a ceiling — the ceiling is a *use*
-//       bound, not a re-issue; result.binding must equal the no-ceiling hash.
-//   (c) max_ttl: 0 is UNDECLARED — no clamp, not an instant-expiry ceiling.
-//   (d) a binding with NO ttl (local-name) takes local_max as its surfaced
-//       lifetime — the row an impl passes by accident and fails on inspection
-//       (a guard that only clamps a present ttl silently skips it).
+//
+//	(a) binding content-hash UNCHANGED under a ceiling — the ceiling is a *use*
+//	    bound, not a re-issue; result.binding must equal the no-ceiling hash.
+//	(c) max_ttl: 0 is UNDECLARED — no clamp, not an instant-expiry ceiling.
+//	(d) a binding with NO ttl (local-name) takes local_max as its surfaced
+//	    lifetime — the row an impl passes by accident and fails on inspection
+//	    (a guard that only clamps a present ttl silently skips it).
+//
 // The peer-issued min(binding.ttl, local_max) clamp and its forced-expiry are
 // teeth-pinned in-tree (ext/registry/peerissued TestResolve_LocalMaxTTL_Clamps):
 // peer-issued resolution needs a pinned registry + published binding, not

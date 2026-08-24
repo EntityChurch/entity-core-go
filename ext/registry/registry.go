@@ -15,6 +15,7 @@
 package registry
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -22,7 +23,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/fxamacker/cbor/v2"
+
 	"go.entitychurch.org/entity-core-go/core/ecf"
+	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/handler"
 	"go.entitychurch.org/entity-core-go/core/types"
 )
@@ -35,6 +39,18 @@ const (
 	OpSetResolverConfig = "set-resolver-config"
 	OpGetResolverConfig = "get-resolver-config"
 )
+
+// OpPinBindings is the cap-check discriminator for system/capability/registry-pin
+// (§4.3 [MUST, v1.19]). It is NOT a dispatchable handler operation — it exists
+// only as the operation a registry-pin grant carries and set-resolver-config
+// checks the CallerCapability against when the submitted pinned_bindings differ
+// from the stored ones. The pin authority is separated from registry-configure
+// on the OPERATION axis (not a resource path, which would collide with
+// configure's HandlerPattern/* resource): a configure-only cap lacks OpPinBindings
+// and is refused 403 not_entitled on a pin-changing write; a cap holding both
+// grants passes. §5's split becomes real — an operator may hold pin authority
+// without whole-config authority, or the reverse.
+const OpPinBindings = "pin-bindings"
 
 // Backend is the meta-resolver's dependency contract. A backend's
 // `Resolve(hctx, name, localMaxTTL)` returns the same ResolutionResult shape the
@@ -185,6 +201,25 @@ func ManageResolverConfigSeedGrants() []types.GrantEntry {
 	}
 }
 
+// ManageResolverPinsSeedGrants returns the grant carried by a seed-policy entry
+// that authorizes CHANGING pinned_bindings via set-resolver-config, gated by
+// system/capability/registry-pin (§4.3 / §5 [MUST, v1.19]). It is deliberately
+// its OWN grant on the OpPinBindings discriminator so pin authority is not
+// bundled with registry-configure: a pin is §4.1 step 1's most privileged row
+// (it answers before the disclosure filter and the §6a.9.1 ceiling), so the
+// capability that writes it is separated from the one that edits the rest of
+// the config. Compose it alongside ManageResolverConfigSeedGrants to grant an
+// operator both configure and pin authority in one token.
+func ManageResolverPinsSeedGrants() []types.GrantEntry {
+	return []types.GrantEntry{
+		{
+			Handlers:   types.CapabilityScope{Include: []string{HandlerPattern}},
+			Resources:  types.CapabilityScope{Include: []string{HandlerPattern + "/*"}},
+			Operations: types.CapabilityScope{Include: []string{OpPinBindings}},
+		},
+	}
+}
+
 // RegisterTypes is a no-op — the registry extension's types are
 // registered centrally in core/types.RegisterCoreTypes.
 func (h *Handler) RegisterTypes(r *types.TypeRegistry) {
@@ -275,6 +310,42 @@ func (h *Handler) handleSetResolverConfig(_ context.Context, req *handler.Reques
 	if err != nil {
 		return handler.NewErrorResponse(400, "invalid_params",
 			"decode resolver-config: "+err.Error())
+	}
+
+	// §4.3 pin-delta MUST [v1.19]: a write that CHANGES pinned_bindings
+	// additionally requires system/capability/registry-pin, because a pin is
+	// §4.1 step 1's most privileged row (it answers a name while bypassing both
+	// the step-2 disclosure filter and the §6a.9.1 ceiling), so the less
+	// specific registry-configure grant must not be able to write it. Diff the
+	// submitted pins against the stored ones on their RAW bytes (§4.3's word is
+	// "byte-identical", not "structurally equal") — a decoded compare is
+	// fail-open on §4.2 forward-compat: an unmodelled key a pin carries is
+	// dropped by decode, so a config that adds or removes it would read as "no
+	// change" and rewrite the pin under registry-configure alone (rust caught
+	// this 2026-08-20). When they differ, the caller's capability MUST also
+	// authorize OpPinBindings, else refuse 403 not_entitled and write nothing. A
+	// byte-identical pin list needs only registry-configure. (The local owner —
+	// zero CallerCapability, or a `*` self-owner grant — passes:
+	// CheckPathCapability is a no-op when no caller cap is presented.)
+	subPins, err := rawPinnedBindings(cfgEnt.Data)
+	if err != nil {
+		return handler.NewErrorResponse(400, "invalid_params",
+			"read submitted pinned_bindings: "+err.Error())
+	}
+	var priorPins cbor.RawMessage
+	if storedEnt, ok := h.storedResolverConfigEntity(hctx); ok {
+		if priorPins, err = rawPinnedBindings(storedEnt.Data); err != nil {
+			return handler.NewErrorResponse(500, "internal_error",
+				"read stored pinned_bindings: "+err.Error())
+		}
+	}
+	if !bytes.Equal(subPins, priorPins) {
+		if resp := hctx.CheckPathCapability(OpPinBindings, types.ResolverConfigStoragePath); resp != nil {
+			return handler.NewErrorResponse(403, types.RegistryErrNotEntitled,
+				"set-resolver-config changes pinned_bindings, which additionally "+
+					"requires system/capability/registry-pin (§4.3 [MUST, v1.19]); "+
+					"the presented capability authorizes registry-configure but not pin")
+		}
 	}
 
 	// §4.1 step 2 write-time MUST [v1.17], gated by the operator MAY [v1.18].
@@ -368,44 +439,94 @@ func disclosureViolations(cfg types.ResolverConfigData) []string {
 	return out
 }
 
-// patternMatchesUnscopedName reports whether a dispatch pattern can match a
-// bare, unscoped name — one a user types with no explicit authority scope
-// (contrast the scoped form alice@example.org, §4.1 / §616). Such a pattern,
-// if it names a name-transmitting kind, leaks bare handles and typos to a
-// third party (§4.1 step 2). It is CONSERVATIVE in the safe direction: a
-// pattern that is not confidently a scoped shape is treated as broad
-// (browser-rust's is_broad — "calling a broad pattern narrow is what leaks").
+// enumeratedTypedSuffixes is §4.1b.1's list of typed suffixes that make a
+// pattern narrow under classifier rule (d). It is DELIBERATELY SHORT and grows
+// ONLY by spec revision [MUST] — admitting a suffix is a privacy decision (it
+// declares every name ending in it may be disclosed), so it is not
+// implementation-defined, not operator-extensible, and not inferable from the
+// pattern's shape. An unrecognized suffix leaves the pattern broad (the
+// fail-safe direction). As of v1.19 the list is exactly `.eth` (ENS).
+var enumeratedTypedSuffixes = []string{".eth"}
+
+// patternMatchesUnscopedName reports whether a dispatch pattern is BROAD —
+// §4.1b's classifier [MUST, v1.19]. Broad means the pattern can match at least
+// one BARE (unscoped) name — a name the user typed with no authority named —
+// and a broad pattern naming a name-transmitting kind leaks every bare handle
+// and typo to a third party (§4.1 step 2).
 //
-// A pattern is SCOPED (narrow) iff it requires one of the scope shapes §4.1a
-// ships as its non-catch-all rows — the user having stated the authority:
-//   - an '@'-authority anywhere      (*@*, *@*.*)     — rows 4,5
-//   - a scheme prefix, i.e. a ':'    (did:web:*, did:key:*) — rows 1,2
-//   - a dotted literal suffix `*.x`  (*.eth)          — row 3, scheme-typed by suffix
+// A pattern is NARROW (returns false) iff at least one of §4.1b's four
+// conditions holds — otherwise BROAD (returns true):
 //
-// Everything else — the catch-all `*`, a bare-prefix `a*`, a literal name,
-// `*.*` — is broad. This classifies §4.1a rows 1–5 narrow and its catch-all
-// row 6 broad, which is exactly what keeps the recommended default list
-// conformant with the step-2 MUST that lives inside it. The classification is
-// a pure function of the pattern text (no resolver_chain input): kind-scoped.
+//	(a) the pattern contains NO '*'          → matches exactly one name (a
+//	    literal routing decision the operator wrote out): `a.b`, `alice.eth`.
+//	(b) the pattern contains a literal '@'    → every match carries an
+//	    @authority the user named: `*@*`, `*@*.*`.
+//	(c) the literal head before the first '*' ends in ':' → every match carries
+//	    a `scheme:` prefix: `did:web:*`, `did:key:*`.
+//	(d) the pattern ends in an ENUMERATED typed suffix (§4.1b.1) with no '*'
+//	    after it → every match is in a naming system the user opted into by
+//	    typing it: `*.eth`.
+//
+// The divergent cases the old undefined predicate split on: `*.*` is BROAD
+// ('.' is not a typed suffix; it matches bare dotted names like billslab.com,
+// legal local names per §6a); `*.e*` is BROAD (the trailing '*' means no fixed
+// suffix); `*.lab` is BROAD (`.lab` is NOT enumerated — "any literal at all"
+// is explicitly NOT the line, §4.1b). This replaces the pre-v1.19 reading that
+// treated any `*.<literal>` as narrow and any '*'-free literal as broad. A pure
+// function of the pattern text (no resolver_chain input): kind-scoped.
 func patternMatchesUnscopedName(pattern string) bool {
-	// '@' anywhere → the user names an authority.
+	// (a) no '*' → matches exactly one name.
+	if !strings.Contains(pattern, "*") {
+		return false
+	}
+	// (b) a literal '@' → the user names an authority.
 	if strings.Contains(pattern, "@") {
 		return false
 	}
-	// ':' anywhere → a scheme-typed prefix (did:web:, did:key:).
-	if strings.Contains(pattern, ":") {
+	// (c) the literal head before the first '*' ends in ':' → a scheme prefix.
+	head := pattern[:strings.IndexByte(pattern, '*')]
+	if strings.HasSuffix(head, ":") {
 		return false
 	}
-	// `*.<literal>` — a single leading star, then a dotted literal suffix with
-	// no further star (e.g. *.eth). `*.*` does NOT qualify (its suffix is a
-	// star, not a literal) and stays broad.
-	if strings.HasPrefix(pattern, "*.") {
-		rest := pattern[len("*."):]
-		if rest != "" && !strings.Contains(rest, "*") {
+	// (d) ends in an enumerated typed suffix with no '*' after it.
+	for _, suf := range enumeratedTypedSuffixes {
+		if strings.HasSuffix(pattern, suf) {
 			return false
 		}
 	}
 	return true
+}
+
+// rawPinnedBindings extracts the RAW CBOR bytes of a resolver-config's
+// pinned_bindings field without decoding the entries, so any §4.2 forward-compat
+// key a pin carries survives into the byte-identity comparison (§4.3 pin-delta
+// [v1.19]). Returns nil when the field is absent (no pins). Decoding into
+// []PinnedEntry and re-encoding would DROP an unmodelled key, which is fail-open
+// on the most privileged row in the file — the exact hole rust reported
+// 2026-08-20. The struct captures only pinned_bindings; every other config field
+// is ignored (unknown keys tolerated, the §4.2 rule).
+func rawPinnedBindings(data cbor.RawMessage) (cbor.RawMessage, error) {
+	var v struct {
+		PinnedBindings cbor.RawMessage `cbor:"pinned_bindings,omitempty"`
+	}
+	if err := ecf.Decode(data, &v); err != nil {
+		return nil, err
+	}
+	return v.PinnedBindings, nil
+}
+
+// storedResolverConfigEntity returns the currently-stored resolver-config
+// ENTITY (raw, undecoded — the pin-delta compares its bytes, not a re-encoding),
+// or ok=false when unset.
+func (h *Handler) storedResolverConfigEntity(hctx *handler.HandlerContext) (entity.Entity, bool) {
+	if hctx == nil || hctx.LocationIndex == nil || hctx.Store == nil {
+		return entity.Entity{}, false
+	}
+	cfgHash, ok := hctx.LocationIndex.Get(types.ResolverConfigStoragePath)
+	if !ok {
+		return entity.Entity{}, false
+	}
+	return hctx.Store.Get(cfgHash)
 }
 
 // Resolve is the in-process API exposed for testing + for the SDK seam

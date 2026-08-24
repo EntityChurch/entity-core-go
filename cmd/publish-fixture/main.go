@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -62,18 +63,6 @@ var publisherSeed = [32]byte{
 	'x', 't', 'u', 'r', 'e', '-', 'v', '1', 0, 0,
 }
 
-// Fixed deterministic root hash. The trie-walk closure root_hash → leaves
-// is NOT asserted by this fixture (that's a separate v7 trie-closure check);
-// what we exercise is the wire flow + per-leaf hash verification — the
-// slice arch named as the v1 gate.
-var publishedRootHash = func() hash.Hash {
-	var digest [hash.SHA256DigestSize]byte
-	for i := range digest {
-		digest[i] = byte(0xC0 + i)
-	}
-	return hash.NewSHA256(digest)
-}()
-
 // Authored fixture entries — same data every run.
 var fixtureEntries = []fixtureEntry{
 	{
@@ -100,7 +89,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pollH, kp, identity, leafHashes, err := buildPublisher()
+	pollH, _, kp, identity, rootHash, leafHashes, err := buildPublisher()
 	if err != nil {
 		log.Fatalf("build publisher: %v", err)
 	}
@@ -113,7 +102,7 @@ func main() {
 	bound := listener.Addr().String()
 	url := "http://" + bound
 
-	printContract(url, kp, identity, leafHashes)
+	printContract(url, kp, identity, rootHash, leafHashes)
 
 	srv := &http.Server{Handler: pollH}
 	go func() {
@@ -126,47 +115,72 @@ func main() {
 	log.Printf("shut down")
 }
 
-func buildPublisher() (*httplive.PollHandler, crypto.Keypair, entity.Entity, []hash.Hash, error) {
+func buildPublisher() (*httplive.PollHandler, store.ContentStore, crypto.Keypair, entity.Entity, hash.Hash, []hash.Hash, error) {
 	cs := store.NewMemoryContentStore()
 	li := store.NewMemoryLocationIndex()
 
 	kp := crypto.FromSeed(publisherSeed)
 	identity, err := kp.IdentityEntity()
 	if err != nil {
-		return nil, crypto.Keypair{}, entity.Entity{}, nil, fmt.Errorf("identity entity: %w", err)
+		return nil, nil, crypto.Keypair{}, entity.Entity{}, hash.Hash{}, nil, fmt.Errorf("identity entity: %w", err)
 	}
 	if _, err := cs.Put(identity); err != nil {
-		return nil, crypto.Keypair{}, entity.Entity{}, nil, fmt.Errorf("put identity: %w", err)
+		return nil, nil, crypto.Keypair{}, entity.Entity{}, hash.Hash{}, nil, fmt.Errorf("put identity: %w", err)
 	}
 	nli := store.NewNamespacedIndex(li, string(kp.PeerID()))
 
 	tracker := tree.NewRootTracker(cs, string(kp.PeerID()), nil)
 	pub := publishedroot.NewPublisher(cs, tracker, publishedroot.PrefixForLocalPeer, nil)
 	if err := pub.SetupAuthority(nli, kp, identity, false); err != nil {
-		return nil, crypto.Keypair{}, entity.Entity{}, nil, fmt.Errorf("setup authority: %w", err)
+		return nil, nil, crypto.Keypair{}, entity.Entity{}, hash.Hash{}, nil, fmt.Errorf("setup authority: %w", err)
 	}
 
 	leafHashes := make([]hash.Hash, 0, len(fixtureEntries))
 	for _, e := range fixtureEntries {
 		raw, err := encodeFixtureData(e.dataKV)
 		if err != nil {
-			return nil, crypto.Keypair{}, entity.Entity{}, nil, fmt.Errorf("encode %s: %w", e.peerRelativePath, err)
+			return nil, nil, crypto.Keypair{}, entity.Entity{}, hash.Hash{}, nil, fmt.Errorf("encode %s: %w", e.peerRelativePath, err)
 		}
 		ent, err := entity.NewEntity(e.entityType, raw)
 		if err != nil {
-			return nil, crypto.Keypair{}, entity.Entity{}, nil, fmt.Errorf("author %s: %w", e.peerRelativePath, err)
+			return nil, nil, crypto.Keypair{}, entity.Entity{}, hash.Hash{}, nil, fmt.Errorf("author %s: %w", e.peerRelativePath, err)
 		}
 		if _, err := cs.Put(ent); err != nil {
-			return nil, crypto.Keypair{}, entity.Entity{}, nil, fmt.Errorf("cs.Put %s: %w", e.peerRelativePath, err)
+			return nil, nil, crypto.Keypair{}, entity.Entity{}, hash.Hash{}, nil, fmt.Errorf("cs.Put %s: %w", e.peerRelativePath, err)
 		}
 		if err := nli.Set(e.peerRelativePath, ent.ContentHash); err != nil {
-			return nil, crypto.Keypair{}, entity.Entity{}, nil, fmt.Errorf("nli.Set %s: %w", e.peerRelativePath, err)
+			return nil, nil, crypto.Keypair{}, entity.Entity{}, hash.Hash{}, nil, fmt.Errorf("nli.Set %s: %w", e.peerRelativePath, err)
 		}
 		leafHashes = append(leafHashes, ent.ContentHash)
 	}
 
-	if _, err := pub.Publish(publishedRootHash); err != nil {
-		return nil, crypto.Keypair{}, entity.Entity{}, nil, fmt.Errorf("publish root: %w", err)
+	// B4 (C-7 §1b.2): publish the ACTUAL trie root of the served tree, not a
+	// placeholder. BuildTrieForPrefix stores every trie node in `cs` — which the
+	// poll handler serves at /content/{hex} — so a consumer that fetches the
+	// signed root_hash by hash and walks root→leaves resolves the whole closure.
+	// The prior hardcoded literal 404'd by construction (the fixture's own
+	// comment admitted the closure was not asserted); a go-on-go per-leaf check
+	// missed it because it never fetched the root BY ITS SIGNED HASH — a
+	// different-impl consumer that does was the true signal (browser-rust 059f0e1).
+	//
+	// B4 half-2 (browser-rust 4445a15): read through `nli`, NOT the raw `li`. The
+	// entries above were written through `nli` (NamespacedIndex), so they live in
+	// the store under qualified keys `/{peer_id}/system/...`. BuildTrieForPrefix
+	// lists with the peer-relative prefix and trims with the qualified one — so
+	// `li.List("system/")` on a store keyed by `/{peer}/system/...` matches
+	// NOTHING → BuildTrie(cs, nil) → the canonical EMPTY root, no error anywhere.
+	// The signed root then verified and served, but resolved zero keys: every
+	// key Absent. `nli.List("system/")` canonicalizes to `/{peer}/system/` and
+	// returns the qualified paths the trim expects. The writer and reader MUST
+	// share one key space; they disagreed silently, and the disagreement was
+	// invisible until a consumer walked the root by hash and resolved a key.
+	// Still deterministic: the tree is fixed, so the trie root is fixed too.
+	root, err := tree.BuildTrieForPrefix(cs, nli, kp.PeerID(), publishedroot.PrefixForLocalPeer)
+	if err != nil {
+		return nil, nil, crypto.Keypair{}, entity.Entity{}, hash.Hash{}, nil, fmt.Errorf("build trie root: %w", err)
+	}
+	if _, err := pub.Publish(root); err != nil {
+		return nil, nil, crypto.Keypair{}, entity.Entity{}, hash.Hash{}, nil, fmt.Errorf("publish root: %w", err)
 	}
 
 	pollH := httplive.NewPollHandler("", cs, li, httplive.WholeStoreScope{}, kp.PeerID())
@@ -177,7 +191,7 @@ func buildPublisher() (*httplive.PollHandler, crypto.Keypair, entity.Entity, []h
 		}
 		return e
 	}
-	return pollH, kp, identity, leafHashes, nil
+	return pollH, cs, kp, identity, root, leafHashes, nil
 }
 
 // encodeFixtureData is deterministic CBOR encoding of a fixed-order map.
@@ -195,13 +209,16 @@ func encodeFixtureData(items []kv) ([]byte, error) {
 	return opts.Marshal(m)
 }
 
-func printContract(url string, kp crypto.Keypair, identity entity.Entity, leafHashes []hash.Hash) {
+func printContract(url string, kp crypto.Keypair, identity entity.Entity, rootHash hash.Hash, leafHashes []hash.Hash) {
 	fmt.Printf("# publish-fixture contract (deterministic across runs)\n")
 	fmt.Printf("url=%s\n", url)
 	fmt.Printf("peer_id=%s\n", string(kp.PeerID()))
 	fmt.Printf("key_type=%s\n", keyTypeName(kp.KeyType))
 	fmt.Printf("identity_content_hash=%s\n", identity.ContentHash)
-	fmt.Printf("published_root_hash=%s\n", publishedRootHash)
+	fmt.Printf("published_root_hash=%s\n", rootHash)
+	// The /content/{hex} path form (66-char, format byte included per h.Bytes())
+	// — the address a consumer fetches the signed root by. Serving THIS is B4.
+	fmt.Printf("published_root_content_path=%s\n", hex.EncodeToString(rootHash.Bytes()))
 	for i, e := range fixtureEntries {
 		fmt.Printf("entry[%d].path=%s\n", i, e.peerRelativePath)
 		fmt.Printf("entry[%d].type=%s\n", i, e.entityType)
