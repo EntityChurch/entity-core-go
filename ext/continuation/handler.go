@@ -25,6 +25,11 @@ type Handler struct {
 	chainTTLSeed uint64
 	// lastCollect throttles the bind-time sweep.
 	lastCollect time.Time
+
+	// joinPaths tracks deadline-carrying joins for the §4 completion sweep,
+	// and lastJoinSweep throttles it. See join_completion.go.
+	joinPaths     map[string]struct{}
+	lastJoinSweep time.Time
 }
 
 // HandlerOption configures a continuation Handler.

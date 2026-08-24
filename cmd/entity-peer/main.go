@@ -76,6 +76,7 @@ func main() {
 	filesRoot := flag.String("files", "", "expose filesystem directory (format: name:/path:tree/prefix/)")
 	publishDescriptors := flag.Bool("publish-descriptors", false, "DOMAIN-LOCAL-FILES v1.3 §10.5 V3: when set, the --files root is configured with publish_descriptors=true so file reads write `system/content/descriptor/{hash}` entities into the local tree. Arms local_files.v3_descriptor_publish_exercised.")
 	historyFlag := flag.String("history", "", "enable history recording (format: pattern[:max_depth], e.g. \"*:1000\" or \"project/*\")")
+	clockTickMs := flag.Uint64("clock-tick-ms", 0, "enable periodic clock tick emission every N ms (EXTENSION-CLOCK §2.5 tick_interval; 0 = disabled, the spec default). Writes system/clock/tick/latest, which subscribers watch via system/clock/tick/*")
 	storage := flag.String("storage", "memory", "storage backend: memory (default) or sqlite")
 	storagePath := flag.String("storage-path", "", "sqlite database path (default ~/.entity/peers/{name}/peer.db when --name is set)")
 	substituteAllowHTTP := flag.Bool("substitute-allow-http", false, "allow http:// (not just https://) URLs in the storage-substitute chain (insecure; testing only)")
@@ -708,6 +709,45 @@ func main() {
 
 	// Start the subscription engine delivery loop (async network delivery).
 	engine.StartDelivery(engineCtx)
+
+	// Seed system/clock/config from --clock-tick-ms. Without this the tick
+	// surface is unreachable: nothing else in the tooling writes clock config,
+	// so a peer could never be told to tick and the capability would ship
+	// switched off with no switch. Merges into any existing config rather than
+	// replacing it, so setting a tick interval cannot silently reset the
+	// peer's clock mode.
+	if *clockTickMs > 0 {
+		cfg := types.ClockConfigData{Mode: types.DefaultClockMode}
+		if existing, ok := p.LocationIndex().Get("system/clock/config"); ok {
+			if ent, ok := p.Store().Get(existing); ok {
+				if prev, err := types.ClockConfigDataFromEntity(ent); err == nil {
+					cfg = prev
+				}
+			}
+		}
+		interval := *clockTickMs
+		cfg.TickInterval = &interval
+		cfgEntity, err := cfg.ToEntity()
+		if err != nil {
+			log.Fatalf("create clock config entity: %v", err)
+		}
+		cfgHash, err := p.Store().Put(cfgEntity)
+		if err != nil {
+			log.Fatalf("store clock config entity: %v", err)
+		}
+		if err := p.LocationIndex().Set("system/clock/config", cfgHash); err != nil {
+			log.Fatalf("bind clock config: %v", err)
+		}
+		log.Printf("Clock: tick_interval=%dms (mode %q)", interval, cfg.Mode)
+	}
+
+	// Start periodic clock tick emission (EXTENSION-CLOCK §2.5/§2.8). No-ops
+	// unless the peer has tick_interval configured. Started AFTER the
+	// subscription engine, so the first tick already has somewhere to fan out
+	// to — a tick emitted before delivery is running would be a write nobody
+	// is listening for, which is exactly the "did my timer fire?" confusion
+	// this surface exists to remove.
+	clockH.StartTicking(engineCtx)
 
 	// Wire history recorder after peer construction (needs peer ID + location index).
 	historyRecorder.SetLocalPeerID(string(p.PeerID()), p.Identity().ContentHash)

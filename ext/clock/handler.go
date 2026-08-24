@@ -42,6 +42,9 @@ type Handler struct {
 	peerID   string                 // peer ID string (Base58) for vector clock map key
 	peerHash hash.Hash              // content hash of local peer's identity entity (HLC peer field)
 	bgCtx    *store.MutationContext // background context for advancement writes
+
+	// tickSeq is the §2.8 monotonic tick counter. See tick.go.
+	tickSeq uint64
 }
 
 // NewHandler creates a new clock handler.
@@ -585,10 +588,31 @@ func compareHLC(a, b types.ClockHLCData) string {
 
 // isClockEnginePath returns true for clock engine output paths that must be guarded
 // to prevent recursive advancement. Config paths are NOT guarded.
+// isClockEnginePath reports whether a write is clock ENGINE OUTPUT, which
+// EXTENSION-CLOCK §4.3 says MUST NOT trigger clock advancement.
+//
+// §4.3 enumerates three paths (logical, vector, hlc) and deliberately excludes
+// `system/clock/config` — configuration is handler-written via explicit EXECUTE
+// and "SHOULD advance the clock like any other tree mutation." So this is NOT a
+// prefix match on `system/clock/*`; the enumeration is the rule.
+//
+// The tick path is added here as a fourth engine output. §4.3 does not list it
+// only because it predates any impl emitting ticks — its stated rationale,
+// "clock persistence writes are produced by the clock consumer itself during
+// emit processing," describes a scheduled tick exactly. The consequence of
+// getting this wrong is not recursion but something quieter: in logical /
+// vector / hlc mode the counter would advance once per tick, so an IDLE peer's
+// logical clock would climb at wall-clock rate. A logical clock that counts
+// seconds instead of causal events is no longer a logical clock, and every
+// causal comparison built on it silently degrades.
+//
+// Routed to arch to be added to §4.3's enumeration
+// (docs/validation/spec-issues/2026-07-22-clock-has-no-scheduler.md).
 func isClockEnginePath(barePath string) bool {
 	return barePath == "system/clock/logical" ||
 		barePath == "system/clock/vector" ||
-		barePath == "system/clock/hlc"
+		barePath == "system/clock/hlc" ||
+		barePath == TickPath
 }
 
 // pruneVectorEntries removes the entry with the lowest counter when max entries is exceeded.

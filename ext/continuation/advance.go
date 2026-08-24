@@ -42,6 +42,12 @@ func (h *Handler) handleAdvance(ctx context.Context, req *handler.Request) (*han
 		return handler.NewErrorResponse(400, "invalid_params", "resource target path is required")
 	}
 
+	// STANDING-MODEL §4 completion sweep — throttled, so a join whose round
+	// expired with no traffic of its own still self-heals off somebody else's.
+	// Before the cap check: reaping a foreign join is this peer's own
+	// housekeeping on its own tree, not something the caller is authorized for.
+	h.maybeSweepJoins(ctx, hctx)
+
 	// Level 2 capability check — split by trigger kind per
 	// PROPOSAL-CONTINUATION-STANDING-MODEL §3 (Q2 ruling, MUST):
 	//
@@ -99,7 +105,7 @@ func (h *Handler) advanceAtPath(ctx context.Context, hctx *handler.HandlerContex
 				if err != nil {
 					return handler.NewErrorResponse(500, "internal_error", "decode join: "+err.Error())
 				}
-				return h.advanceJoinSlot(ctx, hctx, parent, slot, joinData, result)
+				return h.advanceJoinSlot(ctx, hctx, parent, slot, joinData, result, status)
 			}
 		}
 	}
@@ -259,6 +265,14 @@ func extractRejectedMarkerFromResult(origResult cbor.RawMessage) hash.Hash {
 // delivery; MUST NOT trigger advancement/retry/any reactive behavior).
 // Go uses the original request ID as the {step_index} segment per v1.14.
 func (h *Handler) bindLostErrorMarker(hctx *handler.HandlerContext, chainID, failedURI string, origStatus uint, origResult cbor.RawMessage, reason string, originTimestampMs uint64, mirrorReceiverMarker hash.Hash) {
+	h.bindLostErrorMarkerForJoin(hctx, chainID, failedURI, origStatus, origResult, reason, originTimestampMs, mirrorReceiverMarker, "", nil)
+}
+
+// bindLostErrorMarkerForJoin is bindLostErrorMarker plus the two
+// join-completion coordinates (STANDING-MODEL §4). Split this way rather than
+// widened in place so every existing caller keeps its signature and no non-join
+// marker can accidentally acquire join fields.
+func (h *Handler) bindLostErrorMarkerForJoin(hctx *handler.HandlerContext, chainID, failedURI string, origStatus uint, origResult cbor.RawMessage, reason string, originTimestampMs uint64, mirrorReceiverMarker hash.Hash, joinPath string, joinSlots []string) {
 	// chainID is the chain the failing dispatch actually carried, resolved once
 	// per advance by dispatchChainID (spec step 6: inherit or generate). It is
 	// passed in rather than re-derived so the marker cannot be filed under a
@@ -320,6 +334,8 @@ func (h *Handler) bindLostErrorMarker(hctx *handler.HandlerContext, chainID, fai
 		Reason:             pathReason,
 		ChainID:            rawChainID,
 		StepIndex:          rawStepKey,
+		JoinPath:           joinPath,
+		JoinSlots:          joinSlots,
 		RejectedMarkerHash: mirrorReceiverMarker,
 	}.ToEntity()
 	if err != nil {
@@ -677,8 +693,15 @@ func resolveOrDefaultResource(value cbor.RawMessage, extractPath string, default
 	}
 }
 
-// advanceJoinSlot implements join slot advancement (spec §3.5).
-func (h *Handler) advanceJoinSlot(ctx context.Context, hctx *handler.HandlerContext, joinPath, slotName string, join types.ContinuationJoinData, result cbor.RawMessage) (*handler.Response, error) {
+// advanceJoinSlot implements join slot advancement (spec §3.5), with the
+// STANDING-MODEL §4 completion policy layered on the failure paths only.
+//
+// `status` is the advance request's status for THIS slot. It is threaded in
+// rather than dropped because a delivered non-2xx FILLS its slot — the barrier
+// completes and the failure vanishes into the stitch unless the join records it
+// (§4 mechanism 1). The slot's payload itself is stored exactly as it arrived:
+// an error payload is passed through as-is, never coerced into boundary bytes.
+func (h *Handler) advanceJoinSlot(ctx context.Context, hctx *handler.HandlerContext, joinPath, slotName string, join types.ContinuationJoinData, result cbor.RawMessage, status uint) (*handler.Response, error) {
 	// Validate slot.
 	if !slotInExpected(slotName, join.Expected) {
 		return handler.NewErrorResponse(400, "unexpected_slot",
@@ -699,13 +722,50 @@ func (h *Handler) advanceJoinSlot(ctx context.Context, hctx *handler.HandlerCont
 	if err != nil {
 		return handler.NewErrorResponse(500, "internal_error", "re-decode join: "+err.Error())
 	}
+	h.noteJoinPath(joinPath, join)
 
-	// Accumulate.
+	// §4 mechanism 2, on the path that matters most: if the PREVIOUS round
+	// blew its deadline while nothing was touching this join, fail it here
+	// before accumulating. Without this, the arriving slot would be counted
+	// into a dead round and the join would stay one slot short forever — the
+	// wedge. Reaping first is what lets the next round "fire clean".
+	nowMs := uint64(time.Now().UnixMilli())
+	if h.reapExpiredJoinRound(ctx, hctx, joinPath, join, nowMs) {
+		// Re-read: the reap rebound (or deleted) the join.
+		joinEnt, joinType = readEntity(hctx, joinPath)
+		if joinType != types.TypeContinuationJoin {
+			return advancementNotFound()
+		}
+		if join, err = types.ContinuationJoinDataFromEntity(joinEnt); err != nil {
+			return handler.NewErrorResponse(500, "internal_error", "re-decode join after reap: "+err.Error())
+		}
+	}
+
+	// Accumulate. The payload goes in verbatim — byte fidelity here is what
+	// keeps a complete round's assembled params identical to the serial case.
 	received := make(map[string]cbor.RawMessage)
 	for k, v := range join.Received {
 		received[k] = v
 	}
 	received[slotName] = result
+
+	// §4 mechanism 1: remember a slot that arrived carrying an error. Sparse —
+	// an all-good round never grows this map, so its entity bytes are unchanged.
+	receivedStatus := make(map[string]uint, len(join.ReceivedStatus))
+	for k, v := range join.ReceivedStatus {
+		receivedStatus[k] = v
+	}
+	if status < 200 || status >= 300 {
+		receivedStatus[slotName] = status
+	} else {
+		delete(receivedStatus, slotName) // a redelivered slot may arrive clean
+	}
+	if len(receivedStatus) == 0 {
+		receivedStatus = nil
+	}
+	join.Received = received
+	join.ReceivedStatus = receivedStatus
+	armJoinRound(&join, nowMs)
 
 	// Check completeness.
 	if allSlotsReceived(join.Expected, received) {
@@ -715,32 +775,26 @@ func (h *Handler) advanceJoinSlot(ctx context.Context, hctx *handler.HandlerCont
 			return nil, fmt.Errorf("encode received: %w", err)
 		}
 
-		// Build a ContinuationData from the join's dispatch fields.
-		contData := types.ContinuationData{
-			Target:              join.Target,
-			Operation:           join.Operation,
-			Resource:            join.Resource,
-			Params:              join.Params,
-			ResultField:         join.ResultField,
-			OnError:             join.OnError,
-			DeliverTo:           join.DeliverTo,
-			RemainingExecutions: join.RemainingExecutions,
-			DispatchCapability:  join.DispatchCapability,
+		// §4 mechanism 1: the barrier completed, but not cleanly. Record the
+		// round as failed BEFORE dispatching, so the observation exists whether
+		// or not the target rejects. The dispatch still happens with the error
+		// payload passed through untouched: it is the target — the
+		// determinism-critical stitch — that MUST reject an error slot rather
+		// than compute a boundary entity from it. The join's job is to make
+		// that decidable, not to make it.
+		if errored := join.ErrorSlots(); len(errored) > 0 {
+			h.bindJoinIncompleteMarker(hctx, joinPath, join, errored, types.ChainErrorReasonJoinErrorSlot, nowMs)
+			debugLog("join %s: round completed with error slot(s) %v — target must reject rather than fold them into a boundary entity", joinPath, errored)
 		}
+
+		contData := joinDispatchData(join)
 
 		_, dispatchErr := h.executeDispatch(ctx, hctx, contData, cbor.RawMessage(receivedRaw), dispatchChainID(hctx))
 
-		// Lifecycle.
-		if join.RemainingExecutions != nil {
-			remaining := h.handleRemainingExecutions(hctx, joinPath, join.RemainingExecutions)
-			if remaining > 0 {
-				// Reset received for next round.
-				resetJoinReceived(hctx, joinPath, join)
-			}
-		} else {
-			// Standing join — reset received.
-			resetJoinReceived(hctx, joinPath, join)
-		}
+		// Lifecycle: decrement a counted join (deleting it at zero) or reset a
+		// standing one. Shared with the deadline-driven fire so both age the
+		// join identically.
+		h.advanceJoinLifecycle(hctx, joinPath, join)
 
 		if configErr, ok := dispatchErr.(*errInvalidContinuation); ok {
 			return handler.NewErrorResponse(400, "invalid_continuation", configErr.msg)
@@ -752,7 +806,6 @@ func (h *Handler) advanceJoinSlot(ctx context.Context, hctx *handler.HandlerCont
 	}
 
 	// Not complete — update join entity with accumulated received.
-	join.Received = received
 	updatedEntity, err := join.ToEntity()
 	if err != nil {
 		return nil, fmt.Errorf("create updated join: %w", err)
@@ -849,28 +902,9 @@ func (h *Handler) handleRemainingExecutions(hctx *handler.HandlerContext, path s
 	return current
 }
 
-// resetJoinReceived resets the received map on a join entity for the next round.
-func resetJoinReceived(hctx *handler.HandlerContext, joinPath string, join types.ContinuationJoinData) {
-	join.Received = nil
-	updatedEntity, err := join.ToEntity()
-	if err != nil {
-		return
-	}
-	updatedHash, err := hctx.Store.Put(updatedEntity)
-	if err != nil {
-		return
-	}
-	if _, err := hctx.TreeSet(joinPath, updatedHash, "advance"); err != nil {
-		// Surfaced via debug log: a subsequent advance write usually fails
-		// the same way and will propagate to the caller — this is the best
-		// we can do without changing the function's nil signature.
-		debugLog("continuation: reset join bind %s failed: %v", joinPath, err)
-	}
-}
-
 // debugLog is a package-level helper; the handler's debugf isn't reachable
-// from resetJoinReceived which has no handler receiver. We log via stderr
-// when this fires so the operator at least sees the warning.
+// from the join reset path, which has no handler receiver on every branch. We
+// log via stderr when this fires so the operator at least sees the warning.
 func debugLog(format string, args ...any) {
 	log.Printf(format, args...)
 }

@@ -26,6 +26,7 @@ func cmdStart(args []string) {
 	storage := fs.String("storage", "", "storage backend: memory (default), sqlite (go + rust)")
 	files := fs.String("files", "", "expose filesystem directory (format: name:/path:tree/prefix/) — supported by all three impls' --files flag")
 	history := fs.String("history", "*", "history recording pattern (default: \"*\" records all; use \"\" to disable)")
+	clockTickMs := fs.Uint64("clock-tick-ms", 0, "EXTENSION-CLOCK §2.5 tick_interval: emit a periodic clock tick every N ms (Go peers only; 0 = disabled, the spec default). Forwarded as --clock-tick-ms to entity-peer.")
 	remote := fs.String("remote", "", "register a remote peer by name (must already be running)")
 	httpAddr := fs.String("http-addr", "", "additional HTTP-live listener address (e.g. 127.0.0.1:0 for random; empty disables). Chunk D / Amendment 3. Go supports; Rust + Python CLI wiring pending.")
 	httpPath := fs.String("http-path", "/entity", "URL path the HTTP-live listener accepts POSTs at (when --http-addr set)")
@@ -117,7 +118,7 @@ func cmdStart(args []string) {
 	}
 	switch *peerType {
 	case "go":
-		entry = startGoPeer(*name, *addr, *debug, *openAccess, *files, *history, *storage, *httpAddr, *httpPath, *wsAddr, *wsPath, *keyType, *hashType, registryPeerIDs, ka, pollFlags, logFile, lf)
+		entry = startGoPeer(*name, *addr, *debug, *openAccess, *files, *history, *storage, *httpAddr, *httpPath, *wsAddr, *wsPath, *keyType, *hashType, registryPeerIDs, *clockTickMs, ka, pollFlags, logFile, lf)
 	case "rust":
 		// Rust 474bb11 (Chunk D), 58d9188 (Chunk E flags), 0616727 (v7.70 home-format).
 		// Rust ships --ws-listen for NETWORK §6.5.2b; cohort flag string is
@@ -236,7 +237,7 @@ func (ka keepaliveSpec) args(dash string) []string {
 
 // --- Go peer ---
 
-func startGoPeer(name, addr string, debug, openAccess bool, files, history, storage, httpAddr, httpPath, wsAddr, wsPath, keyType, hashType, inboxRelayRegistry string, keepalive keepaliveSpec, poll chunkEFlags, logFile string, lf *os.File) *PeerEntry {
+func startGoPeer(name, addr string, debug, openAccess bool, files, history, storage, httpAddr, httpPath, wsAddr, wsPath, keyType, hashType, inboxRelayRegistry string, clockTickMs uint64, keepalive keepaliveSpec, poll chunkEFlags, logFile string, lf *os.File) *PeerEntry {
 	readyFile := filepath.Join(os.TempDir(), fmt.Sprintf("entity-peer-%s-%d.ready", name, time.Now().UnixNano()))
 
 	// Pass -name so the Go peer loads (or creates) its keypair at
@@ -271,6 +272,9 @@ func startGoPeer(name, addr string, debug, openAccess bool, files, history, stor
 	}
 	if history != "" {
 		cmdArgs = append(cmdArgs, "-history", history)
+	}
+	if clockTickMs > 0 {
+		cmdArgs = append(cmdArgs, "-clock-tick-ms", strconv.FormatUint(clockTickMs, 10))
 	}
 	if hashType != "" && hashType != "sha256" {
 		cmdArgs = append(cmdArgs, "--hash-type", hashType)

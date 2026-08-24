@@ -139,6 +139,22 @@ type ChainErrorLostData struct {
 	// capture: the peer the dispatch was aimed at).
 	TargetPeerID string `cbor:"target_peer_id,omitempty"`
 
+	// JoinPath and JoinSlots are reserved for the two join-completion
+	// reasons (ChainErrorReasonJoinIncomplete / ...JoinErrorSlot).
+	//
+	// PROPOSAL-CONTINUATION-STANDING-MODEL §4 requires the abandon path to
+	// emit "a lost marker naming the missing slots", but the §3.10.6 marker
+	// registry has nowhere to put them: every existing field describes a
+	// DISPATCH that failed, and an abandoned round never dispatched at all.
+	// Without these the marker records that a round failed and loses which
+	// slots — which is the entire diagnostic content of the observation.
+	//
+	// Go's proposed spelling, routed for cohort pinning with the round clock
+	// (docs/validation/spec-issues/2026-07-22-join-completion-round-clock.md).
+	// Both are omitempty, so no non-join marker's bytes change.
+	JoinPath  string   `cbor:"join_path,omitempty"`
+	JoinSlots []string `cbor:"join_slots,omitempty"`
+
 	// RejectedMarkerHash is reserved on the `lost` kind when the marker
 	// mirrors a peer's rejected marker (§3.10.4 mirror-pointer pattern).
 	// Body-side companion to wire-side ErrorData.RejectedMarker so the
@@ -171,6 +187,23 @@ const (
 	// ChainErrorReasonChainConstructionInvalid: malformed continuation
 	// entity at install time (per §3.2 install). NEW v1.19.
 	ChainErrorReasonChainConstructionInvalid = "chain_construction_invalid"
+
+	// ChainErrorReasonJoinIncomplete: a join round hit its
+	// completion_deadline_ms with slots still missing and on_incomplete
+	// "abandon" failed the round (PROPOSAL-CONTINUATION-STANDING-MODEL §4
+	// mechanism 2). The marker names the missing slots; the round then
+	// resets so the next one can fire clean.
+	//
+	// Go's proposed spelling — §4 requires "a lost marker naming the missing
+	// slots" and pins no code. Routed for cohort pinning alongside the
+	// round-clock field.
+	ChainErrorReasonJoinIncomplete = "join_incomplete"
+
+	// ChainErrorReasonJoinErrorSlot: a join round completed the barrier but
+	// one or more slots arrived carrying a non-2xx result (§4 mechanism 1).
+	// The round is observably failed rather than silently folded into a
+	// boundary entity computed from an error payload.
+	ChainErrorReasonJoinErrorSlot = "join_error_slot"
 )
 
 // V7 §6.12 — per-request transport error codes. Used as the {reason}
@@ -290,6 +323,36 @@ func ContinuationDataFromEntity(e entity.Entity) (ContinuationData, error) {
 	return d, nil
 }
 
+// Join completion policy (PROPOSAL-CONTINUATION-STANDING-MODEL §4 Facet B).
+//
+// The barrier fires only on allSlotsReceived (§3.5) and a standing join resets
+// `received` only after firing, so §2.3/§3.5 never define what happens when a
+// slot NEVER arrives: a dropped trigger, a pool refusal (429), or an error
+// returning before delivery wedges that round and every subsequent one. These
+// are the two policies a join may carry for that case.
+const (
+	// JoinOnIncompleteAbandon fails the round: bind a lost marker naming the
+	// missing slots, reset `received`, ready for the next round. A standing
+	// per-tick join thus self-heals rather than wedging. This is the default.
+	JoinOnIncompleteAbandon = "abandon"
+
+	// JoinOnIncompleteFirePartial fires the target with the partial `received`
+	// plus an explicit incomplete marker listing the missing slots. Never the
+	// default — a stitch that assumes k fragments must opt in.
+	JoinOnIncompleteFirePartial = "fire-partial"
+)
+
+// JoinIncompleteField is the key under which a fire-partial dispatch carries
+// its explicit incomplete marker into the assembled params, alongside the
+// partial `received`. Its presence IS the signal to the target that this round
+// is short; a target that ignores it has opted into partial input by choosing
+// fire-partial at install.
+//
+// Only ever present on a fire-partial round. A complete round assembles exactly
+// the bytes it assembled before this proposal — the success path is untouched,
+// which is what keeps the boundary-equivalence licence honest.
+const JoinIncompleteField = "incomplete"
+
 // ContinuationJoinData is the data payload for system/continuation/join.
 type ContinuationJoinData struct {
 	Expected            []string                   `cbor:"expected"`
@@ -303,6 +366,90 @@ type ContinuationJoinData struct {
 	DeliverTo           *DeliverySpec              `cbor:"deliver_to,omitempty"`
 	RemainingExecutions *uint64                    `cbor:"remaining_executions,omitempty"`
 	DispatchCapability  hash.Hash                  `cbor:"dispatch_capability,omitzero"`
+
+	// CompletionDeadlineMs is the per-round wall budget (STANDING-MODEL §4).
+	// ABSENT = wait forever, which is the pre-proposal behavior — no silent
+	// change; the policy is opt-in per join set by the substrate that installs
+	// it. Reset with `received` each round.
+	CompletionDeadlineMs *uint64 `cbor:"completion_deadline_ms,omitempty"`
+
+	// OnIncomplete is JoinOnIncompleteAbandon (default, also the meaning of
+	// absent) or JoinOnIncompleteFirePartial. Only consulted when
+	// CompletionDeadlineMs is set — without a deadline no round can be
+	// incomplete, because it never ends.
+	OnIncomplete string `cbor:"on_incomplete,omitempty"`
+
+	// RoundStartedMs stamps when the current round began accumulating, so the
+	// deadline has a reference point that survives a peer restart and is
+	// observable in the tree. Armed when the round's FIRST slot lands, cleared
+	// with `received` on reset.
+	//
+	// NOT in the proposal's §4 field list, which names only the two policy
+	// fields — but a deadline is unenforceable without a start, so some
+	// impl-side state is forced. Keeping it on the entity rather than in
+	// handler memory is the choice that follows this codebase's grain (the
+	// tree IS the event log; nothing here owns a timer goroutine) and makes a
+	// wedged round diagnosable by reading the tree. It is a wire-visible field
+	// on a spec'd type, so it is a cross-impl surface and is routed to arch for
+	// pinning rather than assumed — see
+	// docs/validation/spec-issues/2026-07-22-join-completion-round-clock.md.
+	RoundStartedMs *uint64 `cbor:"round_started_ms,omitempty"`
+
+	// ReceivedStatus records the advance status of any slot that arrived
+	// carrying a NON-2xx result (STANDING-MODEL §4 mechanism 1: "the join's
+	// `received` map MUST preserve each slot's status"). A delivered error
+	// FILLS its slot — the barrier still completes — so without this the round
+	// looks clean and the failure disappears into the stitch.
+	//
+	// Sparse by construction: an all-good round carries no `received_status`
+	// key at all, so its entity bytes and its assembled params are identical to
+	// what they were before this proposal. Failure-path only.
+	ReceivedStatus map[string]uint `cbor:"received_status,omitempty"`
+}
+
+// IncompleteRound reports whether the join's current round has begun and
+// exceeded its completion deadline at nowMs without filling every slot.
+//
+// False whenever no deadline is set (wait-forever), no round has started (an
+// idle standing join has nothing to abandon — see the round-clock spec issue),
+// or the round is already complete.
+func (d ContinuationJoinData) IncompleteRound(nowMs uint64) bool {
+	if d.CompletionDeadlineMs == nil || d.RoundStartedMs == nil {
+		return false
+	}
+	if len(d.Received) >= len(d.Expected) {
+		return false
+	}
+	deadline := *d.RoundStartedMs + *d.CompletionDeadlineMs
+	return nowMs > deadline
+}
+
+// MissingSlots returns the expected slots absent from `received`, in `expected`
+// order — the order every join read uses, so a marker naming them is stable
+// across peers.
+func (d ContinuationJoinData) MissingSlots() []string {
+	missing := make([]string, 0, len(d.Expected))
+	for _, slot := range d.Expected {
+		if _, ok := d.Received[slot]; !ok {
+			missing = append(missing, slot)
+		}
+	}
+	return missing
+}
+
+// ErrorSlots returns the slots that arrived carrying a non-2xx status, in
+// `expected` order (mechanism 1).
+func (d ContinuationJoinData) ErrorSlots() []string {
+	if len(d.ReceivedStatus) == 0 {
+		return nil
+	}
+	var errored []string
+	for _, slot := range d.Expected {
+		if status, ok := d.ReceivedStatus[slot]; ok && (status < 200 || status >= 300) {
+			errored = append(errored, slot)
+		}
+	}
+	return errored
 }
 
 // ToEntity creates a system/continuation/join entity.

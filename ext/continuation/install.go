@@ -49,6 +49,10 @@ func (h *Handler) handleInstall(ctx context.Context, req *handler.Request) (*han
 	var (
 		dispatchCap hash.Hash
 		contEntity  entity.Entity
+		// installedJoin is set on the join branch so the §4 completion sweep
+		// can start tracking the path — but only AFTER the bind succeeds, so a
+		// rejected install never enters the sweep index.
+		installedJoin *types.ContinuationJoinData
 	)
 	switch req.Params.Type {
 	case types.TypeContinuation:
@@ -103,7 +107,28 @@ func (h *Handler) handleInstall(ctx context.Context, req *handler.Request) (*han
 			return handler.NewErrorResponse(400, "missing_dispatch_capability",
 				"continuation requires dispatch_capability for the deferred dispatch")
 		}
+		// G1 fail-closed, same discipline as unknown_transform_op: an
+		// unrecognized on_incomplete is rejected at install rather than
+		// silently defaulting to abandon at the deadline. Silently defaulting
+		// would turn a typo'd "fire_partial" into a policy the installer did
+		// not choose, discovered only when a round is already short.
+		if !validOnIncomplete(joinData.OnIncomplete) {
+			return handler.NewErrorResponse(400, "invalid_continuation",
+				fmt.Sprintf("unrecognized on_incomplete %q: expected %q or %q",
+					joinData.OnIncomplete, types.JoinOnIncompleteAbandon, types.JoinOnIncompleteFirePartial))
+		}
+		// A policy with no deadline can never fire — the round never ends.
+		// Reject rather than accept a join whose stated policy is inert.
+		if joinData.OnIncomplete != "" && joinData.CompletionDeadlineMs == nil {
+			return handler.NewErrorResponse(400, "invalid_continuation",
+				"on_incomplete requires completion_deadline_ms — without a deadline no round is ever incomplete")
+		}
+		// A fresh install starts a fresh round: never inherit a round clock or
+		// per-slot statuses from the caller's params.
+		joinData.RoundStartedMs = nil
+		joinData.ReceivedStatus = nil
 		dispatchCap = joinData.DispatchCapability
+		installedJoin = &joinData
 		var err error
 		contEntity, err = joinData.ToEntity()
 		if err != nil {
@@ -174,6 +199,9 @@ func (h *Handler) handleInstall(ctx context.Context, req *handler.Request) (*han
 	}
 	if _, err := hctx.TreeSet(installPath, contHash, "install"); err != nil {
 		return handler.NewErrorResponse(500, "storage_error", "bind continuation: "+err.Error())
+	}
+	if installedJoin != nil {
+		h.noteJoinPath(installPath, *installedJoin)
 	}
 
 	return handler.NewResponse(200, types.TypeContinuationInstallResult,
