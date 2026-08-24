@@ -56,6 +56,7 @@ func runLiveness(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs in
 	r.Declare("liveness_connected_on_establish", "Amendment 12 §A3 rung 1 / ENTITY-CORE-PROTOCOL §3.13")
 	r.Declare("liveness_suspect_on_transport_error", "Amendment 12 §A1 — direct-dispatch demotion seam")
 	r.Declare("liveness_disconnected_on_keepalive_miss", "EXTENSION-NETWORK §5.4 / Amendment 12 rung 2 + §A4 last_seen snapshot")
+	r.Declare("liveness_escalate_after_eviction", "EXTENSION-NETWORK §5.4a [MUST] — NET-LIVENESS-ESCALATE-AFTER-EVICTION-1")
 
 	if client.Profile() == ProfileCore {
 		for _, name := range []string{
@@ -63,6 +64,7 @@ func runLiveness(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs in
 			"liveness_connected_on_establish",
 			"liveness_suspect_on_transport_error",
 			"liveness_disconnected_on_keepalive_miss",
+			"liveness_escalate_after_eviction",
 		} {
 			r.Run(name, func() CheckOutcome {
 				return SkipCheck("outside --profile core (NETWORK-extension liveness, V7 §9.0)")
@@ -223,6 +225,58 @@ func runLiveness(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs in
 			return WarnCheck("disconnected/keepalive-miss landed; last_seen snapshot absent — §A4 makes it the demotion's evidence when an exchange was recorded (one was: the establish dispatch). OPTIONAL §3.13 field, so flagged, not gated")
 		}
 		return PassCheck(fmt.Sprintf("target escalated to disconnected (reason keepalive-miss) with no dispatch traffic, within the declared envelope; last_seen snapshot %d", d.LastSeen))
+	})
+
+	// NET-LIVENESS-ESCALATE-AFTER-EVICTION-1 (EXTENSION-NETWORK §5.4a [MUST]).
+	//
+	// The state no vector in any implementation occupied: an episode that
+	// began at the §A1 transport seam rather than at an idle keepalive miss.
+	// §A1's demotion evicts the binding as it writes `suspect`, so an
+	// implementation that scopes the escalation to the connection — or to the
+	// keepalive loop watching it — silently never escalates. The peer stays
+	// `suspect` forever, the disconnect subscription never fires, and §4.1
+	// reconnect never triggers.
+	//
+	// This reuses liveness_suspect_on_transport_error's counterpart rather
+	// than arming a fresh one, and that is the whole point: the existing
+	// keepalive-miss vector deliberately starts from a FRESH counterpart so
+	// the first probe's eviction cannot interfere, which is exactly why the
+	// composition of the two was never tested.
+	r.Run("liveness_escalate_after_eviction", func() CheckOutcome {
+		if out, ok := r.Require("liveness_suspect_on_transport_error"); !ok {
+			return out
+		}
+		if keepaliveEnvelopeMs <= 0 {
+			return SkipCheck("pass -keepalive-envelope-ms matching the target's §2.3 envelope — the §5.4a escalation probe is opt-in for the same reason the §5.4 one is (a default-envelope peer would stall the suite for minutes)")
+		}
+		// The counterpart is already dead and already demoted to suspect by
+		// the transport-error probe. From here NOTHING touches it: no
+		// dispatch, no fresh dial. Only the grace path can move it.
+		deadline := time.Duration(keepaliveEnvelopeMs)*time.Millisecond*3/2 + 10*time.Second
+		d, lastState, found := pollPeerStatus(ctx, client, counterpart.hexID, deadline, func(d types.PeerStatusData) bool {
+			return d.Status == types.PeerStatusDisconnected
+		})
+		if !found {
+			return FailCheck(fmt.Sprintf(
+				"peer demoted to suspect at the §A1 seam never escalated to disconnected within %v (%s) — §5.4a: the escalation is owed by the failure EPISODE, not by the connection, and the §A1 eviction MUST NOT cancel it. A peer stuck here never fires the disconnect subscription, so §4.1 reconnect never triggers",
+				deadline, lastState))
+		}
+		// §5.4a [MUST]: the escalation preserves the episode's ORIGINATING
+		// reason. This episode opened at the transport seam, so re-stamping to
+		// keepalive-miss would assert pings that were never sent — the
+		// connection was gone before the loop could send one.
+		if d.Reason == types.PeerStatusReasonKeepaliveMiss {
+			return FailCheck(fmt.Sprintf(
+				"escalation re-stamped reason to %q, but this episode opened at the §A1 transport seam — §5.4a [MUST] preserves the ORIGINATING reason (%q here). keepalive-miss asserts an event that provably did not happen: no ping was ever sent on this path",
+				d.Reason, types.PeerStatusReasonTransportError))
+		}
+		if d.Reason != "" && d.Reason != types.PeerStatusReasonTransportError {
+			return FailCheck(fmt.Sprintf("escalation carries reason %q, want %q preserved from the episode's opening demotion (§5.4a / §A2 enum)", d.Reason, types.PeerStatusReasonTransportError))
+		}
+		if d.Reason == "" {
+			return WarnCheck("escalation landed but carries no reason — §A2 leaves `reason` OPTIONAL to emit, so this passes; flagged because the preserved transport-error is what makes a seam-opened episode legible in the tree")
+		}
+		return PassCheck("suspect(transport-error) → disconnected escalated after the §A1 eviction, with no dispatch traffic, and the originating reason preserved (§5.4a)")
 	})
 
 	return r.Results()

@@ -82,6 +82,7 @@ var copies = []corpusCopy{
 }
 
 var (
+	flagCheck        = flag.Bool("check", false, "re-encode both sources and assert the COMMITTED .cbor match; writes nothing (the source-produces-artifact gate)")
 	flagBoth         = flag.Bool("both", false, "build both copies and enforce .cbor byte-identity between them (arch 3042bd8)")
 	flagDry          = flag.Bool("n", false, "dry run — report the shas that WOULD be written, write nothing")
 	flagDiag         = flag.String("diag", "", "build a single .diag (with -out)")
@@ -99,6 +100,8 @@ func main() {
 			die("-verify-legacy requires -expect")
 		}
 		verifyLegacy(*flagVerifyLegacy, *flagExpect)
+	case *flagCheck:
+		checkBoth()
 	case *flagBoth:
 		buildBoth()
 	case *flagDiag != "":
@@ -127,6 +130,63 @@ func verifyLegacy(path, expect string) {
 		die("ENCODER MISMATCH — this encoder does not reproduce the pinned artifact, so nothing it produces can be trusted as the corpus")
 	}
 	fmt.Println("            ✓ byte-identical — the encoder reproduces the pinned artifact")
+}
+
+// checkBoth re-encodes both sources and asserts the COMMITTED .cbor files are
+// exactly what those sources produce. It writes nothing and is safe to run in
+// any gate, against a tree it does not own.
+//
+// THIS IS THE CHECK WHOSE ABSENCE CAUSED A-3, and it is worth naming precisely
+// because the existing verifier does NOT cover it. `v767-corpus-verify` asserts
+// the artifact against a pinned sha — it proves the artifact is the one we
+// expect, and says nothing about whether the SOURCE still produces it. That is
+// exactly the gap the corpus fell through: the F16 correction was applied to
+// the .cbor and never to the .diag, both files stayed internally plausible, the
+// corpus verified 52/0 against itself for two months, and the drift was
+// invisible to every check that reads the artifact.
+//
+// Source-produces-artifact is a different assertion from artifact-is-expected,
+// and only the second one existed.
+func checkBoth() {
+	type built struct {
+		copy  corpusCopy
+		bytes []byte
+	}
+	var out []built
+	for _, c := range copies {
+		out = append(out, built{c, encodeFile(c.diag)})
+	}
+
+	if len(out) == 2 && shaHex(out[0].bytes) != shaHex(out[1].bytes) {
+		die("the two SOURCES encode to different bytes (%s vs %s) — arch 3042bd8 makes .cbor byte-identity the standing invariant, so the .diag files have diverged in encoded content (id/description are encoded; comments are not)",
+			shaHex(out[0].bytes), shaHex(out[1].bytes))
+	}
+
+	drift := false
+	for _, b := range out {
+		onDisk, err := os.ReadFile(b.copy.cbor)
+		if err != nil {
+			die("read %s: %v", b.copy.cbor, err)
+		}
+		got, want := shaHex(onDisk), shaHex(b.bytes)
+		if got == want {
+			fmt.Printf("  ✓ %-42s %d B  sha256 %s\n", b.copy.name, len(onDisk), got)
+			continue
+		}
+		drift = true
+		fmt.Printf("  ✗ %-42s DRIFT\n", b.copy.name)
+		fmt.Printf("      committed .cbor : %d B  sha256 %s\n", len(onDisk), got)
+		fmt.Printf("      .diag encodes to: %d B  sha256 %s\n", len(b.bytes), want)
+		fmt.Printf("      source: %s\n", b.copy.diag)
+	}
+	if drift {
+		die("the committed artifact is NOT what the committed source produces.\n" +
+			"Do not 'fix' this by rebuilding until you know WHICH SIDE is right — that is the\n" +
+			"decision the June regen skipped. The .cbor was correct and the .diag stale once\n" +
+			"already (the F16 widths), so rebuilding blindly would have destroyed the good copy.\n" +
+			"Diff the two, decide, then run -both.")
+	}
+	fmt.Println("\n✓ both artifacts are exactly what their sources produce, and are byte-identical to each other")
 }
 
 func buildBoth() {

@@ -52,15 +52,58 @@ func NewEntity(entityType string, data cbor.RawMessage) (Entity, error) {
 	return NewEntityFormat(defaultHashAlgorithm, entityType, data)
 }
 
+// typeFloorPinned names the one entity type whose authoring format is not a
+// caller's choice: ENTITY-CORE-PROTOCOL §4.5a item 1a (v7.77) pins the
+// `system/peer` identity entity to the ECFv1-SHA-256 floor **unconditionally**
+// — on every connection, whatever the active format, and whatever the peer's
+// home format.
+//
+// Spelled as a literal rather than imported from core/types, because `entity`
+// sits to the LEFT of `types` in the core DAG and may not import it. The two
+// constants are pinned together by TestFloorPinnedTypeMatchesTypesPackage in
+// core/types.
+const typeFloorPinned = "system/peer"
+const floorPinnedAlgorithm = hash.AlgorithmSHA256
+
 // NewEntityFormat creates an entity with the given type and data, computing
 // its content hash under the requested content_hash_format code (v7.67 §4).
 // Supported formats: 0x00 ECFv1-SHA-256, 0x01 ECFv1-SHA-384.
+//
+// **`system/peer` under any non-floor format is refused** (§4.5a item 1a). Two
+// pinned constructors — crypto.Keypair.IdentityEntity and types.PeerData.ToEntity
+// — already hard-code the floor, but they were the only thing enforcing 1a, and
+// a rule enforced only by the constructors that happen to obey it is a rule any
+// direct call can route around. Two callers already did: cmd/v767-corpus-verify
+// hand-built a `system/peer` under 0x01 and asserted the resulting hash, and the
+// crypto_agility hash_format_sha_384_1 check authored one to prove SHA-384 works
+// — both green, both certifying a construction the spec forbids. Architecture
+// ruled that shape a fixture defect on 2026-08-12 (entity-core-protocol 213a2ac,
+// SEEDS.md §5: *"a vector that exercises a forbidden construction and passes by
+// routing around the code that would forbid it certifies the opposite of the
+// rule"*) and required the bypass be made impossible rather than corrected in
+// place. This is that guard.
+//
+// It also closes a latent authoring bug that had nothing to do with fixtures:
+// NewEntity takes the process-global default, so on a peer started
+// `--hash-type sha384` any `NewEntity("system/peer", …)` would have authored the
+// identity into the second address space item 1a exists to collapse.
+//
+// Scope note — this guards the AUTHORING path only. Validating a *received*
+// `system/peer` that claims 0x01 goes through Validate/hash.Validate and is
+// deliberately not touched here: refusing a peer's identity on receipt is a
+// handshake-rejection behavior with its own conformance surface, and no landed
+// spec text says a receiver MUST reject rather than fail the ordinary
+// signer-equality check. Routed rather than assumed.
 func NewEntityFormat(alg byte, entityType string, data cbor.RawMessage) (Entity, error) {
 	if entityType == "" {
 		return Entity{}, fmt.Errorf("%w: type is empty", ecerrors.ErrInvalidEntity)
 	}
 	if len(data) == 0 {
 		return Entity{}, fmt.Errorf("%w: data is empty", ecerrors.ErrInvalidEntity)
+	}
+	if entityType == typeFloorPinned && alg != floorPinnedAlgorithm {
+		return Entity{}, fmt.Errorf("%w: %s is pinned to the ECFv1-SHA-256 floor (content_hash_format 0x%02x) unconditionally per ENTITY-CORE-PROTOCOL §4.5a item 1a — refusing to author it under 0x%02x; use crypto.Keypair.IdentityEntity or types.PeerData.ToEntity",
+			ecerrors.ErrInvalidEntity, typeFloorPinned, floorPinnedAlgorithm, alg)
 	}
 
 	h, err := hash.ComputeFormat(alg, entityType, data)

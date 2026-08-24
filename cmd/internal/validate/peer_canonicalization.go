@@ -331,9 +331,16 @@ func runPeerCanonicalization(ctx context.Context, client *PeerClient) []CheckRes
 		if err != nil {
 			return FailCheck(fmt.Sprintf("v7.64-shape ECF encode: %v", err))
 		}
-		v764Ent, err := entity.NewEntity("system/peer", cbor.RawMessage(v764Bytes))
+		// At the FLOOR, not the process default. §4.5a item 1a pins `system/peer`
+		// to ECFv1-SHA-256 unconditionally, and it says nothing about data
+		// shape — a v7.64-shape identity is floor-pinned exactly as a
+		// v7.65-shape one is. Under `--hash-type sha384` NewEntity took 0x01
+		// here and the check still PASSed, because the only comparison it makes
+		// is between two entities this function built itself; a self-consistent
+		// pair of wrong forms is invisible by construction.
+		v764Ent, err := entity.NewEntityFormat(hash.AlgorithmSHA256, "system/peer", cbor.RawMessage(v764Bytes))
 		if err != nil {
-			return FailCheck(fmt.Sprintf("v7.64-shape NewEntity: %v", err))
+			return FailCheck(fmt.Sprintf("v7.64-shape NewEntityFormat: %v", err))
 		}
 
 		// Shapes have distinct content_hashes (peer_id in/out of basis).

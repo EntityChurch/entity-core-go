@@ -58,6 +58,11 @@ func runSecurity(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("handler_scope_denied_core_1", "V7 v7.72 §9.0 carve-out (--profile core variant)")
 	r.Declare("resource_scope_denied", "V7 §5.4")
 	r.Declare("expired_capability_denied", "V7 §5.2")
+	// The write half of the temporal class. The 2026-08-12 §2.4a sweep found
+	// that all five previously-unprobed deny callers drive a GET, so expiry
+	// had never been asserted against an operation that would WRITE — where
+	// conjuncts 2+3 stop being vacuous.
+	r.Declare("expired_capability_denied_write", "V7 §5.2 + GUIDE-CONFORMANCE §2.4a")
 	r.Declare("not_before_denied", "V7 §5.2")
 	r.Declare("marker_path_injection_contained", "EXTENSION-CONTINUATION §3.10.3 + arch ruling 13: wire-supplied marker coordinates MUST NOT be trusted as path components")
 
@@ -130,6 +135,10 @@ func runSecurity(ctx context.Context, client *PeerClient) []CheckResult {
 
 	r.Run("expired_capability_denied", func() CheckOutcome {
 		return toOutcome(checkExpiredCapabilityDenied(ctx, client))
+	})
+
+	r.Run("expired_capability_denied_write", func() CheckOutcome {
+		return toOutcome(checkExpiredCapabilityDeniedWrite(ctx, client))
 	})
 
 	r.Run("not_before_denied", func() CheckOutcome {
@@ -232,6 +241,11 @@ func sendTamperedExecuteWithClass(
 	}
 
 	if class == authzClassDeny {
+		// §2.4a classification (swept 2026-08-12): every tamper vector routed
+		// through here drives the `system/tree` GET built above — a READ, so
+		// conjuncts 2+3 are vacuous for all of them. `nil` is a decision, and
+		// it stays correct only while this helper builds a get: a future
+		// tamper caller that drives a write MUST pass a probe.
 		return sendAndExpectAuthzDeny(client, env, checkName, specRef)
 	}
 	return sendAndExpectAuthDeny(client, env, checkName, specRef)
@@ -297,6 +311,28 @@ type denyStateProbe struct {
 	// "nothing new appeared under the prefix" is the only assertable
 	// form of "it did not publish").
 	UnchangedPrefix string
+	// NoMintedCapability asserts the REFUSED RESPONSE carries no capability
+	// token — the correct form of conjunct 3 for an operation whose output
+	// is returned rather than written.
+	//
+	// This mode exists because `system/capability:request` has no tree
+	// probe to point at, and that is a SPEC FACT, not a gap in our
+	// knowledge (it was G-1a's open question, closed 2026-08-12):
+	// ENTITY-CORE-PROTOCOL §6.2 specifies `request` as *"returning a
+	// system/capability/grant containing the issued token"* — and names a
+	// written path for `revoke` (`system/capability/revocations/{hex}`) and
+	// for `configure` (`system/capability/policy/{pattern}`) while naming
+	// none for `request`. §5.1 then classifies the result explicitly:
+	// *"wire-only caps from request/delegate"* have no recorded binding and
+	// `capability_path_for` returns null for them.
+	//
+	// So an AbsentPath probe here would assert a requirement no conformant
+	// peer has — the failure mode the nil probe was left visible to avoid.
+	// The publication surface for a minted cap IS the response, so that is
+	// where conjunct 3 is asserted: a peer that answers 403 and still hands
+	// back a usable token has published, and every status-only check —
+	// and both tree-probe modes — would pass it.
+	NoMintedCapability bool
 }
 
 func sendAndExpectAuthzDeny(client *PeerClient, env entity.Envelope, checkName, specRef string) CheckResult {
@@ -341,15 +377,52 @@ func sendAndExpectAuthzDenyProbed(
 	}
 
 	// Conjunct 1 satisfied. Now the two that a status-only check misses.
+	msg, ok := applyDenyStateProbe(ctx, client, respEnv, probe, beforeKeys)
+	if !ok {
+		return fail(catSecurity, checkName, specRef, msg)
+	}
+	return pass(catSecurity, checkName, specRef, msg)
+}
+
+// applyDenyStateProbe evaluates §2.4a conjuncts 2 and 3 against a refusal that
+// has already satisfied conjunct 1, returning the outcome message and whether
+// the conjuncts hold. A nil probe means the guarded operation is a read, where
+// both are vacuous.
+//
+// It is category-agnostic and shared on purpose. The conjuncts are one rule,
+// and a second helper with its own copy of them is how two instruments end up
+// with two opinions — the drift that put the v767 corpus out of sync with its
+// own source for two months. A category-specific deny helper supplies its own
+// category to pass/fail and calls THIS for the effect half.
+func applyDenyStateProbe(
+	ctx context.Context,
+	client *PeerClient,
+	respEnv entity.Envelope,
+	probe *denyStateProbe,
+	beforeKeys map[string]bool,
+) (string, bool) {
 	if probe == nil {
-		return pass(catSecurity, checkName, specRef,
-			"correctly rejected with 403 (v7.71 §3.3 authz-class DENY); guarded op is a read, so §2.4a conjuncts 2+3 are vacuous")
+		return "correctly rejected with 403 (v7.71 §3.3 authz-class DENY); guarded op is a read, so §2.4a conjuncts 2+3 are vacuous", true
 	}
 	if probe.AbsentPath != "" {
 		if ent, _, err := client.TreeGet(ctx, probe.AbsentPath); err == nil {
-			return fail(catSecurity, checkName, specRef, fmt.Sprintf(
+			return fmt.Sprintf(
 				"refused with 403 but PUBLISHED at %s (type=%q) — §2.4a conjuncts 2+3: a 403 that writes anyway passes every status-only check",
-				probe.AbsentPath, ent.Type))
+				probe.AbsentPath, ent.Type), false
+		}
+	}
+	if probe.NoMintedCapability {
+		// Conjunct 3 for a return-valued op: the refusal must not carry the
+		// artifact the operation would have produced. `included` is where a
+		// minted token and its grant wrapper both ride — a §6.2 grant
+		// response carries the token entity there, so scanning it covers
+		// both the wrapper and the token itself.
+		for h, ent := range respEnv.Included {
+			if ent.Type == types.TypeCapToken || ent.Type == types.TypeCapGrant {
+				return fmt.Sprintf(
+					"refused with 403 but included a %s (%s) — §2.4a conjunct 3: a 403 that hands back a usable token has published it",
+					ent.Type, h.String()), false
+			}
 		}
 	}
 	if probe.UnchangedPrefix != "" {
@@ -362,13 +435,12 @@ func sendAndExpectAuthzDenyProbed(
 		}
 		if len(added) > 0 {
 			sort.Strings(added)
-			return fail(catSecurity, checkName, specRef, fmt.Sprintf(
+			return fmt.Sprintf(
 				"refused with 403 but %d new entr(y/ies) appeared under %s: %s — §2.4a conjuncts 2+3",
-				len(added), probe.UnchangedPrefix, strings.Join(added, ", ")))
+				len(added), probe.UnchangedPrefix, strings.Join(added, ", ")), false
 		}
 	}
-	return pass(catSecurity, checkName, specRef,
-		"correctly rejected with 403 AND wrote nothing (§2.4a all three conjuncts: refused, no state change, no publication)")
+	return "correctly rejected with 403 AND wrote nothing (§2.4a all three conjuncts: refused, no state change, no publication)", true
 }
 
 // listingKeys returns the child-key set under prefix, or an empty set if
@@ -764,6 +836,9 @@ func checkGranteeAuthorMismatch(ctx context.Context, client *PeerClient) CheckRe
 	if validatorIdentity := client.IdentityEntity(); !validatorIdentity.ContentHash.IsZero() {
 		env.Included[validatorIdentity.ContentHash] = validatorIdentity
 	}
+	// §2.4a classification (swept 2026-08-12): the guarded op is a
+	// `system/tree` GET — a READ, so conjuncts 2+3 are vacuous and the status
+	// assertion is complete. `nil` here is a decision, not an oversight.
 	return sendAndExpectAuthzDeny(client, env, "grantee_author_mismatch", "V7 §5.2")
 }
 
@@ -830,6 +905,10 @@ func checkForgedRootCapability(ctx context.Context, client *PeerClient) CheckRes
 	}
 
 	env := entity.NewEnvelope(execEntity, included)
+	// §2.4a classification (swept 2026-08-12): READ (`system/tree` get) —
+	// conjuncts 2+3 vacuous. `nil` is a decision. See the family note on
+	// checkExpiredCapabilityDeniedWrite: the chain-root class is exercised
+	// only against a read, and that is recorded rather than closed.
 	return sendAndExpectAuthzDeny(client, env, "forged_root_capability", "V7 §5.5")
 }
 
@@ -882,13 +961,19 @@ func checkHandlerScopeDeniedCore(ctx context.Context, client *PeerClient) CheckR
 		},
 		"system/capability", "request", // exceeds: wrong handler (capability is core)
 		"system/validate/security-test",
-		// §2.4a: probe DELIBERATELY nil. `capability:request` mints a cap,
-		// so conjuncts 2+3 are NOT vacuous here — but the write location
-		// was not established, and a probe against a guessed path would
-		// pass for the wrong reason, which is the exact defect §2.4a
-		// exists to catch. Left unasserted and visible rather than
-		// asserted and wrong. See WORK-STATUS G-1a.
-		nil,
+		// §2.4a: CLOSED 2026-08-12 (was G-1a, deliberately unasserted).
+		// `capability:request` mints a cap, so conjuncts 2+3 are not
+		// vacuous — but there is no path to probe, and that is normative,
+		// not unknown: §6.2 specifies `request` as RETURNING a grant and
+		// names written paths only for `revoke` and `configure`, while §5.1
+		// classifies request/delegate output as WIRE-ONLY (capability_path_for
+		// returns null). An AbsentPath probe would have asserted a
+		// requirement no conformant peer has — which is why it was left nil
+		// rather than guessed.
+		//
+		// The publication surface is the RESPONSE, so that is what is
+		// asserted: refused AND no token handed back.
+		&denyStateProbe{NoMintedCapability: true},
 	)
 }
 
@@ -945,7 +1030,79 @@ func checkExpiredCapabilityDenied(ctx context.Context, client *PeerClient) Check
 		return fail(catSecurity, "expired_capability_denied", "V7 §5.2", "build: "+err.Error())
 	}
 
+	// §2.4a classification (swept 2026-08-12): READ (`system/tree` get) —
+	// conjuncts 2+3 vacuous, `nil` is a decision. The WRITE half of this
+	// class is a separate vector; see checkExpiredCapabilityDeniedWrite.
 	return sendAndExpectAuthzDeny(client, env, "expired_capability_denied", "V7 §5.2")
+}
+
+// checkExpiredCapabilityDeniedWrite is the write half of the temporal class,
+// and it exists because of what the 2026-08-12 §2.4a sweep found: every one of
+// the five unprobed deny callers drives a `system/tree` GET. So the entire
+// temporal / chain-root / self-attribution family — expiry, not_before, forged
+// root, grantee mismatch, envelope tampering — was exercised **only against a
+// read**, where §2.4a conjuncts 2+3 are vacuous by construction.
+//
+// That is a coverage hole of the §5.2b shape (absent coverage reading as
+// covered), not a defect in any of those checks: a peer that verifies expiry on
+// its read path and not on its write path passes all five and still performs
+// the write. The status assertion cannot see it, because the status is correct.
+//
+// SAMPLED DELIBERATELY, AND SAID OUT LOUD (no silent caps): this closes the
+// hole for the **temporal** class only — the classic "checked in the wrong
+// place" bug, and the one whose verification is most often hoisted into a
+// read-side cache. `forged_root_capability` (chain-root) and
+// `grantee_author_mismatch` (self-attribution) remain read-only and are
+// recorded as such above; extending them is cheap and deliberately not done
+// here rather than left implied.
+func checkExpiredCapabilityDeniedWrite(ctx context.Context, client *PeerClient) CheckResult {
+	kp := client.Keypair()
+	identity := client.IdentityEntity()
+	parentCap := client.CapEntity()
+	uri := fmt.Sprintf("entity://%s/system/tree", client.RemotePeerID())
+
+	// Same expired child cap as the read row — same construction path, so a
+	// divergence between the two rows is attributable to read-vs-write and
+	// nothing else. (Doctrine 2: a negative half needs a positive control
+	// built the identical way.)
+	now := uint64(time.Now().UnixMilli())
+	expired := now - 1000
+	tokenData := types.CapabilityTokenData{
+		Grants: []types.GrantEntry{{
+			Handlers:   types.CapabilityScope{Include: []string{"*"}},
+			Resources:  types.CapabilityScope{Include: []string{"*"}},
+			Operations: types.CapabilityScope{Include: []string{"*"}},
+		}},
+		Granter:   types.SingleSigGranter(identity.ContentHash),
+		Grantee:   identity.ContentHash,
+		Parent:    &parentCap.ContentHash,
+		CreatedAt: now - 2000,
+		ExpiresAt: &expired,
+	}
+
+	childCap, childCapSig, err := createCapabilityToken(tokenData, kp, identity)
+	if err != nil {
+		return fail(catSecurity, "expired_capability_denied_write", "V7 §5.2 + GUIDE-CONFORMANCE §2.4a", "create cap: "+err.Error())
+	}
+
+	params, _, err := buildSimpleGetParams()
+	if err != nil {
+		return fail(catSecurity, "expired_capability_denied_write", "V7 §5.2 + GUIDE-CONFORMANCE §2.4a", "setup: "+err.Error())
+	}
+
+	// A write to a path we control, so conjunct 2+3 absence is directly
+	// assertable — the same target the operation-scope row uses.
+	const writePath = "system/validate/security-test"
+	resource := &types.ResourceTarget{Targets: []string{writePath}}
+
+	env, err := buildDelegatedExecute(client, childCap, childCapSig, uri, "put", params, resource)
+	if err != nil {
+		return fail(catSecurity, "expired_capability_denied_write", "V7 §5.2 + GUIDE-CONFORMANCE §2.4a", "build: "+err.Error())
+	}
+
+	return sendAndExpectAuthzDenyProbed(ctx, client, env,
+		"expired_capability_denied_write", "V7 §5.2 + GUIDE-CONFORMANCE §2.4a",
+		&denyStateProbe{AbsentPath: writePath})
 }
 
 func checkNotBeforeDenied(ctx context.Context, client *PeerClient) CheckResult {
@@ -985,6 +1142,9 @@ func checkNotBeforeDenied(ctx context.Context, client *PeerClient) CheckResult {
 		return fail(catSecurity, "not_before_denied", "V7 §5.2", "build: "+err.Error())
 	}
 
+	// §2.4a classification (swept 2026-08-12): READ (`system/tree` get) —
+	// conjuncts 2+3 vacuous, `nil` is a decision. The temporal class's write
+	// half is covered once, by checkExpiredCapabilityDeniedWrite.
 	return sendAndExpectAuthzDeny(client, env, "not_before_denied", "V7 §5.2")
 }
 

@@ -32,6 +32,7 @@ import (
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/handler"
+	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/types"
 
 	"github.com/fxamacker/cbor/v2"
@@ -191,7 +192,19 @@ func (h *DispatchOutboundHandler) Handle(ctx context.Context, req *handler.Reque
 			"rebuild reentry_capability entity: "+err.Error())
 		return resp, nil
 	}
-	granter, err := entity.NewEntity(granterEnt.Type, granterEnt.Data)
+	// The granter is a `system/peer`, so it is rebuilt at the ECFv1-SHA-256
+	// FLOOR rather than under the process-global authoring default:
+	// ENTITY-CORE-PROTOCOL §4.5a item 1a pins the identity entity to the floor
+	// unconditionally, whatever this peer's home format. NewEntity here was a
+	// latent defect on a `--hash-type sha384` peer — it rebuilt the caller's
+	// identity under 0x01, manufacturing the second content_hash for one
+	// identity that item 1a exists to collapse, and it did so on the exact
+	// surface where §5.2's `grantee == author` equality is evaluated. It never
+	// failed a check because both sides of every comparison downstream were
+	// wrong the same way (the Go-on-Go deception `AGENTS.md` warns about);
+	// core/entity now refuses the construction outright, which is what turned
+	// it from invisible into a 400.
+	granter, err := entity.NewEntityFormat(hash.AlgorithmSHA256, granterEnt.Type, granterEnt.Data)
 	if err != nil {
 		resp, _ := handler.NewErrorResponse(400, "invalid_params",
 			"rebuild reentry_granter entity: "+err.Error())

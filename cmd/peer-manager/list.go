@@ -18,8 +18,12 @@ func cmdList() {
 		return
 	}
 
-	fmt.Printf("%-15s %-6s %-8s %-25s %-50s %7s  %-8s\n", "NAME", "TYPE", "STORAGE", "ADDR", "PEER_ID", "PID", "STATUS")
-	fmt.Printf("%-15s %-6s %-8s %-25s %-50s %7s  %-8s\n", "----", "----", "-------", "----", "-------", "---", "------")
+	// OWNER is printed because this state file is shared by every session on
+	// the host (go, rust, py all drive this binary). Without it, `list` gives
+	// no way to tell whose peer is whose — which is how `stop --all` used to
+	// take out another session's run.
+	fmt.Printf("%-15s %-6s %-8s %-25s %-50s %7s  %-12s %-8s\n", "NAME", "TYPE", "STORAGE", "ADDR", "PEER_ID", "PID", "OWNER", "STATUS")
+	fmt.Printf("%-15s %-6s %-8s %-25s %-50s %7s  %-12s %-8s\n", "----", "----", "-------", "----", "-------", "---", "-----", "------")
 
 	for name, entry := range state.Peers {
 		status := "running"
@@ -34,7 +38,11 @@ func cmdList() {
 		if storage == "" {
 			storage = "memory"
 		}
-		fmt.Printf("%-15s %-6s %-8s %-25s %-50s %7d  %-8s\n", name, peerType, storage, entry.Addr, entry.PeerID, entry.PID, status)
+		owner := entry.Owner
+		if owner == "" {
+			owner = "-"
+		}
+		fmt.Printf("%-15s %-6s %-8s %-25s %-50s %7d  %-12s %-8s\n", name, peerType, storage, entry.Addr, entry.PeerID, entry.PID, owner, status)
 		_ = name
 	}
 }

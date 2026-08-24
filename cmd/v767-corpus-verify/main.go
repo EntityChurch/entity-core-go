@@ -52,18 +52,58 @@ const (
 	// taken on report — `sha256sum` at the landed path returns
 	// 8e7c5232…e31f982e. Path changed; pin did not.
 	//
-	// Still owed, and ours to propose rather than arch's to hand down: the
-	// M3/M6 re-stamp for §4.5a item 1a (six assertions, one root cause) plus a
-	// re-authored `hash-format-sha-384.2.rehash`, which asserts a system/peer
-	// entity under content_hash_format = 0x01 that 1a forbids and stays green
-	// only because the verifier builds that entity by hand and bypasses the
-	// pinned constructor — a vector testing the thing it bypasses. That
-	// re-stamp WILL change expectedSHA. Protocol: we post the six failing
-	// assertions with derived expectations, arch ratifies and lands the
-	// regenerated corpus, and only THEN does this tool get wired into
-	// validate-complete.sh (never hand-edit a red run green).
+	// RE-STAMP STATUS [2026-08-12, read live in every tree named]. The round
+	// trip is at SEEDS.md §5 step 4, and step 4 is architecture's.
+	//
+	//   step 2 (Go)          DONE — six derived expectations, one root cause,
+	//                        in docs/validation/spec-issues/2026-08-11-d-v767-m3-m6-restamp-proposal.md
+	//   step 3 (rust + py)   DONE, 3-of-3 byte-equal — py re-derived all six
+	//                        independently at entity-core-py da5e820 (`test(v767):
+	//                        re-derive M3/M6 under §4.5a item 1a — byte-equal to
+	//                        go's re-stamp`); rust matched at entity-core-rust
+	//                        21eb223.
+	//   step 4 (arch)        OWED. entity-core-protocol HEAD is 3042bd8 and its
+	//                        two commits today (213a2ac, 3042bd8) touched
+	//                        SEEDS.md prose ONLY — `git show --stat` on both,
+	//                        one file each. conformance-vectors-v1.cbor is
+	//                        unchanged: same 9236 B, same sha256 as the pin
+	//                        below, mtime 08-11. So the six M3/M6 assertions
+	//                        are still red HERE, and this tool is still NOT
+	//                        wireable into validate-complete.sh (never
+	//                        hand-edit a red run green). That is A-3's real
+	//                        blocker; "unblocked" described step 3, not this.
+	//
+	// The re-stamp WILL change expectedSHA, and it MUST land in both copies
+	// together — `crypto-agility/agility-vectors-v1.cbor` is byte-identical
+	// today (arch ruled 3042bd8: identical .cbor is the standing invariant, and
+	// re-stamping one copy is what would CREATE the divergence).
+	//
+	// OUR HALF OF THE OTHER RULING IS DONE. Arch also ruled
+	// `hash-format-sha-384.2.rehash` INVERTED rather than retargeted — it
+	// asserts a system/peer under content_hash_format = 0x01 that §4.5a item 1a
+	// forbids, and stayed green only because this verifier built the entity by
+	// hand and bypassed the pinned constructor. The verifier now asserts the
+	// refusal instead (verifyIdentityUnderNonFloorRefused), goes through the
+	// pinned constructor for the floor vector, and the bypass is closed at the
+	// constructor itself so it cannot recur (core/entity.NewEntityFormat).
+	// That assertion needs no field the re-stamp has yet to land, so it is
+	// green today; the vector's residual 0x01 pin is reported as a NOTE.
 	defaultPath = "../entity-core-protocol/specs/test-vectors/v767/conformance-vectors-v1.cbor"
-	expectedSHA = "8e7c5232f64bee83d628679f930c771e4e49f2f1e37d19e41e0d7838e31f982e"
+
+	// MOVED 2026-08-12 — A-3 closed. Both blockers landed at core-protocol
+	// `8d38e62` (the F16 sweep-back into both sources, and the M3/M6
+	// description reconciliation), so `v767-corpus-build -both` ran for the
+	// first time and produced this digest from BOTH sources, byte-identical.
+	//
+	// 8e7c5232…e31f982e was the June artifact, and it is not gone: it remains
+	// the encoder's pinned self-check. `v767-corpus-build -verify-legacy`
+	// re-encodes the `.diag` frozen at core-protocol `56d4de4` (with the six
+	// F16 input-width corrections applied) and asserts it reproduces
+	// 8e7c5232… exactly. That pair is FROZEN on purpose: it is the only
+	// evidence that this encoder reproduces bytes it did not itself author,
+	// and it must not be re-pinned to a moving source. Re-verified green in
+	// the same run that produced the digest below.
+	expectedSHA = "6d0f4a94a7f52d0f41fbf83becfe082e59cdb86991e55e3d47d708e8af932e9e"
 )
 
 var (
@@ -193,9 +233,9 @@ func main() {
 		case "key-type-ed448.4.signature":
 			verifyEd448Signature(c, id, v)
 		case "hash-format-sha-384.1.inherited_sha256_pin":
-			verifyPeerEntityUnderFormat(c, id, v, 0x00, "canonical_content_hash")
+			verifyIdentityAtFloor(c, id, v, "canonical_content_hash")
 		case "hash-format-sha-384.2.rehash":
-			verifyPeerEntityUnderFormat(c, id, v, 0x01, "canonical_content_hash")
+			verifyIdentityUnderNonFloorRefused(c, id, v)
 		case "matrix.M2":
 			verifyMatrix(c, id, v, false /*sha384gate*/)
 		case "matrix.M3", "matrix.M6":
@@ -306,32 +346,96 @@ func verifyEd448Signature(c *checks, id string, v map[string]any) {
 		fmt.Sprintf("siglen=%d", len(sig)))
 }
 
-func verifyPeerEntityUnderFormat(c *checks, id string, v map[string]any, alg byte, wantKey string) {
-	in := mustMap(v, "input")
-	dataIn := mustMap(in, "data")
-	pub := mustBytes(dataIn, "public_key")
-	kt := mustStr(dataIn, "key_type")
-	want := mustBytes(v, wantKey)
+// peerDataFromVector reads the {public_key, key_type} pair a
+// hash-format-sha-384.* vector carries at input.data.
+func peerDataFromVector(v map[string]any) types.PeerData {
+	dataIn := mustMap(mustMap(v, "input"), "data")
+	return types.PeerData{
+		PublicKey: mustBytes(dataIn, "public_key"),
+		KeyType:   mustStr(dataIn, "key_type"),
+	}
+}
 
-	// Author the system/peer entity directly under the requested format using
-	// the same ECF encoding path the protocol uses on the wire.
-	peerData := types.PeerData{
-		KeyType:   kt,
-		PublicKey: pub,
-	}
-	dataCBOR, err := ecf.Encode(peerData)
+// verifyIdentityAtFloor checks the vector's pinned identity hash THROUGH THE
+// PINNED CONSTRUCTOR (types.PeerData.ToEntity), not by hand-encoding and
+// choosing a format.
+//
+// The distinction is the whole point and it is not stylistic. This function
+// used to be `verifyPeerEntityUnderFormat(alg, …)`, taking the format as a
+// parameter and calling entity.NewEntityFormat — which is how it could ALSO
+// serve the 0x01 vector below, and therefore how the corpus could assert a
+// construction ENTITY-CORE-PROTOCOL §4.5a item 1a forbids and still report
+// PASS. A verifier that reaches around the constructor whose rule it is
+// testing has no way to observe the rule. Going through the constructor means
+// this check now fails if the floor pin is ever loosened, which is the
+// behavior a conformance tool is for.
+func verifyIdentityAtFloor(c *checks, id string, v map[string]any, wantKey string) {
+	want := mustBytes(v, wantKey)
+	ent, err := peerDataFromVector(v).ToEntity()
 	if err != nil {
-		c.record(id, "content_hash", false, fmt.Sprintf("ecf.Encode: %v", err))
+		c.record(id, "content_hash(floor)", false, fmt.Sprintf("PeerData.ToEntity: %v", err))
 		return
 	}
-	ent, err := entity.NewEntityFormat(alg, types.TypePeer, dataCBOR)
-	if err != nil {
-		c.record(id, "content_hash", false, fmt.Sprintf("NewEntityFormat: %v", err))
+	if ent.ContentHash.Algorithm != hash.AlgorithmSHA256 {
+		c.record(id, "content_hash(floor)", false,
+			fmt.Sprintf("pinned constructor authored under 0x%02x, want the 0x00 floor", ent.ContentHash.Algorithm))
 		return
 	}
-	c.record(id, fmt.Sprintf("content_hash(alg=0x%02x)", alg),
+	c.record(id, "content_hash(floor=0x00)",
 		bytesEq(ent.ContentHash.Bytes(), want),
 		hx(ent.ContentHash.Bytes()))
+}
+
+// verifyIdentityUnderNonFloorRefused is the INVERTED form of
+// hash-format-sha-384.2.rehash, per architecture's 2026-08-12 ruling
+// (entity-core-protocol 213a2ac, SEEDS.md §5).
+//
+// The vector as authored asserts a `system/peer` content_hash under
+// content_hash_format = 0x01. §4.5a item 1a (v7.77) pins that entity to the
+// ECFv1-SHA-256 floor unconditionally, so the vector describes a construction
+// the spec forbids — and it stayed green only because this verifier built the
+// entity by hand and routed around the constructor that forbids it. Arch ruled
+// it INVERTED rather than retargeted: the vector becomes the guard for the rule
+// that retired it.
+//
+// So the assertion is a refusal, and it is checkable against the corpus as it
+// stands today — it needs no field the re-stamp has yet to land. The stale
+// `canonical_content_hash` the vector still carries is reported as a NOTE
+// rather than silently ignored, because a pin that no longer means anything and
+// is not mentioned is indistinguishable from one that was checked.
+func verifyIdentityUnderNonFloorRefused(c *checks, id string, v map[string]any) {
+	pd := peerDataFromVector(v)
+	dataCBOR, err := ecf.Encode(pd)
+	if err != nil {
+		c.record(id, "non-floor-refused", false, fmt.Sprintf("ecf.Encode: %v", err))
+		return
+	}
+	_, err = entity.NewEntityFormat(hash.AlgorithmSHA384, types.TypePeer, dataCBOR)
+	c.record(id, "non-floor-refused(0x01)", err != nil, refusalDetail(err))
+
+	// And the floor form must still author — otherwise the guard above would be
+	// a SHA-256-only lock rather than §1.2's single named exception.
+	ent, err := pd.ToEntity()
+	if err != nil {
+		c.record(id, "floor-still-authors", false, fmt.Sprintf("PeerData.ToEntity: %v", err))
+		return
+	}
+	c.record(id, "floor-still-authors", ent.ContentHash.Algorithm == hash.AlgorithmSHA256,
+		hx(ent.ContentHash.Bytes()))
+
+	if stale, ok := v["canonical_content_hash"].([]byte); ok && len(stale) > 0 && stale[0] == hash.AlgorithmSHA384 {
+		fmt.Printf("  NOTE %-50s vector still carries the pre-inversion 0x01 pin %s — SEEDS.md §5 step 4 (arch) owed\n",
+			id+"/pre-inversion-pin", hx(stale))
+	}
+}
+
+// refusalDetail renders a refusal for the report: the error when the guard
+// fired, and an explicit statement of what was accepted when it did not.
+func refusalDetail(err error) string {
+	if err != nil {
+		return fmt.Sprintf("refused: %v", err)
+	}
+	return "ACCEPTED — §4.5a item 1a requires the constructor to refuse system/peer under 0x01"
 }
 
 func verifyMatrix(c *checks, id string, v map[string]any, sha384gate bool) {

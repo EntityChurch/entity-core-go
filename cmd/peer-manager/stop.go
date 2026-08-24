@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"syscall"
 	"time"
 )
 
 func cmdStop(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: peer-manager stop <name> | --all\n")
+		fmt.Fprintf(os.Stderr, "Usage: peer-manager stop <name> | --all [--any-owner]\n")
 		os.Exit(2)
 	}
 
@@ -21,8 +22,9 @@ func cmdStop(args []string) {
 	}
 
 	if args[0] == "--all" {
-		for name := range state.Peers {
-			stopPeer(state, name)
+		anyOwner := len(args) > 1 && args[1] == "--any-owner"
+		if !stopAll(state, anyOwner) {
+			return // refused; nothing changed, so do not rewrite state
 		}
 	} else {
 		stopPeer(state, args[0])
@@ -32,6 +34,73 @@ func cmdStop(args []string) {
 		fmt.Fprintf(os.Stderr, "Error saving state: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// stopAll stops the peers this session owns. Returns false if it refused,
+// in which case nothing was touched.
+//
+// THE INCIDENT THIS EXISTS FOR (2026-08-12). The state file is one file per
+// HOST (~/.entity/peer-manager.json), and the go, rust and py sessions all
+// drive this same binary against it. `--all` used to iterate every entry, so
+// any session's teardown killed every other session's peers — a core-rust
+// session stopped core-py's `pyf1` mid-run and had to report it, which is the
+// only reason anyone found out. The peers are cheap to restart; a validation
+// run that silently lost its counterpart halfway is not, because it fails as
+// a conformance result rather than as an error.
+//
+// The rule: `--all` stops only peers whose Owner matches ENTITY_PEER_OWNER,
+// and REFUSES (touching nothing) rather than guessing when it cannot attribute
+// them. `--any-owner` is the explicit override, because "tear down everything
+// on this host" is a legitimate thing to want — it just has to be said out
+// loud rather than being the default meaning of "all".
+func stopAll(state *State, anyOwner bool) bool {
+	me := currentOwner()
+	mine, theirs := partitionByOwner(state, me, anyOwner)
+
+	if len(theirs) > 0 {
+		fmt.Fprintf(os.Stderr, "Not stopping %d peer(s) this session cannot claim:\n", len(theirs))
+		for _, name := range theirs {
+			e := state.Peers[name]
+			owner := e.Owner
+			if owner == "" {
+				owner = "<unattributed>"
+			}
+			fmt.Fprintf(os.Stderr, "  %-15s type=%-7s owner=%-12s started=%s\n", name, e.Type, owner, e.StartedAt)
+		}
+		if me == "" {
+			fmt.Fprintf(os.Stderr, "This session set no ENTITY_PEER_OWNER, so it owns nothing and --all can claim nothing.\n")
+		}
+		fmt.Fprintf(os.Stderr, "Stop them by name, or pass --any-owner to stop every peer on this host.\n")
+	}
+
+	if len(mine) == 0 {
+		fmt.Fprintf(os.Stderr, "No peers owned by this session; nothing stopped.\n")
+		return len(theirs) == 0 // nothing to save either way, but distinguish refusal from empty
+	}
+	for _, name := range mine {
+		stopPeer(state, name)
+	}
+	return true
+}
+
+// partitionByOwner splits the state's peers into the ones this caller may
+// stop under `--all` and the ones it may not. Pure, so the attribution rule
+// is testable without starting or killing anything — the rule is the whole
+// point of the fix, and a rule with no test is how it comes back.
+func partitionByOwner(state *State, me string, anyOwner bool) (mine, theirs []string) {
+	for name, entry := range state.Peers {
+		switch {
+		case anyOwner:
+			mine = append(mine, name)
+		case me != "" && entry.Owner == me:
+			mine = append(mine, name)
+		default:
+			theirs = append(theirs, name)
+		}
+	}
+	sort.Strings(mine)
+	sort.Strings(theirs)
+	return mine, theirs
 }
 
 func stopPeer(state *State, name string) {

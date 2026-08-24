@@ -1,9 +1,12 @@
 package entity
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"go.entitychurch.org/entity-core-go/core/ecf"
+	ecerrors "go.entitychurch.org/entity-core-go/core/errors"
 	"go.entitychurch.org/entity-core-go/core/hash"
 
 	"github.com/fxamacker/cbor/v2"
@@ -336,5 +339,62 @@ func TestExtractHandlerPathSpellingsAgree(t *testing.T) {
 		if fromURI != rest {
 			t.Fatalf("ExtractHandlerPath lost the handler path for %q: got %q", rest, fromURI)
 		}
+	}
+}
+
+// §4.5a item 1a (v7.77): `system/peer` is authored at the ECFv1-SHA-256 floor
+// unconditionally. The rule was previously held only by the two pinned
+// constructors, which meant a direct NewEntityFormat call — or NewEntity on a
+// peer started --hash-type sha384 — could author an identity into the second
+// address space item 1a exists to collapse. Both happened, in our own fixtures,
+// and both PASSED, which is why the guard lives at the constructor rather than
+// in the callers.
+func TestFloorPinnedTypeRefusesNonFloorFormat(t *testing.T) {
+	data := makeRawData(t, map[string]any{
+		"public_key": make([]byte, 32),
+		"key_type":   "ed25519",
+	})
+
+	if _, err := NewEntityFormat(hash.AlgorithmSHA256, typeFloorPinned, data); err != nil {
+		t.Fatalf("the floor itself must still be authorable: %v", err)
+	}
+
+	_, err := NewEntityFormat(hash.AlgorithmSHA384, typeFloorPinned, data)
+	if err == nil {
+		t.Fatalf("NewEntityFormat authored %s under SHA-384 — §4.5a item 1a forbids it", typeFloorPinned)
+	}
+	if !errors.Is(err, ecerrors.ErrInvalidEntity) {
+		t.Fatalf("want ErrInvalidEntity, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "item 1a") {
+		t.Fatalf("the refusal must name the rule it enforces, got %q", err.Error())
+	}
+}
+
+// The process-global default is the other route in, and the one that is not a
+// fixture problem: a peer started --hash-type sha384 calls SetDefaultHashAlgorithm,
+// and every NewEntity after it picks 0x01 up implicitly.
+func TestFloorPinnedTypeRefusesNonFloorProcessDefault(t *testing.T) {
+	prev := DefaultHashAlgorithm()
+	SetDefaultHashAlgorithm(hash.AlgorithmSHA384)
+	defer SetDefaultHashAlgorithm(prev)
+
+	data := makeRawData(t, map[string]any{
+		"public_key": make([]byte, 32),
+		"key_type":   "ed25519",
+	})
+	if _, err := NewEntity(typeFloorPinned, data); err == nil {
+		t.Fatalf("NewEntity authored %s under the SHA-384 process default — §4.5a item 1a forbids it", typeFloorPinned)
+	}
+
+	// Every OTHER type still follows the home format — 1a is the single named
+	// exception to §1.2, not a network-wide SHA-256 lock.
+	ent, err := NewEntity("system/content/blob", data)
+	if err != nil {
+		t.Fatalf("non-pinned type under the SHA-384 default: %v", err)
+	}
+	if ent.ContentHash.Algorithm != hash.AlgorithmSHA384 {
+		t.Fatalf("non-pinned type authored under 0x%02x, want the home format 0x%02x",
+			ent.ContentHash.Algorithm, hash.AlgorithmSHA384)
 	}
 }

@@ -53,23 +53,44 @@ var ed448FixtureSeed = func() [crypto.Ed448SeedLen]byte {
 var ed448FixtureMessage = []byte("v7.67 Phase 1 cohort cross-impl Ed448 fixture")
 
 // sha384FixturePublicKey reuses the v7.66 §7.2 canonical fixture (0xAA × 64).
-// HASH-FORMAT-SHA-384-1 hashes the same system/peer({pub=0xAA×64,
-// key_type="experimental-test"}) entity under content_hash_format=0x01
-// (SHA-384) and confirms the digest byte-equals across impls.
+//
+// It is now HASH-FORMAT-SHA-384-1's NEGATIVE subject, not its positive one
+// [changed 2026-08-12]. This comment used to read "hashes the same
+// system/peer(…) entity under content_hash_format=0x01 (SHA-384) and confirms
+// the digest byte-equals across impls" — which described the construction
+// ENTITY-CORE-PROTOCOL §4.5a item 1a forbids. The identity fixture is used to
+// assert the refusal; the positive SHA-384 surfaces run on a content entity.
 var sha384FixturePublicKey = agilityFixturePublicKey
 
+// EVERY CHECK IN THIS CATEGORY IS A `[self]` CHECK — GUIDE-CONFORMANCE §5.2
+// `[MUST; ruled 2026-08-09]`. The runner takes a client and discards it: these
+// are offline KATs against this validator's own `hash`, `crypto`, `entity` and
+// `types` packages, on pinned fixtures. Nothing here asks the peer anything.
+//
+// THEY WERE NOT LABELLED UNTIL 2026-08-12 (g), AND THE MISS IS DATABLE. The
+// §5.2 rule was surfaced by this repo on 2026-08-09 (`17fc8ed`) after a sweep
+// found *"29 client-free checks across five categories"* — encryption 9,
+// discovery 7, relay 7, published_root 3, registry 3, which is exactly 29.
+// `crypto_agility` has existed since the v0.8.0 release commit and is a sixth.
+// So for three days every run against **rust or python** scored four rows as
+// peer-attributable that measured **go**, in a category the v7.72 §9.0 CORE
+// PROFILE includes — the precise defect §5.2 was written to stop: *"a sibling
+// could ship none of the rule and the row would not move."*
+//
+// They stay in the suite and keep counting, per §5.2. What changes is that the
+// report can now say whose code they measured.
 func runCryptoAgility(ctx context.Context, client *PeerClient) []CheckResult {
 	_ = ctx
 	_ = client
 	r := NewCheckRunner(catCryptoAgility)
 
-	r.Declare("key_type_ed448_1",
+	r.DeclareSelf("key_type_ed448_1",
 		"v7.67 §3 (KEY-TYPE-ED448-1: system/peer({public_key, key_type=\"ed448\"}) constructs canonical-form (0x02, 0x01) peer_id; content_hash byte-equal cross-impl; sign/verify round-trip on fixed 57-byte Ed448 seed)")
-	r.Declare("hash_format_sha_384_1",
-		"v7.67 §4 (HASH-FORMAT-SHA-384-1: content_hash under content_hash_format=0x01 byte-equal cross-impl for the v7.66 0xAA×64 fixture entity, re-hashed under SHA-384; wire size 49 bytes = 1 + 48)")
-	r.Declare("varint_multibyte_1",
+	r.DeclareSelf("hash_format_sha_384_1",
+		"v7.67 §4 + §4.5a item 1a (HASH-FORMAT-SHA-384-1: content_hash under content_hash_format=0x01 on an ordinary CONTENT entity — algorithm byte, 48-byte digest, 49-byte wire, dispatch, FromBytes round-trip, manual SHA-384, NewEntityFormat agreement — AND the negative half: authoring system/peer under 0x01 is refused, its floor form still authors at 0x00)")
+	r.DeclareSelf("varint_multibyte_1",
 		"v7.67 §5.4 normative (VARINT-MULTIBYTE-1: impl decodes a system/hash with multi-byte LEB128 format-code 0x80 0x01 and rejects with unsupported_content_hash_format since 0x80 (=128) is not allocated)")
-	r.Declare("varint_reserved_ff_1",
+	r.DeclareSelf("varint_reserved_ff_1",
 		"v7.67 §5.4 normative (VARINT-RESERVED-FF-1: impl rejects construction of system/peer with key_type integer value 255 (varint 0xFF 0x01); impl rejects system/hash with format-code integer value 255)")
 
 	r.Run("key_type_ed448_1", func() CheckOutcome {
@@ -141,20 +162,40 @@ func runCryptoAgility(ctx context.Context, client *PeerClient) []CheckResult {
 	})
 
 	r.Run("hash_format_sha_384_1", func() CheckOutcome {
-		// Re-hash the v7.66 §7.2 canonical fixture
-		// (system/peer({pub=0xAA×64, key_type="experimental-test"}))
-		// under content_hash_format=0x01 (SHA-384). Confirms:
+		// Exercise content_hash_format=0x01 (SHA-384) end to end. Confirms:
 		//   - Algorithm byte = 0x01
 		//   - Effective digest length = 48 bytes
 		//   - Wire size = 49 bytes (1 byte format-code + 48 byte digest)
 		//   - Display prefix = "ecfv1-sha384:"
 		//   - Manual SHA-384 over the ECF-encoded {data, type} matches
-		ent, err := types.PeerData{
-			PublicKey: sha384FixturePublicKey,
-			KeyType:   crypto.KeyTypeStringExperimentalTest,
+		//
+		// THE SUBJECT CHANGED, and that is the finding, not a refactor
+		// [2026-08-12]. This check used to re-hash the v7.66 §7.2 canonical
+		// fixture — a `system/peer` — under 0x01, and surface 7 below authored
+		// that entity. ENTITY-CORE-PROTOCOL §4.5a item 1a (v7.77) pins
+		// `system/peer` to the ECFv1-SHA-256 floor UNCONDITIONALLY, so the
+		// construction this check was proving works is the one the spec
+		// forbids: it certified the opposite of the rule and stayed green by
+		// calling entity.NewEntityFormat directly instead of the pinned
+		// constructor. Architecture ruled that exact shape a defect in the
+		// corpus twin of this check on 2026-08-12 (entity-core-protocol
+		// 213a2ac, SEEDS.md §5, on `hash-format-sha-384.2.rehash`) — the
+		// GUIDE-CONFORMANCE §2.4a failure mode, in a fixture.
+		//
+		// So the agility surfaces now run on an ordinary CONTENT entity, which
+		// is the type class that legitimately carries a home format (§1.2), and
+		// the identity fixture is kept below for the inverted assertion: 1a
+		// MUST be refused. Nothing was pinned to the old subject — the SHA-384
+		// side of this check never had a cross-impl expected value (that is the
+		// v767 corpus's job), only the structural properties re-asserted below.
+		ent, err := types.ContentBlobData{
+			TotalSize: 64,
+			ChunkSize: 64,
+			Chunking:  0,
+			Chunks:    nil,
 		}.ToEntity()
 		if err != nil {
-			return FailCheck(fmt.Sprintf("HASH-FORMAT-SHA-384-1: build canonical fixture entity: %v", err))
+			return FailCheck(fmt.Sprintf("HASH-FORMAT-SHA-384-1: build SHA-384 agility subject entity: %v", err))
 		}
 		h384, err := hash.ComputeFormat(hash.AlgorithmSHA384, ent.Type, ent.Data)
 		if err != nil {
@@ -204,8 +245,31 @@ func runCryptoAgility(ctx context.Context, client *PeerClient) []CheckResult {
 			return FailCheck("HASH-FORMAT-SHA-384-1: NewEntityFormat content_hash diverges from ComputeFormat")
 		}
 
-		return PassCheck(fmt.Sprintf("HASH-FORMAT-SHA-384-1: %s (wire %d bytes; format-code 0x%02x; effective digest %d bytes)",
-			h384, len(wire), h384.Algorithm, len(h384.EffectiveDigest())))
+		// Surface 8 — the NEGATIVE half (§2.4a): agility stops at the one entity
+		// §4.5a item 1a exempts. Authoring the v7.66 §7.2 identity fixture under
+		// 0x01 MUST be refused, and refused by the CONSTRUCTOR, so the bypass
+		// that made the old version of this check green cannot recur. Its floor
+		// form must still author, or the guard would be a SHA-256-only lock
+		// rather than the single named exception to §1.2.
+		idFixture := types.PeerData{
+			PublicKey: sha384FixturePublicKey,
+			KeyType:   crypto.KeyTypeStringExperimentalTest,
+		}
+		idFloor, err := idFixture.ToEntity()
+		if err != nil {
+			return FailCheck(fmt.Sprintf("HASH-FORMAT-SHA-384-1: the pinned constructor refused the identity fixture at the FLOOR: %v", err))
+		}
+		if idFloor.ContentHash.Algorithm != hash.AlgorithmSHA256 {
+			return FailCheck(fmt.Sprintf("HASH-FORMAT-SHA-384-1: pinned constructor authored %s under 0x%02x, want the 0x00 floor (§4.5a item 1a)",
+				types.TypePeer, idFloor.ContentHash.Algorithm))
+		}
+		if _, err := entity.NewEntityFormat(hash.AlgorithmSHA384, types.TypePeer, idFloor.Data); err == nil {
+			return FailCheck(fmt.Sprintf("HASH-FORMAT-SHA-384-1: authored %s under content_hash_format 0x01 — §4.5a item 1a pins the identity entity to the 0x00 floor unconditionally and the constructor MUST refuse it",
+				types.TypePeer))
+		}
+
+		return PassCheck(fmt.Sprintf("HASH-FORMAT-SHA-384-1: %s on %s (wire %d bytes; format-code 0x%02x; effective digest %d bytes); %s refused under 0x01 and authored at %s (§4.5a item 1a)",
+			h384, ent.Type, len(wire), h384.Algorithm, len(h384.EffectiveDigest()), types.TypePeer, idFloor.ContentHash))
 	})
 
 	r.Run("varint_multibyte_1", func() CheckOutcome {

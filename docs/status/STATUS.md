@@ -27,16 +27,80 @@ live-HTTP transport surfaces.
 
 ## Where we left off
 
-> **NEXT SESSION STARTS HERE:**
+> **NEXT SESSION STARTS HERE — 2026-08-12 (c): the new MUST fails in BOTH siblings, and R-6
+> found a row nothing measured.**
+> **To arch (send this):**
+> `docs/status/ROUTING-2026-08-12-c-r6-found-an-unmeasured-row-and-the-new-must-fails-in-both-siblings.md`
+> — one ask, in
+> `docs/validation/spec-issues/2026-08-12-c-the-202-pending-review-carrier-is-unpinned-and-all-three-differ.md`.
+> **To rust + py (send this):** `docs/status/PEER-PACKET-2026-08-12-c-rust-and-py-the-escalation-fails-in-both.md`,
+> evidence in `docs/validation/reports/2026-08-12-c-rust-and-py-measured-the-5-4a-escalation-fails-in-both.md`.
+>
+> **The headline: we ran rust `21eb223` and py `2c1aa1b` ourselves.**
+> `liveness_escalate_after_eviction` (§5.4a `[MUST]`, ratified this morning) **FAILs in both** —
+> the same defect go carried until `b55101f`, so it was the **cohort's**, not ours. Consequence in
+> both: no `disconnected` write ⇒ **§4.1 reconnect never fires on a transport-error-first path.**
+> **A-6 is answered by measurement, not by asking two teams.** py additionally fails the three
+> §6a.9 layer-1 rows (**R-3**, previously arch's source read, now probed); rust is converged there.
+> **Gate: 1571 · 0F · 0S · 0W / 633 core / 55 / 19, three consecutive runs** (pass 3 18 → 19 —
+> `409 name_taken`, a pinned row that had **no check at all**).
+>
+> **PRIOR (2026-08-12): the cohort is aligned and F-1 is closed.**
+> `docs/status/ROUTING-2026-08-12-full-status-to-arch-one-real-defect-and-two-gaps-of-the-same-shape.md`
+> — full status plus **two small asks**, both in
+> `docs/validation/spec-issues/2026-08-12-a1-eviction-orphans-the-5-4-escalation.md`.
+> **Live tracker:** `docs/status/WORK-STATUS.md` (the *state*; dated ROUTING-*/HANDOFF-*
+> docs are the *record*).
+>
+> **GATE: 1570 · 0F · 0S · 0W / 633 · 0F · 0W (core profile) / 55 / 18 at `dfaebfe`,
+> four consecutive runs** — **four** passes now, all exit 0, and **zero WARNs for the
+> first time.** The F-1 flake caveat is retired — not by re-running until green, but
+> because F-1 was diagnosed and fixed.
+>
+> **Every open item in WORK-STATUS §2 is closed** (G-1a, N-2, G-2a, W-1), and three of
+> them changed what the numbers mean rather than just adding coverage:
+> **`--profile core` now runs in the gate** as pass 1b (it was invoked by nothing);
+> **both standing WARNs were checks measuring the wrong thing** — `eval_depth_limit` was
+> measuring tail-call optimization, and `r3_connection_flood` scored a close-based
+> refusal as no refusal at all, so **implementing §4.10(c) turned its WARN into a FAIL.**
+> Go now bounds inbound admission (`WithMaxInboundConnections`, default 128).
+> **`validate-peer` scores all three impls — re-run `resource_bounds` against this build
+> before trusting an older number for any peer.**
+>
+> **F-1 was a real conformance defect, not a flaky check.** The §A1 transport-error
+> demotion **evicts the pooled binding as it writes `suspect`** (`demotePeer`) and the
+> keepalive loop **exits when unbound** (`exitKeepaliveIfUnbound`) — the same event on the
+> pooled path, so the §5.4 `suspect → disconnected` escalation was **structurally
+> unreachable**. The peer stayed `suspect` forever, the disconnect subscription never
+> fired, and **§4.1 reconnect never triggered**. Fixed at `b55101f` by taking §5.4's own
+> grace step before exiting; pinned by a deterministic in-process test (failed 100 %
+> pre-fix) and a mutation-tested negative half guarding the evict-without-demote paths.
+>
+> **The cohort packet is fully discharged and both peers pushed** — rust `21eb223`
+> (0 unpushed, incl. the `revoke`/`renew` security fix), py `2c1aa1b` (18 commits,
+> 0 unpushed, incl. the `system/*` reservation hole our new check found on their first
+> run). **§5.5a is settled three ways by measurement; our delegated-cap finding was
+> retracted** — no ruling needed.
+>
+> **The open asks are arch's:** A-5 (the §A1/§5.4 composition + the §A2 reason + the
+> vector gap) and **A-2**, the v767 M3/M6 re-stamp, still unratified and still blocking
+> A-3. **Nothing in WORK-STATUS §2 is open** — the next session picks up from §3
+> (blocked/awaiting) or starts something new.
+>
+> **Do NOT start `ext/identity` pre-rotation** (§4 gated on §6.1, §6.1 on a matrix that
+> does not exist). **Before anything else: check every sibling's `git log` including
+> `origin/`.** A ruling that is not pushed has not been made.
+
+> **[SUPERSEDED by the 2026-08-12 block above — the packet was carried, both peers
+> discharged it, and the F-1 caveat is retired.]**
 > `docs/status/HANDOFF-2026-08-12-clean-foundation-and-what-to-build-next.md`
 > — the foundation is clean and measured; that doc carries what to build on it,
 > what NOT to start, and the reconnect criteria for arch/browser-rust.
-> **Live tracker:** `docs/status/WORK-STATUS.md` (updated in place; the *state*, where
-> dated ROUTING-*/HANDOFF-* docs are the *record*).
-> **Ready to send, needs a human:**
+> **Was ready to send, since carried:**
 > `docs/status/PEER-PACKET-2026-08-12-rust-and-py-restart-here.md` — one packet
 > consolidating everything rust and py owe, superseding the 08-11 handoffs neither read.
-> rust is carrying a **live security hole** (unauthenticated `revoke`/`renew`).
+> rust was carrying a **live security hole** (unauthenticated `revoke`/`renew`) — **fixed
+> at rust `0caf911`.**
 >
 > **GATE: 1569 · 0F · 0S / 55 · 0F · 0S / 18 · 0F · 0S**, measured 2026-08-11 (f), all
 > three passes exit 0. **1567 → 1569** because the §2.4a register negative half had been

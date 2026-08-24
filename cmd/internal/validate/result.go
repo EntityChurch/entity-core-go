@@ -102,6 +102,13 @@ type Report struct {
 	Checks        []CheckResult `json:"checks"`
 	BudgetWarning string        `json:"budget_warning,omitempty"`
 
+	// Exclusions are the pinned vectors this suite does not exercise against
+	// the peer, stated positively (see exclusions.go). They are NOT results:
+	// they never enter Summary, never count as a pass, and are printed
+	// whether or not anything failed — the claim they guard against ("the
+	// pair is covered") is made by a reader of a GREEN report.
+	Exclusions []DeclaredExclusion `json:"declared_exclusions,omitempty"`
+
 	// allowedSkips holds check names the user explicitly marked as
 	// "skip this — intentional", via -allow-skip on the validate-peer
 	// CLI. A skipped check listed here is NOT counted as a failure by
@@ -121,8 +128,9 @@ type PeerInfo struct {
 // NewReport creates a new report for the given peer address.
 func NewReport(addr string) *Report {
 	return &Report{
-		PeerAddr:  addr,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		PeerAddr:   addr,
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		Exclusions: DeclaredExclusions(),
 	}
 }
 
@@ -450,6 +458,26 @@ func (r *Report) WriteText(w io.Writer, failuresOnly bool) {
 			fmt.Fprintf(w, "          - %s\n", line)
 		}
 		fmt.Fprintln(w, "          scripts/validate-complete.sh configures every surface in one command.")
+	}
+
+	// DECLARED EXCLUSIONS — printed on every run, including a clean one and
+	// including -failures-only. A skip says "this did not run here"; an
+	// exclusion says "this CANNOT run here, and here is where it is verified
+	// instead." Suppressing it on a green run would restore exactly the
+	// reading §5.4a forbids: a report against rust or py that looks like it
+	// covered the pair.
+	if len(r.Exclusions) > 0 {
+		fmt.Fprintf(w, "\nDECLARED EXCLUSIONS: %d pinned vector(s) are NOT exercised against %s by this\n", len(r.Exclusions), r.PeerAddr)
+		fmt.Fprintln(w, "          suite. They are not passes and are not counted. Reporting one as a")
+		fmt.Fprintln(w, "          cross-impl vector pass is a false conformance claim (NETWORK §5.4a,")
+		fmt.Fprintln(w, "          GUIDE-CONFORMANCE §5.2b.1).")
+		for _, e := range r.Exclusions {
+			fmt.Fprintf(w, "          - %s  [%s]\n", e.VectorID, e.SpecRef)
+			fmt.Fprintf(w, "              not drivable: %s\n", e.Why)
+			fmt.Fprintf(w, "              satisfied by: %s\n", e.SatisfiedBy)
+			fmt.Fprintf(w, "              mutation:     %s\n", e.Mutation)
+			fmt.Fprintf(w, "              void when:    %s\n", e.Voids)
+		}
 	}
 
 	if r.BudgetWarning != "" {

@@ -132,7 +132,40 @@ func (p *Peer) keepaliveLoop(peerID crypto.PeerID) {
 
 		conn := p.pooledEndpoint(peerID)
 		if conn == nil {
+			// The binding is gone. It may have been evicted by the §A1
+			// transport-error demotion, which wrote `suspect` and left the
+			// escalation to us (PROPOSAL-NETWORK-LIVENESS-REACTIVE-BUILDOUT
+			// §A1: "the keepalive/grace path (§5.4) is what escalates suspect
+			// → disconnected"). Exiting here on sight of a nil binding made
+			// that escalation STRUCTURALLY UNREACHABLE — the demotion evicts
+			// and the loop that owes the follow-up write dies with it, so the
+			// peer stayed `suspect` forever and the disconnect subscription
+			// (§5.4: "this tree write fires the disconnect subscription →
+			// continuation handles reconnection") never fired.
+			//
+			// So take §5.4's own grace step — `sleep(timeout_ms); if not
+			// reconnected: update_peer_status(disconnected)` — before
+			// deciding. Waiting first also closes the race the status read
+			// would otherwise have against the demotion's own write: the
+			// eviction happens under the pool lock and the status write lands
+			// after it, so a check made at eviction time can see `connected`
+			// and wrongly conclude there is nothing to escalate.
+			select {
+			case <-p.serveCtx.Done():
+				p.dropKeepaliveLoop(peerID)
+				return
+			case <-time.After(timeout):
+			}
+			if p.pooledEndpoint(peerID) != nil {
+				// Reconnected within the grace — §5.4's `reconnected(peer_id)`
+				// branch. Keep watching the new binding.
+				missed = 0
+				timer.Reset(interval)
+				continue
+			}
 			if p.exitKeepaliveIfUnbound(peerID) {
+				p.escalateUnboundSuspect(peerID, fmt.Errorf(
+					"keepalive: connection gone and no reconnect within the §5.4 grace (%v)", timeout))
 				return
 			}
 			// Rebound concurrently — keep watching the new binding.

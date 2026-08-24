@@ -474,6 +474,178 @@ func TestLivenessDisconnectedOnKeepaliveMiss(t *testing.T) {
 	}
 }
 
+// TestLivenessEscalatesAfterTransportErrorEviction is the F-1 regression: the
+// §5.4 `suspect → disconnected` escalation MUST still happen when the failure
+// episode began at the §A1 transport seam rather than at an idle keepalive
+// miss.
+//
+// The defect this pins was structural, not marginal. The §A1 demotion evicts
+// the pooled binding as it writes `suspect`; the keepalive loop's lifetime was
+// bound to that binding, so the loop that owes the escalation exited the moment
+// the demotion fired. The peer then stayed `suspect` forever — the disconnect
+// subscription never fired, so §4.1 reconnect never triggered, and the
+// Amendment 12 §A3 consumer latency contract ("an idle-dead connection demotes
+// within the keepalive envelope") was silently unmet on every
+// transport-error-first path.
+//
+// It surfaced as a 1-in-4 flake on the conformance suite's
+// `liveness_disconnected_on_keepalive_miss` (bimodal: ~6 s when the keepalive
+// loop reached max_missed first, the full deadline when the transport seam won
+// the race), which is exactly how a race between two paths to the same write
+// reads from outside. Before the fix this test failed 100 % of the time — the
+// in-process form removes the race and makes the defect deterministic.
+func TestLivenessEscalatesAfterTransportErrorEviction(t *testing.T) {
+	server := startPeer(t)
+	client := startPeer(t,
+		WithRemotePeer(server.PeerID(), server.Addr().String()),
+		WithKeepaliveConfig(fastKeepalive(40, 120, 2)),
+	)
+
+	ctx := context.Background()
+	remoteTreeURI := fmt.Sprintf("entity://%s/system/tree", server.PeerID())
+	getReq, getResource, _ := tree.CreateGetRequest("some/path", "entity")
+
+	if _, err := client.remoteExecute(ctx, remoteTreeURI, "get", getReq, getResource); err != nil {
+		t.Fatalf("first remote execute (establish): %v", err)
+	}
+	waitLivenessStatus(t, client, server, types.PeerStatusConnected)
+
+	// Kill the server and dispatch once: the §A1 seam writes suspect AND
+	// evicts the pooled binding, which is the precondition under test.
+	server.Close()
+	if _, err := client.remoteExecute(ctx, remoteTreeURI, "get", getReq, getResource); err == nil {
+		t.Fatalf("expected transport error dispatching over dropped server")
+	}
+	d, ok := livenessStatusOf(t, client, server)
+	if !ok || d.Status != types.PeerStatusSuspect {
+		t.Fatalf("precondition: want suspect after transport error, got %+v (present=%v)", d, ok)
+	}
+	if _, bound := poolBound(client, server.PeerID()); bound {
+		t.Fatalf("precondition: the §A1 demotion should have evicted the pooled binding")
+	}
+
+	// No further dispatch: only the §5.4 grace path can move it from here.
+	// Envelope is 40ms x 2 + 120ms = 200ms; 3s is ~15x that.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		d, _ = livenessStatusOf(t, client, server)
+		if d.Status == types.PeerStatusDisconnected {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status never escalated past %q/%q — the §5.4 escalation is orphaned by the §A1 eviction (last: %+v)", d.Status, d.Reason, d)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// §5.4a [MUST]: the escalation preserves the episode's ORIGINATING reason.
+	// This episode began at the §A1 seam, so it stays transport-error — it is
+	// NOT re-stamped to keepalive-miss, which would assert pings that were
+	// never sent (the connection was gone before the loop could send one).
+	if d.Reason != types.PeerStatusReasonTransportError {
+		t.Fatalf("reason = %q, want %q — §5.4a: the escalation carries the reason the demotion that OPENED the episode wrote, not the timer that confirmed it", d.Reason, types.PeerStatusReasonTransportError)
+	}
+	// failing_since stamps the START of the episode — the transport error —
+	// and the escalation must carry it forward, not re-stamp it.
+	if d.FailingSince == 0 {
+		t.Fatalf("escalation write lost failing_since: %+v", d)
+	}
+}
+
+// TestLivenessNoEscalationWithoutFailureEpisode is the negative half of the
+// F-1 fix: the grace path escalates ONLY from `suspect`. An evicted binding
+// with no demotion behind it (the §10.2 dispatch-fallback and the RELAY
+// terminal hop both evict WITHOUT demoting, per the §A1 scope pin) must not
+// be turned into a `disconnected` write by the keepalive loop's teardown.
+// Without this the fix would manufacture demotions on paths the spec
+// explicitly excludes from the demotion seam.
+//
+// THIS TEST IS THE SATISFACTION MODE FOR A PINNED VECTOR, NOT A UNIT TEST.
+// §5.4a [corrected 2026-08-12] pins NET-LIVENESS-NO-ESCALATION-WITHOUT-EPISODE-1
+// and — because the state it needs is not constructible by a conformance
+// client without RELAY — states that it is satisfied in-process, PROVIDED the
+// implementation records a declared exclusion naming the mutation. Ours is
+// `cmd/internal/validate/exclusions.go`, printed by every validate-peer run so
+// no report can read as having covered this over the wire. The mutation: drop
+// the `suspect` guard from the grace path and this test MUST fail. If you
+// change either side, change the other — an exclusion that names a test that
+// no longer fails under its mutation is worse than no exclusion at all.
+func TestLivenessNoEscalationWithoutFailureEpisode(t *testing.T) {
+	server := startPeer(t)
+	client := startPeer(t,
+		WithRemotePeer(server.PeerID(), server.Addr().String()),
+		WithKeepaliveConfig(fastKeepalive(40, 120, 2)),
+	)
+
+	ctx := context.Background()
+	remoteTreeURI := fmt.Sprintf("entity://%s/system/tree", server.PeerID())
+	getReq, getResource, _ := tree.CreateGetRequest("some/path", "entity")
+	if _, err := client.remoteExecute(ctx, remoteTreeURI, "get", getReq, getResource); err != nil {
+		t.Fatalf("first remote execute (establish): %v", err)
+	}
+	waitLivenessStatus(t, client, server, types.PeerStatusConnected)
+
+	// Evict the binding directly, writing no status — the evict-only shape.
+	client.remote.mu.Lock()
+	delete(client.remote.conns, server.PeerID())
+	client.remote.mu.Unlock()
+
+	// Well past grace + interval: status must still be connected.
+	time.Sleep(600 * time.Millisecond)
+	d, ok := livenessStatusOf(t, client, server)
+	if !ok {
+		t.Fatalf("status entity disappeared")
+	}
+	if d.Status != types.PeerStatusConnected {
+		t.Fatalf("status = %q (reason %q) after an evict-only unbind, want %q — the grace path escalated without a failure episode", d.Status, d.Reason, types.PeerStatusConnected)
+	}
+}
+
+// TestLivenessNoEscalationMutationHasTeeth EXECUTES the mutation the declared
+// exclusion names, rather than describing it.
+//
+// GUIDE-CONFORMANCE §5.2b.1, sharpened 2026-08-12 (d) to core-py's stronger
+// form: a declared exclusion's mutation must be executed and dated, because
+// a mutation that is only written down is a claim nobody checked — py's §5.5a
+// control and its mutation test both ran against a malformed probe and
+// neither could have failed. Our own version named the mutation and cited a
+// manual run, which is the weaker form the rule now rejects.
+//
+// This runs the same scenario as the test above with the scope pin removed
+// and asserts the escalation DOES fire. If this ever passes with the guard
+// intact, or fails with it removed, the exclusion above is worthless and the
+// negative half of NET-LIVENESS-NO-ESCALATION-WITHOUT-EPISODE-1 is unguarded.
+func TestLivenessNoEscalationMutationHasTeeth(t *testing.T) {
+	suspectScopeGuardDisabled = true
+	t.Cleanup(func() { suspectScopeGuardDisabled = false })
+
+	server := startPeer(t)
+	client := startPeer(t,
+		WithRemotePeer(server.PeerID(), server.Addr().String()),
+		WithKeepaliveConfig(fastKeepalive(40, 120, 2)),
+	)
+
+	ctx := context.Background()
+	remoteTreeURI := fmt.Sprintf("entity://%s/system/tree", server.PeerID())
+	getReq, getResource, _ := tree.CreateGetRequest("some/path", "entity")
+	if _, err := client.remoteExecute(ctx, remoteTreeURI, "get", getReq, getResource); err != nil {
+		t.Fatalf("first remote execute (establish): %v", err)
+	}
+	waitLivenessStatus(t, client, server, types.PeerStatusConnected)
+
+	client.remote.mu.Lock()
+	delete(client.remote.conns, server.PeerID())
+	client.remote.mu.Unlock()
+
+	time.Sleep(600 * time.Millisecond)
+	d, ok := livenessStatusOf(t, client, server)
+	if !ok {
+		t.Fatalf("status entity disappeared")
+	}
+	if d.Status != types.PeerStatusDisconnected {
+		t.Fatalf("with the scope guard REMOVED the evict-only unbind still did not escalate (status %q) — the guard is not what makes the negative test pass, so that test cannot fail and the declared exclusion is empty", d.Status)
+	}
+}
+
 // TestKeepaliveNoCadenceWrites pins §A4 (rung-2 ruling 1) as an invariant:
 // the status entity is TRANSITION-written only. Keepalive successes update
 // the impl-internal freshness bookkeeping (observable in-package via

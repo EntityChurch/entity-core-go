@@ -91,8 +91,26 @@ func regExecute(ctx context.Context, client *PeerClient, handlerURI, op string, 
 }
 
 // regBind issues a :bind. Returns the resulting binding hash (or zero +
-// status when the bind errors).
+// status when the bind errors). Callers that need the error CODE — every
+// caller checking a §6.5 pinned row — use regBindFull; this wrapper exists
+// for the callers that legitimately only need the hash.
 func regBind(ctx context.Context, client *PeerClient, name, targetPeerID string, notes string) (hash.Hash, uint, error) {
+	h, status, _, err := regBindFull(ctx, client, name, targetPeerID, notes)
+	return h, status, err
+}
+
+// regBindFull is regBind with the error code preserved.
+//
+// R-6 audit (2026-08-12 c): this helper is the registry category's own
+// instance of the blind-extractor defect §5.2b.2 was written for. regBind
+// returned `(hash, status, error)` and DISCARDED the result body on any
+// non-200 — so the code never reached a caller, and `bind_invalid_name`
+// could only ever assert the status half of a row the spec pins as
+// `code | status`. bind_already_exists worked around it by re-driving
+// regExecute inline; a third copy of that workaround was the signal to fix
+// the plumbing instead. The extractor is fixed here, at the helper, so the
+// checks inherit the code by construction rather than each remembering to.
+func regBindFull(ctx context.Context, client *PeerClient, name, targetPeerID string, notes string) (hash.Hash, uint, string, error) {
 	req := types.LocalNameBindRequestData{
 		Name:         name,
 		TargetPeerID: targetPeerID,
@@ -102,20 +120,27 @@ func regBind(ctx context.Context, client *PeerClient, name, targetPeerID string,
 	}
 	ent, err := req.ToEntity()
 	if err != nil {
-		return hash.Hash{}, 0, err
+		return hash.Hash{}, 0, "", err
 	}
 	status, result, err := regExecute(ctx, client, "system/registry/local-name", "bind", ent)
 	if err != nil {
-		return hash.Hash{}, status, err
+		return hash.Hash{}, status, "", err
 	}
 	if status != 200 {
-		return hash.Hash{}, status, nil
+		// The body of a refusal is an error entity; its `code` is the half
+		// of the row that carries the contract. A body that does not decode
+		// is reported as such rather than silently becoming "".
+		var errData types.ErrorData
+		if err := ecf.Decode(result.Data, &errData); err != nil {
+			return hash.Hash{}, status, "", nil
+		}
+		return hash.Hash{}, status, errData.Code, nil
 	}
 	res, err := types.LocalNameBindResultDataFromEntity(result)
 	if err != nil {
-		return hash.Hash{}, status, fmt.Errorf("decode bind result: %w", err)
+		return hash.Hash{}, status, "", fmt.Errorf("decode bind result: %w", err)
 	}
-	return res.BindingHash, status, nil
+	return res.BindingHash, status, "", nil
 }
 
 func regUnbind(ctx context.Context, client *PeerClient, name string) (uint, error) {
@@ -335,20 +360,27 @@ func runRegRevocationHonored(ctx context.Context, client *PeerClient) CheckOutco
 }
 
 func runRegBindInvalidName(ctx context.Context, client *PeerClient) CheckOutcome {
-	// Names with '/' must reject with status=400 bind_invalid_name per §6.5.
-	_, status, err := regBind(ctx, client, "has/slash", regSamplePeerID, "")
-	if err == nil && status != 400 {
-		return FailCheck(fmt.Sprintf("'/' name accepted (status=%d)", status))
+	// §6.5's error table pins the row as `bind_invalid_name | 400`, so both
+	// halves are asserted. R-6 (2026-08-12 c): this check asserted the status
+	// alone on both arms — the third row of the sweep arch scoped to EVERY
+	// pinned row, and the one the R-5 pass missed because the code was not
+	// even named in a failure string here.
+	for _, arm := range []struct{ what, name string }{
+		{"'/' in the name", "has/slash"},
+		{"a control character in the name", "has\x01control"},
+	} {
+		_, status, code, err := regBindFull(ctx, client, arm.name, regSamplePeerID, "")
+		if err != nil {
+			return FailCheck(fmt.Sprintf("bind with %s: %v", arm.what, err))
+		}
+		if status != 400 {
+			return FailCheck(fmt.Sprintf("bind with %s → status %d, want 400 (§6.3 path safety)", arm.what, status))
+		}
+		if code != types.RegistryErrBindInvalidName {
+			return FailCheck(fmt.Sprintf("bind with %s answered 400 with code %q, want %q — §6.5 pins the row as code AND status", arm.what, code, types.RegistryErrBindInvalidName))
+		}
 	}
-	if status != 400 {
-		return FailCheck(fmt.Sprintf("status %d, want 400", status))
-	}
-	// Control char.
-	_, status, _ = regBind(ctx, client, "has\x01control", regSamplePeerID, "")
-	if status != 400 {
-		return FailCheck(fmt.Sprintf("control char accepted (status=%d)", status))
-	}
-	return PassCheck("invalid names rejected with 400")
+	return PassCheck("invalid names rejected 400/bind_invalid_name (both '/' and control-char arms)")
 }
 
 func runRegBindAlreadyExists(ctx context.Context, client *PeerClient) CheckOutcome {
@@ -380,11 +412,26 @@ func runRegBindAlreadyExists(ctx context.Context, client *PeerClient) CheckOutco
 	if err != nil || status != 200 {
 		return FailCheck(fmt.Sprintf("first bind: status=%d err=%v", status, err))
 	}
-	_, status, _ = regBind(ctx, client, name, regSamplePeerID, "")
+	// R-5 audit (2026-08-12): this row is REGISTRY §6.5's pinned
+	// `bind_already_exists | 409`, and it asserted the status while naming
+	// the code only in its own declare string. Same half-check as the §6a.9
+	// layer-1 rows — a status is a class, a code is the contract.
+	//
+	// It originally re-drove regExecute inline because regBind discarded the
+	// result body on a non-200. R-6 fixed that at the helper (regBindFull),
+	// so the workaround is gone: the code now arrives the same way for every
+	// row of the table.
+	_, status, code, err := regBindFull(ctx, client, name, regSamplePeerID, "")
+	if err != nil {
+		return FailCheck("second bind: " + err.Error())
+	}
 	if status != 409 {
 		return FailCheck(fmt.Sprintf("second bind with allow_supersede=false: status=%d, want 409", status))
 	}
-	return PassCheck("bind_already_exists 409 fired with allow_supersede=false")
+	if code != types.RegistryErrBindAlreadyExists {
+		return FailCheck(fmt.Sprintf("second bind answered 409 with code %q, want %q (REGISTRY §6.5 pins the row as status AND code)", code, types.RegistryErrBindAlreadyExists))
+	}
+	return PassCheck("bind_already_exists: 409/bind_already_exists fired with allow_supersede=false")
 }
 
 func runRegSupersedesChain(ctx context.Context, client *PeerClient) CheckOutcome {

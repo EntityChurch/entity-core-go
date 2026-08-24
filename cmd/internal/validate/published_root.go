@@ -40,7 +40,6 @@ import (
 	"strings"
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
-	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/store"
@@ -437,15 +436,21 @@ func identityEntityFromPeerID(pid string) (entity.Entity, error) {
 	if ktString == "" {
 		return entity.Entity{}, fmt.Errorf("peer-id %s has unsupported key_type 0x%02x", pid, keyType)
 	}
-	data := struct {
-		PublicKey []byte `cbor:"public_key"`
-		KeyType   string `cbor:"key_type"`
-	}{PublicKey: pub, KeyType: ktString}
-	raw, err := ecf.Encode(data)
-	if err != nil {
-		return entity.Entity{}, fmt.Errorf("encode synthetic identity: %w", err)
-	}
-	return entity.NewEntity(types.TypePeer, cbor.RawMessage(raw))
+	// Route through the PINNED constructor. This used to hand-roll an anonymous
+	// {public_key, key_type} struct and call entity.NewEntity — a SECOND
+	// derivation of the identity hash, taking the process-global authoring
+	// format, which is precisely what ENTITY-CORE-PROTOCOL §4.5a item 4 names as
+	// the defect item 1a exists to prevent: *"an implementation that derives an
+	// identity hash for a path segment and compares an authored identity hash
+	// for an equality check is using ONE function, and that is the conformant
+	// shape — two functions is the defect."*
+	//
+	// It was not theoretical. Under `HASH_TYPE=sha384` this derived the
+	// publisher's identity at 0x01 while the publisher authored it at the floor,
+	// and V5 failed with `signature signer ecf-sha256:ef55… ≠ pinned identity
+	// hash ecfv1-sha384:f2ed…` — the two-address-space split, in our own
+	// validator, on the one entity that is exempt from it.
+	return types.PeerData{PublicKey: pub, KeyType: ktString}.ToEntity()
 }
 
 // setupVerifyHarness spins up an httptest server backed by a real peer-

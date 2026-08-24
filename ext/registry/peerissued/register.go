@@ -184,7 +184,7 @@ func (i *Issuer) Manifest() types.HandlerManifestData {
 		Operations: map[string]types.HandlerOperationSpec{
 			OpRegisterRequest: {
 				InputType:  types.TypeRegistryRegisterRequest,
-				OutputType: types.TypeRegistryLocalNameBindResult, // reuses {binding_hash} shape
+				OutputType: types.TypeRegistryRegisterResult,
 			},
 			OpRevokeRequest: {
 				InputType: types.TypeRegistryRevokeRequest,
@@ -359,8 +359,38 @@ func (i *Issuer) handleRegisterRequest(_ context.Context, req *handler.Request) 
 	// curated CLI to issue the binding after out-of-band review.
 	if policy.Mode == types.IssuerPolicyModeManual {
 		i.rememberNonce(body.TargetPeerID, body.Nonce, body.IssuedAt)
-		return handler.NewErrorResponse(202, "pending_review",
-			"request accepted; operator approval required (manual mode)")
+		// The queued answer rides in the RESULT, not in an error code.
+		// This was `NewErrorResponse(202, "pending_review", ...)` until
+		// 2026-08-12 (c) — an error entity on a SUCCESS status, which is
+		// what §6a.9's table invites by listing the value under a column
+		// headed `Code`. The section's own pseudocode says `on queue:
+		// status "pending_review"`, and measurement settled it: py and rust
+		// both answer with a result field and we were the outlier.
+		//
+		// pending_hash is the request's own content_hash — the handle the
+		// operator reviews by and the requester can name again. Adopted
+		// from py's shape along with the carrier: a queued request the
+		// client cannot refer to afterwards is a dead end.
+		//
+		// pending_hash names the STORED PENDING ENTITY, not the request
+		// (arch, 2026-08-12 d). We shipped the request's own hash and were
+		// wrong on the reasoning arch gave: a handle the client can already
+		// compute is not a handle, and nothing is fetchable at it. The
+		// request hash is a value the requester derived before it dispatched.
+		//
+		// The entity type and path are PROVISIONAL and flagged as such at
+		// their definition: §6a.9.3's approval protocol is specified nowhere,
+		// which is exactly why step 5 could say "queue" and stop. This is the
+		// minimum that makes the ruled handle resolve.
+		pendingHash, err := i.queueForReview(hctx, req.Params.ContentHash, normalized, body.TargetPeerID)
+		if err != nil {
+			return handler.NewErrorResponse(500, "internal_error", "queue for review: "+err.Error())
+		}
+		result := types.RegistryRegisterResultData{
+			Status:      types.RegisterStatusPendingReview,
+			PendingHash: &pendingHash,
+		}
+		return handler.NewResponse(202, types.TypeRegistryRegisterResult, result)
 	}
 
 	// Open / allowlist (passed admission) → sign + publish.
@@ -376,8 +406,15 @@ func (i *Issuer) handleRegisterRequest(_ context.Context, req *handler.Request) 
 
 	i.rememberNonce(body.TargetPeerID, body.Nonce, body.IssuedAt)
 
-	return handler.NewResponse(200, types.TypeRegistryLocalNameBindResult,
-		types.LocalNameBindResultData{BindingHash: bindingHash})
+	// One result type for the operation, discriminated by `status`. The 200
+	// borrowed local-name's bind-result until 2026-08-12 (c) — a different
+	// operation's type, chosen because the payload happened to match.
+	bh := bindingHash
+	return handler.NewResponse(200, types.TypeRegistryRegisterResult,
+		types.RegistryRegisterResultData{
+			Status:      types.RegisterStatusRegistered,
+			BindingHash: &bh,
+		})
 }
 
 // verifyOwnershipProof is Layer 1: the request MUST carry a signature whose
@@ -699,6 +736,31 @@ func (i *Issuer) SeedPolicy(cs store.ContentStore, li store.LocationIndex) error
 // what the curated `registry-issue-binding` CLI does — but in-process and
 // gated by the §6a.9 admission decision above. Writes three artifacts:
 // binding body, signature, by-name pointer.
+// queueForReview stores a pending-registration entity for a manual-mode
+// request and publishes it, returning the hash that goes back as
+// `pending_hash`. The handle has to resolve to something an operator or the
+// requester can fetch — that is the whole reason arch ruled against naming
+// the request itself.
+func (i *Issuer) queueForReview(hctx *handler.HandlerContext, requestHash hash.Hash, normalizedName, targetPeerID string) (hash.Hash, error) {
+	pendingEnt, err := types.PendingRegistrationData{
+		Request:      requestHash,
+		Name:         normalizedName,
+		TargetPeerID: targetPeerID,
+		ReceivedAt:   i.clock(),
+		Status:       types.RegisterStatusPendingReview,
+	}.ToEntity()
+	if err != nil {
+		return hash.Hash{}, fmt.Errorf("encode pending registration: %w", err)
+	}
+	if _, err := hctx.Store.Put(pendingEnt); err != nil {
+		return hash.Hash{}, fmt.Errorf("store pending registration: %w", err)
+	}
+	if _, err := hctx.TreeSet(types.PendingRegistrationPath(pendingEnt.ContentHash), pendingEnt.ContentHash, "peer-issued-queue"); err != nil {
+		return hash.Hash{}, fmt.Errorf("publish pending registration: %w", err)
+	}
+	return pendingEnt.ContentHash, nil
+}
+
 func (i *Issuer) issueBinding(hctx *handler.HandlerContext, normalizedName, targetPeerID string, transports []hash.Hash, ttl *uint64) (hash.Hash, error) {
 	body := types.BindingData{
 		Name:         normalizedName,

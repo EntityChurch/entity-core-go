@@ -31,6 +31,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
@@ -60,6 +61,7 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 
 	r.Declare("surface_registered", "§6a.9 — the peer-issued issuer handler is reachable (peer started with an issuer policy); an unregistered handler is the default-off posture, not a failure of the peer, but it means nothing below is measured")
 	r.Declare("policy_open_grants", "§6a.9.1 mode=open — a layer-1-valid request is signed and published; the binding resolves afterwards")
+	r.Declare("name_taken_on_second_register", "§6a.9 — the third row of the pinned status table: a name already bound in this registry MUST be refused 409 name_taken, and the refusal MUST leave the first binding intact")
 	r.Declare("policy_allowlist_grants_listed", "§6a.9.1 mode=allowlist — a target_peer_id IN the allowlist is admitted")
 	r.Declare("policy_allowlist_rejects_unlisted", "§6a.9.1 mode=allowlist — a target_peer_id NOT in the allowlist MUST be refused 403 not_entitled")
 	r.Declare("policy_allowlist_unlisted_publishes_nothing", "§6a.9.1 — the negative half: a refused request MUST NOT leave a resolvable binding behind (a 403 that published anyway would pass a status-only check)")
@@ -146,6 +148,56 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 		return PassCheck("mode=open signed + published the binding, and it resolves")
 	}))
 
+	// --- the name_taken row ------------------------------------------------
+
+	// R-6 (2026-08-12 c). §6a.9's status table has four rows; three were
+	// checked and this one had NO check at all — not a half-assertion, an
+	// absent one. Go implements it (`applyAdmission` → by-name index →
+	// 409/name_taken, ext/registry/peerissued/register.go), so the gap was
+	// invisible from inside: the behaviour was right and nothing measured it.
+	// That is the §5.2b shape one level up from the extractor finding — the
+	// audit that catches a half-checked row will not catch an unchecked one,
+	// because there is no failure string to notice.
+	//
+	// Driven in `open` mode deliberately: the row is an issuance-time name
+	// collision, not an admission decision, so a mode that admits everything
+	// isolates it. Both registers name the SAME target (this validator), so
+	// layer 1 passes on both and the 409 cannot be a mis-read 401.
+	r.Run("name_taken_on_second_register", gate(func() CheckOutcome {
+		if out := setIssuerPolicy(ctx, client, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen}); out != nil {
+			return *out
+		}
+		name := issuerName("taken")
+		status, code, err := issuerRegister(ctx, client, uri, name)
+		if err != nil {
+			return FailCheck("first register-request: " + err.Error())
+		}
+		if status != 200 {
+			return FailCheck(fmt.Sprintf("first register-request → %d/%q, want 200 in mode=open — the collision cannot be measured without a binding to collide with", status, code))
+		}
+		status, code, err = issuerRegister(ctx, client, uri, name)
+		if err != nil {
+			return FailCheck("second register-request: " + err.Error())
+		}
+		if status == 401 {
+			return FailCheck(fmt.Sprintf("second register-request → 401/%q — layer 1 refused a request it accepted moments earlier, so this measured the signature floor rather than the name collision", code))
+		}
+		if status != 409 || code != types.RegistryErrNameTaken {
+			return FailCheck(fmt.Sprintf("re-registering an already-bound name → %d/%q, want 409/%s (§6a.9 pins the row as status AND code)", status, code, types.RegistryErrNameTaken))
+		}
+		// The negative half. A registry that answers 409 and then rebinds
+		// (or unbinds) the name has made the refusal cosmetic — and a
+		// status+code assertion alone would pass.
+		bound, err := issuerNameResolves(ctx, client, name)
+		if err != nil {
+			return FailCheck("read back by-name binding after the refusal: " + err.Error())
+		}
+		if !bound {
+			return FailCheck("409 name_taken left NOTHING bound at " + types.PeerIssuedByNamePath(name) + " — the refused request destroyed the binding it collided with")
+		}
+		return PassCheck("second register on a bound name refused 409/name_taken; the first binding survives")
+	}))
+
 	// --- mode: allowlist --------------------------------------------------
 
 	selfPeerID := string(client.LocalPeerID())
@@ -214,14 +266,94 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 		if out := setIssuerPolicy(ctx, client, types.IssuerPolicyData{Mode: types.IssuerPolicyModeManual}); out != nil {
 			return *out
 		}
-		status, code, err := issuerRegister(ctx, client, uri, manualName)
+		status, code, resp, requestHash, err := issuerRegisterResp(ctx, client, uri, manualName)
 		if err != nil {
 			return FailCheck("register-request: " + err.Error())
 		}
 		if status != 202 {
 			return FailCheck(fmt.Sprintf("mode=manual → %d/%q, want 202 pending_review", status, code))
 		}
-		return PassCheck("mode=manual queued the request as 202 pending_review")
+		// R-5 audit (2026-08-12): this row is the §6a.9 status table's
+		// `202 | pending_review`, and it was asserting the status while
+		// NAMING the code in its own failure message — the same half-check
+		// that hid py's layer-1 divergence, one pinned row over. Arch named
+		// the three layer-1 rows; this one they did not, and the audit is
+		// what found it.
+		//
+		// THE CARRIER: the RESULT FIELD, and measurement is what settled it
+		// (2026-08-12 c). This assertion originally read the value out of an
+		// ERROR-shaped body, because that is what Go emitted —
+		// NewErrorResponse(202, "pending_review", ...) — and because §6a.9's
+		// table lists the value under a column headed `Code`. Running the
+		// other two peers showed both answering with a SUCCESS-shaped result
+		// carrying `status: "pending_review"`, which is also what §6a.9's own
+		// pseudocode says (`on queue: status "pending_review"`).
+		//
+		// THE ARGUMENT IS THE DESIGN, NOT THE HEAD COUNT. An earlier draft of
+		// this comment justified the change as "two of three plus the
+		// pseudocode" — a vote, and GUIDE-CONFORMANCE §4 forbids exactly that:
+		// all three differing is the SPEC-AMBIGUITY row, whose resolution is
+		// "tighten the spec in the same pass", and the split row says in so
+		// many words *spec arbitrates; do not vote*. This repo already states
+		// the rule correctly in three other places (ext/network/nattype_test
+		// .go, cmd/internal/compute-corpus/crossbless.go and its README).
+		//
+		// The change stands on reasons that would hold if BOTH siblings had
+		// done the opposite: system/protocol/error denotes a FAILED operation,
+		// 202 denotes an accepted-and-pending one, so emitting an error entity
+		// on a 2xx forces a client to decide whether to branch on the status
+		// or on the result type — the two disagree by construction. And the
+		// 200 borrowed local-name's bind-result, a DIFFERENT operation's type,
+		// because the payload happened to match: a result type is part of an
+		// operation's contract, and coupling two contracts on payload
+		// coincidence breaks the moment either grows a field.
+		//
+		// Still routed to arch as an ambiguity to TIGHTEN (§4's prescribed
+		// resolution), not as a fait accompli — spec-issues/2026-08-12-c.
+		//
+		// So the FIELD passes and the error code is the outlier — the reverse
+		// of what this check asserted this morning. The error-code carrier
+		// still WARNs rather than FAILs: no cohort member emits it now, and a
+		// peer that does is answering a plain reading of the ratified table.
+		//
+		// The VALUE is asserted in both cases; absent in both still FAILs. And
+		// the check below is why the tolerance exists at all — a 202 that
+		// quietly published the binding defeats the entire mode, and gating it
+		// on a carrier disagreement left that unmeasured against py while
+		// looking like rigor.
+		field, carrier := pendingReviewFromResult(resp)
+		switch {
+		case field == registryPendingReview:
+			// RULED 2026-08-12 (d): pending_hash names the STORED PENDING
+			// ENTITY, not the request. Asserted as an inequality rather than
+			// by fetching, and that is not laziness — §6a.9.3's approval
+			// protocol is specified nowhere, so no path convention exists to
+			// fetch a queued request at. What IS checkable against any peer
+			// is arch's own reasoning: a handle the client computed before it
+			// dispatched is not a handle. If it equals the request hash the
+			// peer has returned the client its own input.
+			ph, ok := pendingHashFromResult(resp)
+			switch {
+			case !ok:
+				// Name the RULED carrier, not just the observed one. The
+				// parenthetical used to carry `carrier` alone, which reads as
+				// though the observed shape were the required shape — and the
+				// first peer to hit this message returns
+				// `system/protocol/status`, the type arch rejected on structure
+				// (a carrier with room for neither binding_hash nor a poll
+				// handle moves the divergence one field down). A failure
+				// message that names the wrong target is a wrong bug report.
+				return FailCheck("mode=manual queued as 202 but returned no pending_hash — §6a.9 ruling 2026-08-12 (arch 81e73ae): the queued request MUST come back with a handle, in a " +
+					types.TypeRegistryRegisterResult + " carrying {status, pending_hash}. Observed carrier: " + carrier)
+			case ph == requestHash:
+				return FailCheck("mode=manual returned pending_hash equal to the register-request's own content_hash — that is the value the requester already held before dispatching, so it names nothing fetchable and is not a handle (ruled 2026-08-12 d)")
+			}
+			return PassCheck("mode=manual queued as 202 with " + registryPendingReview + " in the result field (" + carrier + "), pending_hash distinct from the request")
+		case code == registryPendingReview:
+			return WarnCheck(fmt.Sprintf("mode=manual queued as 202 carrying %q as an ERROR CODE on a success status — §6a.9's table heading invites this, but its pseudocode and every cohort member write a result field (spec-issues/2026-08-12-c)", registryPendingReview))
+		default:
+			return FailCheck(fmt.Sprintf("mode=manual answered 202 but no carrier holds %q — error-code was %q, result body was %s", registryPendingReview, code, carrier))
+		}
 	}))
 
 	r.Run("policy_manual_publishes_nothing", gate(func() CheckOutcome {
@@ -260,6 +392,7 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 
 	// --- layer 1 ----------------------------------------------------------
 
+	// See requirePinnedCode — every layer-1 row below asserts status AND code.
 	r.Run("layer1_unsigned_request_rejected", gate(func() CheckOutcome {
 		if out := setIssuerPolicy(ctx, client, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen}); out != nil {
 			return *out
@@ -279,7 +412,10 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 		if status != 401 {
 			return FailCheck(fmt.Sprintf("unsigned request → %d/%q, want 401 (ownership proof missing)", status, code))
 		}
-		return PassCheck("unsigned register-request refused 401")
+		if out := requirePinnedCode(code, "unsigned register-request"); out != nil {
+			return *out
+		}
+		return PassCheck("unsigned register-request refused 401/signature_invalid")
 	}))
 
 	// --- revoke / renew ---------------------------------------------------
@@ -398,6 +534,9 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 		if revStatus != 401 {
 			return FailCheck(fmt.Sprintf("unsigned revoke-request → %d/%q, want 401 (ownership proof missing)", revStatus, revCode))
 		}
+		if out := requirePinnedCode(revCode, "unsigned revoke-request"); out != nil {
+			return *out
+		}
 		// Status alone is not enough: a 401 that revoked anyway is worse
 		// than an honest 200, because it reports refusal while acting.
 		revPath := types.PeerIssuedRevocationByTargetPath(bindingHash)
@@ -439,7 +578,10 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 		if renewStatus != 401 {
 			return FailCheck(fmt.Sprintf("unsigned renew-request → %d/%q, want 401 (ownership proof missing)", renewStatus, renewCode))
 		}
-		return PassCheck("unsigned renew-request refused 401")
+		if out := requirePinnedCode(renewCode, "unsigned renew-request"); out != nil {
+			return *out
+		}
+		return PassCheck("unsigned renew-request refused 401/signature_invalid")
 	}))
 
 	r.Run("unknown_operation_rejected", gate(func() CheckOutcome {
@@ -735,6 +877,68 @@ func issuerRegister(ctx context.Context, client *PeerClient, uri, name string) (
 	return issuerDispatch(ctx, client, uri, peerissued.OpRegisterRequest, reqEnt)
 }
 
+// issuerRegisterResp is issuerRegister with the full response kept, for the
+// one row whose value may ride in the RESULT body rather than as an error
+// code (§6a.9's 202 — see policy_manual_queues).
+func issuerRegisterResp(ctx context.Context, client *PeerClient, uri, name string) (uint, string, types.ExecuteResponseData, hash.Hash, error) {
+	reqEnt, err := buildRegisterRequest(client, name)
+	if err != nil {
+		return 0, "", types.ExecuteResponseData{}, hash.Hash{}, fmt.Errorf("build request: %w", err)
+	}
+	if err := publishOwnershipProof(ctx, client, reqEnt); err != nil {
+		return 0, "", types.ExecuteResponseData{}, hash.Hash{}, err
+	}
+	status, code, resp, err := issuerDispatchFull(ctx, client, uri, peerissued.OpRegisterRequest, reqEnt)
+	return status, code, resp, reqEnt.ContentHash, err
+}
+
+// pendingHashFromResult reads `pending_hash` out of a 202's result body.
+func pendingHashFromResult(resp types.ExecuteResponseData) (hash.Hash, bool) {
+	if len(resp.Result) == 0 {
+		return hash.Hash{}, false
+	}
+	var resultEnt entity.Entity
+	if err := ecf.Decode(resp.Result, &resultEnt); err != nil {
+		return hash.Hash{}, false
+	}
+	var d types.RegistryRegisterResultData
+	if err := ecf.Decode(resultEnt.Data, &d); err != nil || d.PendingHash == nil {
+		return hash.Hash{}, false
+	}
+	return *d.PendingHash, true
+}
+
+// pendingReviewFromResult reads a `status` field out of a SUCCESS-shaped
+// result body — the second carrier §6a.9's 202 row is answered with in the
+// cohort. Returns the value and a human description of what was actually
+// there, so a failure message can name the shape instead of just reporting
+// an empty string (which is how a carrier mismatch reads as a missing value).
+func pendingReviewFromResult(resp types.ExecuteResponseData) (string, string) {
+	if len(resp.Result) == 0 {
+		return "", "empty"
+	}
+	var resultEnt entity.Entity
+	if err := ecf.Decode(resp.Result, &resultEnt); err != nil {
+		return "", "undecodable result entity: " + err.Error()
+	}
+	var raw map[string]interface{}
+	if err := cbor.Unmarshal(resultEnt.Data, &raw); err != nil {
+		return "", fmt.Sprintf("type=%q, data not a map", resultEnt.Type)
+	}
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	desc := fmt.Sprintf("type=%q, fields=%v", resultEnt.Type, keys)
+	if v, ok := raw["status"]; ok {
+		if s, ok := v.(string); ok {
+			return s, desc
+		}
+	}
+	return "", desc
+}
+
 // issuerRegisterBound is issuerRegister plus the binding hash the registry
 // minted, which revoke-request and renew-request address the binding BY —
 // neither takes a name (§6a.9: `binding_hash`, not `name`).
@@ -763,6 +967,42 @@ func issuerRegisterBound(ctx context.Context, client *PeerClient, uri, name stri
 
 // issuerDispatch sends one EXECUTE to the issuer handler and extracts the
 // status + error code.
+// registryPendingReview is the §6a.9 manual-mode row's code. Kept here rather
+// than in core/types because it is a RESPONSE code the validator asserts
+// against any peer, not a value this implementation emits from a constant —
+// pinning it locally keeps the assertion honest if Go's own naming drifts.
+const registryPendingReview = "pending_review"
+
+// requirePinnedCode asserts the §6a.9 layer-1 refusal `code`, not merely the
+// status. Returns nil when the code is right.
+//
+// WHY THIS EXISTS, stated so the next author does not re-introduce it. The
+// three layer-1 rows asserted `status != 401` and nothing else — while holding
+// the code in a variable and using it only to decorate failure messages. Two
+// rows away in the same file, the layer-2 rows asserted
+// `status != 403 || code != not_entitled`: the same file checking the whole
+// contract in one place and half of it in another.
+//
+// That half-check let `entity-core-py` answer `401 proof_failed` at all three
+// sites through a full cohort cycle without any instrument seeing it — and it
+// is why architecture ratified the row on a *false* rationale ("three
+// implementations converged"), since the only evidence anyone had was three
+// green suites that were not looking. Arch retracted the rationale in place and
+// ruled `[MUST]`: a check of a pinned status-table row asserts the CODE.
+//
+// The generalizable form, which is R-5 and is an audit every impl owes: a
+// status is a class, a code is the contract. Asserting the class and calling it
+// conformance is the §5.2b shape — absent coverage reading as covered.
+func requirePinnedCode(code, what string) *CheckOutcome {
+	if code == types.RegistryErrSignatureInvalid {
+		return nil
+	}
+	out := FailCheck(fmt.Sprintf(
+		"%s refused 401 but with code %q, want %q — EXTENSION-REGISTRY §6a.9 pins the layer-1 row as 401/signature_invalid [MUST, ruled 2026-08-12]. The status alone is a class; the code is the contract, and a status-only assertion is what let this diverge across a full cohort cycle unseen",
+		what, code, types.RegistryErrSignatureInvalid))
+	return &out
+}
+
 func issuerDispatch(ctx context.Context, client *PeerClient, uri, op string, params entity.Entity) (uint, string, error) {
 	status, code, _, err := issuerDispatchFull(ctx, client, uri, op, params)
 	return status, code, err

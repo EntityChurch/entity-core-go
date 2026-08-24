@@ -47,6 +47,7 @@ type config struct {
 	contextFields          []store.ContextFieldRegistration
 	identityBindingChecker protocol.IdentityBindingChecker
 	keepaliveCfg           types.KeepaliveConfigData
+	maxInboundConns        *int
 	maxCascadeDepth        *uint64
 	ownerIdentityHash      *hash.Hash
 	seedPolicy             []SeedPolicyEntry
@@ -103,6 +104,30 @@ func WithListenAddr(addr string) Option {
 func WithKeepaliveConfig(cfg types.KeepaliveConfigData) Option {
 	return func(c *config) {
 		c.keepaliveCfg = cfg
+	}
+}
+
+// WithMaxInboundConnections sets the V7 §4.10(c) concurrent-connection
+// admission bound: once this many inbound connections are being served, the
+// listener refuses further ones by closing them immediately (§4.10(c) permits
+// `503 too_many_connections` OR a connection close; the close is chosen
+// because the over-bound condition is reached before any request_id exists to
+// correlate a coded frame to).
+//
+// n <= 0 disables self-limiting, which is conformant — §4.10(c) is a SHOULD
+// with an explicit carve-out for peers that delegate admission to the layer
+// below (systemd socket limits, a reverse proxy, the OS fd limit). Use it when
+// something else genuinely owns admission; a bare `entity-peer` delegates to
+// nothing, which is why the default is finite.
+//
+// The default (defaultMaxInboundConns) is a deployment choice, not a spec
+// constant — §4.10 is explicit that "values are informative recommended
+// defaults, not normative constants" and names none for (c). The contract it
+// DOES impose is to enforce a finite declared bound and refuse cleanly while
+// continuing to serve.
+func WithMaxInboundConnections(n int) Option {
+	return func(c *config) {
+		c.maxInboundConns = &n
 	}
 }
 

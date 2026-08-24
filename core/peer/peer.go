@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.entitychurch.org/entity-core-go/core/capability"
@@ -24,6 +25,25 @@ import (
 
 	coderws "github.com/coder/websocket"
 )
+
+// defaultMaxInboundConns is the V7 §4.10(c) concurrent-connection admission
+// bound a peer ships with. §4.10 names recommended defaults for (a) 16 MiB and
+// (b) 64 and deliberately names NONE for (c) — "values are informative
+// recommended defaults, not normative constants" — so this number is ours to
+// choose and to justify:
+//
+// 128 is a conservative fraction of the 1024 open-file limit that is the
+// common default on Linux, leaving headroom for the peer's own outbound dials,
+// listeners, and file handles. A peer that wants more should raise it
+// explicitly (WithMaxInboundConnections), which is also the honest way to
+// state a deployment's real capacity.
+//
+// The value is a bound, not a target: exceeding it is a refusal, not a
+// degradation. What §4.10(c) actually requires of us is that the bound be
+// FINITE and the refusal CLEAN — "an unbounded substrate is a self-DoS
+// surface." Before this existed, a bare entity-peer had no bound at all and
+// the resource_bounds gate said so, permanently, as a WARN nobody read.
+const defaultMaxInboundConns = 128
 
 // Peer is the top-level construct that ties together identity, handlers,
 // storage, and network connections.
@@ -57,6 +77,19 @@ type Peer struct {
 	// construction (WithKeepaliveConfig); zero value = §2.3 spec defaults.
 	keepalive    keepaliveState
 	keepaliveCfg types.KeepaliveConfigData
+
+	// maxInboundConns is the V7 §4.10(c) admission bound: the number of
+	// concurrently-served INBOUND connections above which the listener
+	// refuses by closing. Outbound dials are not counted — they are this
+	// peer's own resource decisions, not admitted load. 0 disables
+	// self-limiting (the external-admission carve-out). Fixed at
+	// construction via WithMaxInboundConnections.
+	maxInboundConns int
+	// inboundConns is the live count, held as an atomic rather than derived
+	// from p.connections because that slice mixes inbound and outbound and
+	// is walked under p.mu on every add/remove — the admission decision sits
+	// in the accept path and must not contend with it.
+	inboundConns atomic.Int64
 
 	// authoredGrants is the EXTENSION-SIGNALING §6.5 (b) wielding-by-reference
 	// support set: the reciprocal grants THIS peer minted and handed to a
@@ -348,10 +381,14 @@ func New(opts ...Option) (*Peer, error) {
 			loops:        make(map[crypto.PeerID]bool),
 			lastActivity: make(map[crypto.PeerID]time.Time),
 		},
-		keepaliveCfg: cfg.keepaliveCfg,
-		serveCtx:     serveCtx,
-		serveCancel:  serveCancel,
-		wireHooks:    wireHooks,
+		keepaliveCfg:    cfg.keepaliveCfg,
+		maxInboundConns: defaultMaxInboundConns,
+		serveCtx:        serveCtx,
+		serveCancel:     serveCancel,
+		wireHooks:       wireHooks,
+	}
+	if cfg.maxInboundConns != nil {
+		p.maxInboundConns = *cfg.maxInboundConns
 	}
 
 	// Wire remote execute.
@@ -520,14 +557,29 @@ func (p *Peer) ListenReady(ctx context.Context, ready chan struct{}) error {
 				continue
 			}
 		}
+		// V7 §4.10(c) admission bound, checked BEFORE any per-connection
+		// state is allocated — admitting then tearing down would defeat the
+		// purpose. "Rejection is clean, not collapse": the refusal is a
+		// close, the accept loop continues, and every already-admitted
+		// connection keeps being served.
+		if p.maxInboundConns > 0 && p.inboundConns.Load() >= int64(p.maxInboundConns) {
+			p.debugf("refusing connection from %s: §4.10(c) admission bound reached (%d/%d inbound)",
+				conn.RemoteAddr(), p.inboundConns.Load(), p.maxInboundConns)
+			conn.Close()
+			continue
+		}
 		p.debugf("accepted connection from %s", conn.RemoteAddr())
 		c := newConnection(p, conn)
 		p.addConnection(c)
+		p.inboundConns.Add(1)
 		// Per-connection serve uses the peer-lifetime ctx, NOT the
 		// caller's listener ctx — see Peer.serveCtx doc. The listener
 		// ctx still bounds the Accept loop (above); only spawned
 		// serves are decoupled. F18 fix.
-		go c.serve(p.serveCtx)
+		go func() {
+			defer p.inboundConns.Add(-1)
+			c.serve(p.serveCtx)
+		}()
 	}
 }
 

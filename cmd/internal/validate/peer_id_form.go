@@ -34,7 +34,22 @@ func runPeerIDForm(ctx context.Context, client *PeerClient) []CheckResult {
 
 	r.Declare("pim_canonical_form_validates", "V7 §1.5 v7.65 (wire decoder accepts both hash_type=0x00 and 0x01; §5 carve-out)")
 	r.Declare("pim_canonical_form_extracts_pubkey", "V7 §1.5 v7.65 (DerivePeerFromPeerID round-trip for canonical identity-multihash form)")
-	r.Declare("pim_legacy_decode_sha256_form_canonicalizes_on_storage", "V7 §1.5 v7.65 §5 (wire-acceptance: MAY decode SHA-256-form + MUST canonicalize to identity-multihash before storage)")
+	// `[self]` — GUIDE-CONFORMANCE §5.2. The peer supplies `targetPeerID`, but
+	// that input only selects RUN-vs-SKIP; every step that can decide PASS-vs-FAIL
+	// runs against this validator's own code (DerivePeerFromPeerID →
+	// VerifyPublicKey → ComputePeerIdentityHash → hex → ParseHex, compared to
+	// itself). The check's own comment already said so — *"exercises the
+	// local-side bridge"* — three declarations above a spec-ref asserting a MUST
+	// about the PEER'S STORAGE.
+	//
+	// So the storage half of v7.65 §5 is **unmeasured against any peer**, and was
+	// reading as covered: a sibling that decoded SHA-256-form and stored it
+	// uncanonicalized would pass this row unchanged. That is a §5.2b coverage
+	// gap (a surface the suite cannot reach), routed rather than papered over —
+	// labelling it is the honest floor, not the fix. The reachable half of the
+	// rule is covered by `pim_default_mint_is_canonical_form`, which does read
+	// what the peer minted.
+	r.DeclareSelf("pim_legacy_decode_sha256_form_canonicalizes_on_storage", "V7 §1.5 v7.65 §5 (wire-acceptance: MAY decode SHA-256-form + MUST canonicalize to identity-multihash before storage) — [self]: the storage half is unprobed, see the note at this declaration")
 	r.Declare("pim_default_mint_is_canonical_form", "V7 §1.5 v7.65 §4 + §9.1 (canonical-form mandate; SHOULD→MUST promotion: Ed25519 peers MUST publish identity-form wire peer_id)")
 
 	targetPeerID := client.RemotePeerID()

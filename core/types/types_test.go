@@ -4,7 +4,11 @@ import (
 	"reflect"
 	"testing"
 
+	"go.entitychurch.org/entity-core-go/core/ecf"
+	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/hash"
+
+	"github.com/fxamacker/cbor/v2"
 )
 
 const testPeerID = "2KZFtestpeerAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -693,4 +697,19 @@ func fieldSpecEqual(a, b FieldSpec) bool {
 		return false
 	}
 	return true
+}
+
+// core/entity spells "system/peer" as its own unexported literal, because
+// `entity` sits to the LEFT of `types` in the core DAG and cannot import it.
+// A duplicated string is how a guard silently stops guarding: rename TypePeer
+// here and entity's §4.5a item 1a refusal keeps compiling while matching
+// nothing. This test is the pin between the two copies.
+func TestFloorPinnedTypeMatchesTypesPackage(t *testing.T) {
+	data, err := ecf.Encode(PeerData{PublicKey: make([]byte, 32), KeyType: "ed25519"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entity.NewEntityFormat(hash.AlgorithmSHA384, TypePeer, cbor.RawMessage(data)); err == nil {
+		t.Fatalf("entity.NewEntityFormat accepted TypePeer (%q) under SHA-384 — entity's floor-pinned literal no longer matches this package's constant", TypePeer)
+	}
 }

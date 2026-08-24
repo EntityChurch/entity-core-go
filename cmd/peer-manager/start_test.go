@@ -54,10 +54,18 @@ func TestKeepaliveSpecEmpty(t *testing.T) {
 	}
 }
 
-// The flag names are identical across impls; only the dash count differs.
-// Go's stdlib flag takes -keepalive-interval-ms, Python's argparse takes
-// --keepalive-interval-ms (Python 0a0eb48). Rust has no CLI surface, so it is
-// dropped before reaching a renderer.
+// The flag names are identical across all three impls; only the dash count
+// differs. Go's stdlib flag takes -keepalive-interval-ms; Python's argparse and
+// Rust's clap both take --keepalive-interval-ms.
+//
+// The last sentence here read "Rust has no CLI surface, so it is dropped before
+// reaching a renderer" until 2026-08-12 (e). **That was false, and the code
+// disproving it is in the file this test covers** — startRustPeer forwards
+// `keepalive.args("--")` unconditionally, and rust declares
+// keepalive_interval_ms / keepalive_timeout_ms / keepalive_max_missed in
+// cmd/entity-peer/src/main.rs. Third instance in this package of a build-state
+// note contradicting the forwarding code beside it (G-7); a test comment is not
+// exempt from the rule just because no user reads it.
 func TestKeepaliveSpecArgs(t *testing.T) {
 	tests := []struct {
 		name string

@@ -16,6 +16,56 @@ import (
 	"go.entitychurch.org/entity-core-go/cmd/internal/validate"
 )
 
+// The sibling-surface verification pin — ONE pin for every present-tense
+// "honored by …" / "absent from …" claim in this file.
+//
+// WHY THIS EXISTS (G-7, filed by our own discipline audit 2026-08-12 d, closed
+// 2026-08-12 e). `AGENTS.md` names this exact file as where build-state
+// staleness accumulates: *"every `Honored by …` / `… impl pending` string is a
+// build-state assertion about a repo we do not control … treat a stale one as a
+// defect, not a typo — it is the documentation of a skip."* The audit measured
+// **20 such claims pinned across 18 different sibling commits, not one of them
+// current.** The citation format was working — a reader could tell they were
+// dated — and that was precisely the problem: twenty independent dates rot
+// independently, and no single reading of the tree can refresh them.
+//
+// So the pin is consolidated. Re-verification is now ONE edit, and the rule that
+// comes with it is not optional:
+//
+//	MOVING THESE CONSTANTS ASSERTS THAT EVERY CLAIM BELOW WAS RE-READ IN BOTH
+//	SIBLING WORKTREES AT THESE COMMITS. Not spot-checked. Not inferred from a
+//	report, a handoff, or `git log`. Opened, and read.
+//
+// That is a stronger obligation than twenty separate dates imposed, because it
+// cannot be discharged partially — which is the point. The audit's stated fear
+// was "spot-checking two and re-dating twenty"; with one constant that is a
+// single visible lie rather than nineteen invisible ones.
+//
+// Two claim kinds live below and they are NOT the same:
+//
+//   - **Present-tense surface claims** — "rust ships X", "absent from py". These
+//     decay the moment a sibling commits and carry `siblingSurfaceVerifiedAt()`.
+//   - **Historical landing pins** — "flag X landed at rust 3e9c9fc". A fact about
+//     the past; it does not decay and MUST NOT be re-dated. Marked `[historical]`
+//     so a re-verification pass does not waste a read on it.
+//
+// Runtime/behavioral claims are a third kind and are pinned separately at the
+// claim, with the date they were MEASURED — reading a CLI cannot establish them.
+const (
+	// rust HEAD, read live: `git log -1` in ../entity-core-rust.
+	siblingPinRust = "dfd4d45"
+	// py HEAD, read live: `git log -1` in ../entity-core-py.
+	siblingPinPython = "ad0ef98"
+	siblingPinDate   = "2026-08-12 (e)"
+)
+
+// siblingSurfaceVerifiedAt renders the pin for a flag's help text, so `-h`
+// output carries it and a reader never has to trust an undated claim.
+func siblingSurfaceVerifiedAt() string {
+	return fmt.Sprintf(" [sibling CLI surface read live %s: rust %s, py %s]",
+		siblingPinDate, siblingPinRust, siblingPinPython)
+}
+
 func cmdStart(args []string) {
 	fs := flag.NewFlagSet("start", flag.ExitOnError)
 	name := fs.String("name", "", "peer name (required)")
@@ -28,32 +78,36 @@ func cmdStart(args []string) {
 	history := fs.String("history", "*", "history recording pattern (default: \"*\" records all; use \"\" to disable)")
 	clockTickMs := fs.Uint64("clock-tick-ms", 0, "EXTENSION-CLOCK §2.5 tick_interval: emit a periodic clock tick every N ms (Go peers only; 0 = disabled, the spec default). Forwarded as --clock-tick-ms to entity-peer.")
 	remote := fs.String("remote", "", "register a remote peer by name (must already be running)")
-	httpAddr := fs.String("http-addr", "", "additional HTTP-live listener address (e.g. 127.0.0.1:0 for random; empty disables). Chunk D / Amendment 3. Honored by all three (verified in the live worktrees 2026-08-08): Go -http-addr, Rust --http-listen (cmd/entity-peer/src/main.rs, re-verified at rust caf1cd8 2026-08-11), Python --http-addr (main.py argparse, py ebeda0f). peer-manager already forwards to both siblings below — the prior \"CLI wiring pending\" note contradicted the forwarding code in this same file.")
+	httpAddr := fs.String("http-addr", "", "additional HTTP-live listener address (e.g. 127.0.0.1:0 for random; empty disables). Chunk D / Amendment 3. Honored by all three: Go -http-addr, Rust --http-listen (`http_listen` in cmd/entity-peer/src/main.rs), Python --http-addr (packages/entity-cli/src/entity_cli/main.py argparse). peer-manager already forwards to both siblings below — the prior \"CLI wiring pending\" note contradicted the forwarding code in this same file."+siblingSurfaceVerifiedAt())
 	httpPath := fs.String("http-path", "/entity", "URL path the HTTP-live listener accepts POSTs at (when --http-addr set)")
-	wsAddr := fs.String("ws-addr", "", "additional WebSocket-live listener address (e.g. 127.0.0.1:9501; --ws-addr does not yet accept :0 because the port is needed to construct the ws:// URL). Thread F (NETWORK §6.5.2b). Go + Rust (verified in the live worktrees 2026-08-08): Rust ships --ws-listen ungated at the CLI (rust f561493) and peer-manager forwards it below; there is no --ws-path on the Rust side, so Go's configurable path is a Go-side extension. Python has no WS listener as of py ebeda0f — checked, not assumed.")
+	wsAddr := fs.String("ws-addr", "", "additional WebSocket-live listener address (e.g. 127.0.0.1:9501; --ws-addr does not yet accept :0 because the port is needed to construct the ws:// URL). Thread F (NETWORK §6.5.2b). Go + Rust only: Rust ships --ws-listen ungated at the CLI (`ws_listen` in cmd/entity-peer/src/main.rs) and peer-manager forwards it below; there is no --ws-path on the Rust side, so Go's configurable path is a Go-side extension. Python has NO WebSocket listener flag — enumerated its full 49-flag argparse surface, not grepped for one name."+siblingSurfaceVerifiedAt())
 	wsPath := fs.String("ws-path", "/ws", "URL path the WebSocket listener accepts upgrades at (when --ws-addr set)")
-	// Chunk E serving-mode flags. All three ship them now (verified in the live
-	// worktrees 2026-08-08): Rust 58d9188, Python --http-poll-addr in the
-	// entity-cli argparse @ ebeda0f. The "Go-only initially" note this replaces
+	// Chunk E serving-mode flags. All three ship them; see the
+	// siblingPin* block for the verification pin. Rust: http_poll_addr,
+	// http_poll_mount_on_live, http_poll_prefix, serve_namespace,
+	// serve_closure_root in cmd/entity-peer/src/main.rs — but NOT
+	// serve_scope_whole_store (see the warning at the rust branch below).
+	// Python: all six, in the entity-cli argparse. [historical] the flags
+	// landed at rust 58d9188. The "Go-only initially" note this replaces
 	// described the state during E impl and outlived it.
 	httpPollAddr := fs.String("http-poll-addr", "", "Chunk E: isolated HTTP poll listener (e.g. 127.0.0.1:9201); GET /content/{hex(H)}. Mutually exclusive with --http-poll-mount-on-live.")
 	httpPollMountOnLive := fs.Bool("http-poll-mount-on-live", false, "Chunk E: mount poll routes on the live HTTP listener (Posture 2). Requires --http-addr.")
 	httpPollPrefix := fs.String("http-poll-prefix", "/poll", "Chunk E: URL prefix when mounting poll on live listener (default /poll); ignored on isolated port.")
 	serveNamespace := fs.String("serve-namespace", "", "Chunk E: content-namespace scope (e.g. system/content/public). Tree binding at NAMESPACE/{hex(H)} = in-scope.")
 	serveWholeStore := fs.Bool("serve-scope-whole-store", false, "Chunk E: DEBUG OPT-IN — serve every H in local content-store (ruling §1.3 T2/T3 caveat).")
-	keyType := fs.String("key-type", "ed25519", "peer keypair algorithm: ed25519 (default) | ed448 (v7.67 §3). Applies when minting a new identity for this peer; honored by Go (--key-type), Python (--key-type), and forwarded to Rust once its CLI lands.")
-	hashType := fs.String("hash-type", "sha256", "content_hash_format / home format the peer authors content + substrate under: sha256 (default, 0x00) | sha384 (0x01). V7 v7.70 §1.2. Honored by Go (--hash-type), Rust (--hash-type, read at 0480712 2026-08-10), Python (--hash-type, read at e60c822 2026-08-10). NOTE: sha384 is accepted by all three CLIs. The two spec pins that blocked it are GONE as of 2026-08-10 (verified in spec text 2026-08-11): EXTENSION-NETWORK §6.5.3.1 has no 33-byte pin left, and EXTENSION-SIGNALING §6.3 carries an explicit \"Corrected 2026-08-10\" dropping the fixed-33 requirement on inner_content_hash — it is authored content and follows the signing peer's home format. §3.1's 33-byte rendezvous_key is deliberate and NOT the defect: it is pinned to the SHA-256 floor because a rendezvous key is a reproduced lookup token, not authored content. WHETHER GO RUNS SHA-384 END-TO-END IS UNMEASURED SINCE THAT CORRECTION — this note records the spec state, not a runtime result; re-measure before relying on it. See docs/validation/spec-issues/2026-08-10-the-33-byte-hash-*.")
+	keyType := fs.String("key-type", "ed25519", "peer keypair algorithm: ed25519 (default) | ed448 (v7.67 §3). Applies when minting a new identity for this peer. Honored by all three: Go --key-type, Python --key-type, Rust `key_type` on `peer init` (cmd/entity-peer/src/main.rs, PeerAction::Init) — and peer-manager HAS been forwarding it to rust init all along (see startRustPeer below). This note read \"forwarded to Rust once its CLI lands\" until 2026-08-12 (e), which was the SECOND claim in this file to contradict the forwarding code sitting a few hundred lines beneath it. A false negative about a sibling reads as their gap and is ours."+siblingSurfaceVerifiedAt())
+	hashType := fs.String("hash-type", "sha256", "content_hash_format / home format the peer authors content + substrate under: sha256 (default, 0x00) | sha384 (0x01). V7 v7.70 §1.2. Honored by all three: Go --hash-type, Rust `hash_type` (cmd/entity-peer/src/main.rs, on both `peer start` and `peer issue-binding`), Python --hash-type. NOTE: sha384 is accepted by all three CLIs. The two spec pins that blocked it are GONE as of 2026-08-10 (verified in spec text 2026-08-11): EXTENSION-NETWORK §6.5.3.1 has no 33-byte pin left, and EXTENSION-SIGNALING §6.3 carries an explicit \"Corrected 2026-08-10\" dropping the fixed-33 requirement on inner_content_hash — it is authored content and follows the signing peer's home format. §3.1's 33-byte rendezvous_key is deliberate and NOT the defect: it is pinned to the SHA-256 floor because a rendezvous key is a reproduced lookup token, not authored content. GO NOW RUNS SHA-384 END TO END, MEASURED 2026-08-12 (e): `HASH_TYPE=sha384 ./scripts/validate-complete.sh` → 1571 · 0F · 0S · 0W / 633 / 55 / 19, exit 0 on all four passes. This sentence read \"UNMEASURED SINCE THAT CORRECTION — re-measure before relying on it\" for two days, and the honest part of that warning was warranted: the first run found 1 F plus two more defects hidden behind it, all of them §4.5a item 1a identity-format violations in our own code. Fixed; see WORK-STATUS G-9. See docs/validation/spec-issues/2026-08-10-the-33-byte-hash-*."+siblingSurfaceVerifiedAt())
 	inboxRelayRegistry := fs.String("inbox-relay-registry", "", "EXTENSION-RELAY §3.5 REGISTRY-served inbox-relay decl chain (Go-only initially): comma-separated peer-names of registries to consult (in order). The names are translated to peer-ids from state. Forwarded as --inbox-relay-registry to entity-peer.")
-	validate := fs.Bool("validate", false, "GUIDE-CONFORMANCE §7a: enable system/validate/echo + system/validate/dispatch-outbound test handlers (unblocks concurrency.t1_2_concurrent_reentry). MUST NOT be on in production. Honored by all three impls.")
-	signalingNode := fs.Bool("signaling-node", false, "EXTENSION-SIGNALING §4/§5: serve the system/signaling rendezvous node (offer/collect/advertise) for the punch gate. Honored by all three impls as of 2026-08-08 (Go -signaling-node; Rust + Python --signaling-node). Off by default everywhere — a peer is a signaling CLIENT by default and only a deployed introducer serves. The flag registers the handler but grants nobody access, so it needs an admission posture: Go/Python get the default --open-access, Rust gets --debug-grants (passed unconditionally).")
-	publishRoot := fs.Bool("publish-root", false, "PROPOSAL-PEER-MANIFEST §4: mint signed system/peer/published-root on every tree-root change + serve via http-poll. Pair with --http-poll-addr to expose the manifest on the wire. Honored by all three impls, and all three now republish on a root change — measured live 2026-08-08 (Go, Rust 8879e06, Python c896e66; serving_mode.seed_republished PASSes three ways on real seq advances). The 2026-08-07 measurement of Rust + Python frozen at seq=0 (docs/validation/reports/2026-08-07-f-...md) is superseded: both built it after that report. NOTE the wording above describes what these impls DO, not what the spec requires — no landed spec obliges a publisher to ever republish, so a peer that mints once and freezes is conformant today. That gap is PROPOSAL-PUBLISHED-ROOT-PREFIX-AND-REPUBLISH §5 (DRAFT); until it folds, a non-republishing peer is not a sibling bug.")
-	serveClosureRoot := fs.Bool("serve-closure-root", false, "EXTENSION-NETWORK §6.5.6 Amendment 10: scope served set to the transitive trie-node closure reachable from system/peer/published-root. Pair with --publish-root so a consumer's signed-root hash-chain walk does not 404 on a CHAMP interior node. Mutually exclusive with --serve-namespace / --serve-scope-whole-store. Honored by all three impls: Go, Rust (cmd/entity-peer/src/commands/peer.rs, re-verified at rust caf1cd8 2026-08-11; already forwarded below), Python (takes a PATH — peer-manager passes \"published\").")
-	peerIssuedRegistry := fs.String("peer-issued-registry", "", "PROPOSAL-PEER-ISSUED-REGISTRY-BACKEND §2: pin one or more peer-issued registries (comma-separated `peer_id@tree_url_prefix`). Pair with validate-peer -peer-issued-bundle, which serves the fixture registry at that URL. An http:// prefix implies --substitute-allow-http (fixture registries are loopback-only). Honored by all three impls (2026-08-08), same peer_id@url spec, installing a trust root + a §4 chain entry carrying hints.endpoint. Rust's live remote-read seam landed 5c58195; before that it registered a backend but resolved against its LOCAL STORE only, and the category SKIPped rather than fail an unbuilt surface. Rust's flag is repeatable rather than comma-separated — peer-manager splits on comma and emits one occurrence per pin.")
-	publishPrefix := fs.String("publish-prefix", "", "EXTENSION-TREE §3.3a: the subtree --publish-root commits to, and the `prefix` the published root declares (e.g. system/content/ to publish only shareable content, or / for the universal tree). Empty keeps the peer's own default. This is how a peer publishes a SUBSET of its tree — the common deployment — rather than everything under system/. Go-only as of 2026-08-08: verified absent from rust f561493 and python e60c822 CLIs by reading both worktrees, so it is dropped with a warning for those types rather than passed and rejected.")
-	publishDescriptors := fs.Bool("publish-descriptors", false, "DOMAIN-LOCAL-FILES v1.3 §10.5 V3: configure the --files root with publish_descriptors=true so file reads write `system/content/descriptor/{hash}` entities into the tree. Arms local_files.v3_descriptor_publish_exercised. Honored by all three impls: Go, Rust (cmd/entity-peer/src/main.rs, re-verified at rust caf1cd8 2026-08-11), Python (2026-08-08).")
-	keepalive := fs.String("keepalive", "", "EXTENSION-NETWORK §2.3 keepalive override as interval_ms,timeout_ms,max_missed (e.g. 1500,800,2) so the §5.4 escalation is observable in seconds — pair with validate-peer -keepalive-envelope-ms for the liveness harness. A field may be empty to keep its spec default. Honored by all three impls: Go (-keepalive-*-ms), Python (--keepalive-*-ms, 0a0eb48), Rust (--keepalive-*-ms, 99ff398).")
-	discoveryAnnounce := fs.String("discovery-announce", "", "EXTENSION-DISCOVERY §3 — announce this peer on the mDNS backend at startup. Value is the transport profile_ref to advertise; the v1 mDNS backend serves `tcp` and `http-poll`. Requires the matching listener (--addr is always set by peer-manager; `http-poll` additionally needs --http-addr). Empty disables. Go-only: neither sibling exposes a CLI flag for it (rust b8e0ae2, python e60c822 — both have the announce capability and the `:announce` operation, just no startup flag), so it is dropped with a warning for those types. The OPERATION itself is covered cross-impl by discovery.v7a_announce_lifecycle, which needs no flag.")
-	issuerPolicyMode := fs.String("issuer-policy-mode", "", "EXTENSION-REGISTRY §6a.9 — run this peer as a peer-issued LIVE registry, accepting `register-request` / `revoke-request` / `renew-request`. Value is the issuer-policy mode: `open`, `allowlist` (needs --issuer-policy-allowlist), or `manual` (requests queue as 202 pending_review). Empty disables. ARMING DIVERGES ACROSS THE COHORT and this flag is Go's mechanism only: Go gates handler *registration* on this flag (cmd/entity-peer --issuer-policy-mode); Python always registers the handler and arms it over the wire via a `set-issuer-policy` operation (packages/entity-handlers/.../registry.py, py e60c822); Rust registers the three ops but exposes no CLI arming flag found at b8e0ae2. The spec names a `system/capability/registry-manage-issuer-policy` capability for editing the policy but defines no operation — routed as a spec gap. Forwarded to Go peers only; dropped with a warning otherwise.")
+	validate := fs.Bool("validate", false, "GUIDE-CONFORMANCE §7a: enable system/validate/echo + system/validate/dispatch-outbound test handlers (unblocks concurrency.t1_2_concurrent_reentry). MUST NOT be on in production. Honored by all three: Go -validate, Rust `validate` (cmd/entity-peer/src/main.rs), Python --validate (entity-cli argparse; handlers in packages/entity-handlers/src/entity_handlers/conformance.py). This was the one 'honored by all three' claim in this file carrying NO pin at all — unfalsifiable rather than merely stale."+siblingSurfaceVerifiedAt())
+	signalingNode := fs.Bool("signaling-node", false, "EXTENSION-SIGNALING §4/§5: serve the system/signaling rendezvous node (offer/collect/advertise) for the punch gate. Honored by all three: Go -signaling-node, Rust `signaling_node` (cmd/entity-peer/src/main.rs), Python --signaling-node. Off by default everywhere — a peer is a signaling CLIENT by default and only a deployed introducer serves. The flag registers the handler but grants nobody access, so it needs an admission posture: Go/Python get the default --open-access, Rust gets --debug-grants (passed unconditionally; rust has no --open-access, `debug_grants` is its equivalent)."+siblingSurfaceVerifiedAt())
+	publishRoot := fs.Bool("publish-root", false, "PROPOSAL-PEER-MANIFEST §4: mint signed system/peer/published-root on every tree-root change + serve via http-poll. Pair with --http-poll-addr to expose the manifest on the wire. Honored by all three, and all three republish on a root change. THAT SECOND HALF IS A RUNTIME CLAIM, so it carries its own measurement pin and not the CLI-surface one: `serving_mode.seed_republished` PASSes three ways on real seq advances — **re-measured 2026-08-12 (e) against live rust `dfd4d45` and py `ad0ef98` peers**, both started `--publish-root --http-poll-addr --serve-closure-root`. Reading a CLI cannot establish it, so it is re-run rather than re-dated. The 2026-08-07 measurement of Rust + Python frozen at seq=0 (docs/validation/reports/2026-08-07-f-...md) is superseded: both built it after that report. NOTE the wording above describes what these impls DO, not what the spec requires — no landed spec obliges a publisher to ever republish, so a peer that mints once and freezes is conformant today. That gap is PROPOSAL-PUBLISHED-ROOT-PREFIX-AND-REPUBLISH §5 (DRAFT); until it folds, a non-republishing peer is not a sibling bug.")
+	serveClosureRoot := fs.Bool("serve-closure-root", false, "EXTENSION-NETWORK §6.5.6 Amendment 10: scope served set to the transitive trie-node closure reachable from system/peer/published-root. Pair with --publish-root so a consumer's signed-root hash-chain walk does not 404 on a CHAMP interior node. Mutually exclusive with --serve-namespace / --serve-scope-whole-store. Honored by all three: Go, Rust `serve_closure_root` (declared in cmd/entity-peer/src/main.rs — this note cited commands/peer.rs, which is where it is CONSUMED, not declared; already forwarded below), Python --serve-closure-root (takes a PATH — peer-manager passes \"published\")."+siblingSurfaceVerifiedAt())
+	peerIssuedRegistry := fs.String("peer-issued-registry", "", "PROPOSAL-PEER-ISSUED-REGISTRY-BACKEND §2: pin one or more peer-issued registries (comma-separated `peer_id@tree_url_prefix`). Pair with validate-peer -peer-issued-bundle, which serves the fixture registry at that URL. An http:// prefix implies --substitute-allow-http (fixture registries are loopback-only). Honored by all three, same peer_id@url spec, installing a trust root + a §4 chain entry carrying hints.endpoint. Rust's flag is `peer_issued_registry: Vec<String>` — repeatable rather than comma-separated, so peer-manager splits on comma and emits one occurrence per pin. Its live remote-read seam is present: `HttpPollRegistryReader` implementing `entity_registry::peer_issued::RegistryTreeReader`, core/peer/src/poll_read.rs. [historical] that seam landed at rust 5c58195; before it, rust registered a backend but resolved against its LOCAL STORE only, and the category SKIPped rather than fail an unbuilt surface."+siblingSurfaceVerifiedAt())
+	publishPrefix := fs.String("publish-prefix", "", "EXTENSION-TREE §3.3a: the subtree --publish-root commits to, and the `prefix` the published root declares (e.g. system/content/ to publish only shareable content, or / for the universal tree). Empty keeps the peer's own default. This is how a peer publishes a SUBSET of its tree — the common deployment — rather than everything under system/. Go-only: absent from both sibling CLIs — established by enumerating rust's full `PeerAction::Start` arg set and py's full 49-flag argparse surface, not by grepping for one name — so it is dropped with a warning for those types rather than passed and rejected."+siblingSurfaceVerifiedAt())
+	publishDescriptors := fs.Bool("publish-descriptors", false, "DOMAIN-LOCAL-FILES v1.3 §10.5 V3: configure the --files root with publish_descriptors=true so file reads write `system/content/descriptor/{hash}` entities into the tree. Arms local_files.v3_descriptor_publish_exercised. Honored by all three: Go, Rust `publish_descriptors` (cmd/entity-peer/src/main.rs), Python --publish-descriptors. And the check it arms is a RUNTIME claim, so it is measured rather than inferred from the flag: `local_files.v3_descriptor_publish_exercised` PASSes against live rust `dfd4d45` and py `ad0ef98` peers, 2026-08-12 (e)."+siblingSurfaceVerifiedAt())
+	keepalive := fs.String("keepalive", "", "EXTENSION-NETWORK §2.3 keepalive override as interval_ms,timeout_ms,max_missed (e.g. 1500,800,2) so the §5.4 escalation is observable in seconds — pair with validate-peer -keepalive-envelope-ms for the liveness harness. A field may be empty to keep its spec default. Honored by all three, same three flag names: Go -keepalive-{interval,timeout,max-missed}-ms, Python --keepalive-{interval,timeout,max-missed}-ms, Rust `keepalive_{interval_ms,timeout_ms,max_missed}` (cmd/entity-peer/src/main.rs)."+siblingSurfaceVerifiedAt())
+	discoveryAnnounce := fs.String("discovery-announce", "", "EXTENSION-DISCOVERY §3 — announce this peer on the mDNS backend at startup. Value is the transport profile_ref to advertise; the v1 mDNS backend serves `tcp` and `http-poll`. Requires the matching listener (--addr is always set by peer-manager; `http-poll` additionally needs --http-addr). Empty disables. Go + Python: py ships --discovery-announce AND --discovery-profile in the entity-cli argparse; rust exposes NO CLI flag for it (absent from `PeerAction::Start`, enumerated in full), though it has the announce capability and the `:announce` operation. So it is dropped with a warning for rust only. This note read \"Go-only: neither sibling exposes a CLI flag for it\" until 2026-08-12 (e) — wrong about py. The OPERATION itself is covered cross-impl by discovery.v7a_announce_lifecycle, which needs no flag.")
+	issuerPolicyMode := fs.String("issuer-policy-mode", "", "EXTENSION-REGISTRY §6a.9 — run this peer as a peer-issued LIVE registry, accepting `register-request` / `revoke-request` / `renew-request`. Value is the issuer-policy mode: `open`, `allowlist` (needs --issuer-policy-allowlist), or `manual` (requests queue as 202 pending_review). Empty disables. ARMING DIVERGES ACROSS THE COHORT, but ONLY at the CLI: Go gates handler *registration* on this flag (cmd/entity-peer --issuer-policy-mode), while Python AND Rust both register the handler unconditionally and leave it inert until an issuer-policy is written (rust: RegisterRequestHandler in core/peer/src/lib.rs, ops bootstrapped at system/registry/peer-issued; python: packages/entity-handlers/.../registry.py). All three implement §6a.9.2 `set-issuer-policy`, so the validator arms either sibling over the wire and `registry_issuer` needs no flag from us — measured 2026-08-12 (e): python 19/19, rust 17/19 (the two failures are the arch-ruled register-result gap, not arming). This note previously said rust \"exposes no CLI arming flag\" AND that set-issuer-policy was python-only that \"go and rust do not implement\" — the first is true and irrelevant, the second was false twice over. Forwarded to Go peers only; dropped with a warning otherwise, and the warning now says why nothing is lost."+siblingSurfaceVerifiedAt())
 	issuerPolicyAllowlist := fs.String("issuer-policy-allowlist", "", "EXTENSION-REGISTRY §6a.9.1 — comma-separated target_peer_ids permitted to register when --issuer-policy-mode=allowlist. Ignored in other modes. Go-only, see --issuer-policy-mode.")
 	issuerPolicyNameConstraints := fs.String("issuer-policy-name-constraints", "", "EXTENSION-REGISTRY §6a.9.1 — POSIX glob narrowing which names this registry will issue (e.g. \"*.lab\"); a non-matching name is rejected 403 not_entitled. Empty = no constraint. Go-only, see --issuer-policy-mode.")
 	issuerPolicyDefaultTTL := fs.String("issuer-policy-default-ttl", "", "EXTENSION-REGISTRY §6a.9.1 — Go duration (e.g. 1h) the registry signs when register-request omits requested_ttl. Empty/zero = no expiry. Go-only, see --issuer-policy-mode.")
@@ -141,12 +195,12 @@ func cmdStart(args []string) {
 	case "go":
 		entry = startGoPeer(*name, *addr, *debug, *openAccess, *files, *history, *storage, *httpAddr, *httpPath, *wsAddr, *wsPath, *keyType, *hashType, registryPeerIDs, *clockTickMs, ka, pollFlags, logFile, lf)
 	case "rust":
-		// Rust 474bb11 (Chunk D), 58d9188 (Chunk E flags), 0616727 (v7.70 home-format).
+		// [historical] Rust 474bb11 (Chunk D), 58d9188 (Chunk E flags), 0616727 (v7.70 home-format).
 		// Rust ships --ws-listen for NETWORK §6.5.2b; cohort flag string is
 		// --ws-addr at the peer-manager boundary, translated below.
 		entry = startRustPeer(*name, *addr, *debug, *storage, *history, *files, *httpAddr, *httpPath, *wsAddr, *keyType, *hashType, ka, pollFlags, logFile, lf)
 	case "python":
-		// Python aligned with Chunk D and 74b3335 (Chunk E flags); Python
+		// [historical] Python aligned with Chunk D and 74b3335 (Chunk E flags); Python
 		// ships --key-type from f231406 and --hash-type from ff6d1e2 (v7.70).
 		if *wsAddr != "" {
 			fmt.Fprintf(os.Stderr, "Note: --ws-addr has no Python equivalent; ignored for Python peer %q\n", *name)
@@ -444,6 +498,7 @@ poll:
 		ReadyFile: readyFile,
 		LogFile:   logFile,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
+		Owner:     currentOwner(),
 	}
 }
 
@@ -485,7 +540,7 @@ func startRustPeer(name, addr string, debug bool, storage, history, files, httpA
 		lf:         lf,
 	}
 
-	// Ensure the peer identity exists (init if needed). Rust 7b48eda ships
+	// Ensure the peer identity exists (init if needed). [historical] Rust 7b48eda ships
 	// `peer init --key-type {ed25519|ed448}`; `peer start` auto-detects from
 	// the algorithm-tagged PEM header. Run it as a one-shot container so the
 	// keypair lands in the bind-mounted ~/.entity/peers.
@@ -525,7 +580,7 @@ func startRustPeer(name, addr string, debug bool, storage, history, files, httpA
 		cmdArgs = append(cmdArgs, "--files", files)
 	}
 	if httpAddr != "" {
-		// Rust 474bb11: --http-listen / --http-path. Same semantics as
+		// [historical] Rust 474bb11: --http-listen / --http-path. Same semantics as
 		// Go's -http-addr / -http-path.
 		cmdArgs = append(cmdArgs, "--http-listen", httpAddr, "--http-path", httpPath)
 	}
@@ -537,7 +592,7 @@ func startRustPeer(name, addr string, debug bool, storage, history, files, httpA
 		// just pass --ws-listen.
 		cmdArgs = append(cmdArgs, "--ws-listen", wsAddr)
 	}
-	// Chunk E flags (Rust 58d9188 — same flag names as cohort convergence).
+	// Chunk E flags ([historical] Rust 58d9188 — same flag names as cohort convergence).
 	if poll.pollAddr != "" {
 		cmdArgs = append(cmdArgs, "--http-poll-addr", poll.pollAddr)
 	}
@@ -552,10 +607,15 @@ func startRustPeer(name, addr string, debug bool, storage, history, files, httpA
 	}
 	if poll.serveWholeStore {
 		// Rust handoff notes v1 ships namespace-only; warn.
-		fmt.Fprintf(os.Stderr, "Warning: --serve-scope-whole-store ignored for type=rust (v1 ships namespace-only per Rust 33b3984)\n")
+		// Rust ships serve_namespace AND serve_closure_root but NOT
+		// serve_scope_whole_store — enumerated across PeerAction::Start, not
+		// grepped for one name. This warning said "v1 ships namespace-only",
+		// which stopped being true when 3e9c9fc [historical] added the closure
+		// scope; the DROP is still correct, the reason given for it was not.
+		fmt.Fprintf(os.Stderr, "Warning: --serve-scope-whole-store ignored for type=rust (rust has serve-namespace + serve-closure-root; no whole-store opt-in)\n")
 	}
 	if poll.serveClosureRoot {
-		// R1 (Rust 3e9c9fc): --serve-closure-root CLI flag landed
+		// R1 ([historical] Rust 3e9c9fc): --serve-closure-root CLI flag landed
 		// (publishes over the whole peer subtree when paired with --publish-root).
 		cmdArgs = append(cmdArgs, "--serve-closure-root")
 	}
@@ -575,11 +635,11 @@ func startRustPeer(name, addr string, debug bool, storage, history, files, httpA
 		cmdArgs = append(cmdArgs, "--signaling-node")
 	}
 	if poll.publishDescriptors {
-		// R5 (Rust 3e9c9fc): --publish-descriptors CLI flag landed.
+		// R5 ([historical] Rust 3e9c9fc): --publish-descriptors CLI flag landed.
 		cmdArgs = append(cmdArgs, "--publish-descriptors")
 	}
 	if poll.peerIssuedRegistry != "" {
-		// Rust 5c58195: the live remote-read seam landed (RegistryTreeReader +
+		// [historical] Rust 5c58195: the live remote-read seam landed (RegistryTreeReader +
 		// HttpPollRegistryReader over a poll_read module), so the pin now
 		// reaches the wire instead of resolving against the local store. Until
 		// then this passthrough did not exist and the category SKIPped.
@@ -595,26 +655,51 @@ func startRustPeer(name, addr string, debug bool, storage, history, files, httpA
 		}
 	}
 	if poll.publishPrefix != "" {
-		// Verified absent from both sibling CLIs (rust f561493, python e60c822)
-		// by reading the worktrees. Passing it would be rejected at startup, so
+		// Absent from both sibling CLIs — established by enumerating rust's full
+		// PeerAction::Start arg set and python's full argparse surface, at the
+		// siblingPin* commits. Passing it would be rejected at startup, so
 		// drop it and SAY SO — a silently dropped scope flag would publish the
 		// peer's default subtree while the operator believed it had narrowed.
 		fmt.Fprintf(os.Stderr, "Warning: --publish-prefix ignored for this peer type (Go-only; the peer publishes its own default subtree)\n")
 	}
 	if poll.discoveryAnnounce != "" {
-		fmt.Fprintf(os.Stderr, "Warning: --discovery-announce ignored for this peer type (Go-only startup flag; the `:announce` operation itself is cross-impl and covered by discovery.v7a_announce_lifecycle)\n")
+		// Dropped for RUST only, and now for a verified reason rather than a
+		// carried one: rust's `PeerAction::Start` has no discovery flag at all
+		// (enumerated in full, not grepped). Python HAS the flag and is now
+		// forwarded — see startPythonPeer. Until 2026-08-12 (e) this branch was
+		// duplicated verbatim into the python path on a stale "Go-only" belief,
+		// which is the concrete cost of the G-7 defect class: the claim did not
+		// merely read wrong, it silently disabled a sibling capability the
+		// operator had asked for, and this warning made the skip look
+		// deliberate.
+		fmt.Fprintf(os.Stderr, "Warning: --discovery-announce ignored for type=rust (no CLI flag in PeerAction::Start; the `:announce` operation itself is cross-impl and covered by discovery.v7a_announce_lifecycle)\n")
 	}
 	if poll.issuerPolicyMode != "" {
 		// The §6a.9 handler exists in all three (rust
-		// extensions/registry/src/registration.rs @ b8e0ae2, python
-		// packages/entity-handlers/.../registry.py @ e60c822) — what differs is
-		// how it is ARMED. Neither sibling exposes a CLI flag for it; python
-		// arms over the wire via a `set-issuer-policy` operation that go and
-		// rust do not implement. Dropping silently would start a peer with no
-		// issuer and score its absent registrations as peer failures.
-		fmt.Fprintf(os.Stderr, "Warning: --issuer-policy-mode ignored for this peer type (Go arming mechanism; python arms via the set-issuer-policy operation, rust exposes no CLI arming flag)\n")
+		// extensions/registry/src/registration.rs, python
+		// packages/entity-handlers/.../registry.py; both re-read at the
+		// siblingPin* commits) — what differs is only how it is ARMED, and
+		// dropping this flag costs NOTHING for either sibling.
+		//
+		// TWO CORRECTIONS, 2026-08-12 (e). This comment said python "arms over
+		// the wire via a `set-issuer-policy` operation that go and rust do not
+		// implement." Both halves were wrong: rust registers the op (it is in
+		// the `registry-peer-issued` bootstrap op list beside the three write
+		// verbs, core/peer/src/lib.rs) and go implements it too — the
+		// registry_issuer category's three set_issuer_policy_* checks PASS
+		// against all three. And rust registers its RegisterRequestHandler
+		// UNCONDITIONALLY, inert until an issuer-policy is written, exactly like
+		// python.
+		//
+		// So the arming divergence is narrower than this said: it is a CLI
+		// convenience only. The category writes system/registry/issuer-policy
+		// itself, so `registry_issuer` is fully reachable against both siblings
+		// with no flag at all — measured 2026-08-12 (e): python 19/19,
+		// rust 17/19 (the two manual-mode rows, which is the arch-ruled
+		// register-result gap, not an arming gap).
+		fmt.Fprintf(os.Stderr, "Warning: --issuer-policy-mode ignored for this peer type (Go's CLI arming mechanism only; rust and python register the handler unconditionally and are armed over the wire by the validator's own set-issuer-policy call, so no coverage is lost)\n")
 	}
-	// §2.3 keepalive overrides (Rust 99ff398 — same flag names as Go and
+	// §2.3 keepalive overrides ([historical] Rust 99ff398 — same flag names as Go and
 	// Python in clap's double-dash dialect; omitted fields keep spec defaults).
 	cmdArgs = append(cmdArgs, keepalive.args("--")...)
 
@@ -695,7 +780,7 @@ func discoverPeerID(addr string) string {
 // --- Python peer ---
 
 func startPythonPeer(name, addr string, debug, openAccess bool, history, files, httpAddr, httpPath, keyType, hashType string, keepalive keepaliveSpec, poll chunkEFlags, logFile string, lf *os.File) *PeerEntry {
-	// Identity provisioning. Python 91f8f77 ships the algorithm-tagged PEM
+	// Identity provisioning. [historical] Python 91f8f77 ships the algorithm-tagged PEM
 	// loader, so the prior Ed448 skip can drop.
 	if err := ensureIdentity(name, keyType); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not create identity %q: %v (falling back to 'default')\n", name, err)
@@ -715,7 +800,7 @@ func startPythonPeer(name, addr string, debug, openAccess bool, history, files, 
 	// The entrypoint is `entity-core`, so args start at the subcommand.
 	cmdArgs := []string{"start", "--listen", addr, "--identity", name}
 	if keyType != "" && keyType != "ed25519" {
-		// Python ships --key-type from f231406 (v7.67 Phase 2 backend).
+		// [historical] Python ships --key-type from f231406 (v7.67 Phase 2 backend).
 		// Forward only when non-default so older Python builds without the
 		// flag still work for ed25519 identities.
 		cmdArgs = append(cmdArgs, "--key-type", keyType)
@@ -763,7 +848,7 @@ func startPythonPeer(name, addr string, debug, openAccess bool, history, files, 
 		// Python aligned with --http-addr / --http-path (Amendment 3).
 		cmdArgs = append(cmdArgs, "--http-addr", httpAddr, "--http-path", httpPath)
 	}
-	// Chunk E flags (Python 74b3335 — same flag names as cohort convergence).
+	// Chunk E flags ([historical] Python 74b3335 — same flag names as cohort convergence).
 	if poll.pollAddr != "" {
 		cmdArgs = append(cmdArgs, "--http-poll-addr", poll.pollAddr)
 	}
@@ -814,26 +899,51 @@ func startPythonPeer(name, addr string, debug, openAccess bool, history, files, 
 		cmdArgs = append(cmdArgs, "--peer-issued-registry", poll.peerIssuedRegistry)
 	}
 	if poll.publishPrefix != "" {
-		// Verified absent from both sibling CLIs (rust f561493, python e60c822)
-		// by reading the worktrees. Passing it would be rejected at startup, so
+		// Absent from both sibling CLIs — established by enumerating rust's full
+		// PeerAction::Start arg set and python's full argparse surface, at the
+		// siblingPin* commits. Passing it would be rejected at startup, so
 		// drop it and SAY SO — a silently dropped scope flag would publish the
 		// peer's default subtree while the operator believed it had narrowed.
 		fmt.Fprintf(os.Stderr, "Warning: --publish-prefix ignored for this peer type (Go-only; the peer publishes its own default subtree)\n")
 	}
 	if poll.discoveryAnnounce != "" {
-		fmt.Fprintf(os.Stderr, "Warning: --discovery-announce ignored for this peer type (Go-only startup flag; the `:announce` operation itself is cross-impl and covered by discovery.v7a_announce_lifecycle)\n")
+		// FORWARDED as of 2026-08-12 (e). Python has had this flag; we were
+		// dropping it on a stale "Go-only" belief copied from the rust branch.
+		//
+		// The SHAPES DIVERGE and the translation is the substance: Go's
+		// -discovery-announce takes the profile_ref as its VALUE, while python
+		// splits it in two — --discovery-announce is a `store_true` and the ref
+		// goes in --discovery-profile (default "tcp"). One Go flag becomes two
+		// python flags, so this is a translation, not a rename.
+		cmdArgs = append(cmdArgs, "--discovery-announce",
+			"--discovery-profile", poll.discoveryAnnounce)
 	}
 	if poll.issuerPolicyMode != "" {
 		// The §6a.9 handler exists in all three (rust
-		// extensions/registry/src/registration.rs @ b8e0ae2, python
-		// packages/entity-handlers/.../registry.py @ e60c822) — what differs is
-		// how it is ARMED. Neither sibling exposes a CLI flag for it; python
-		// arms over the wire via a `set-issuer-policy` operation that go and
-		// rust do not implement. Dropping silently would start a peer with no
-		// issuer and score its absent registrations as peer failures.
-		fmt.Fprintf(os.Stderr, "Warning: --issuer-policy-mode ignored for this peer type (Go arming mechanism; python arms via the set-issuer-policy operation, rust exposes no CLI arming flag)\n")
+		// extensions/registry/src/registration.rs, python
+		// packages/entity-handlers/.../registry.py; both re-read at the
+		// siblingPin* commits) — what differs is only how it is ARMED, and
+		// dropping this flag costs NOTHING for either sibling.
+		//
+		// TWO CORRECTIONS, 2026-08-12 (e). This comment said python "arms over
+		// the wire via a `set-issuer-policy` operation that go and rust do not
+		// implement." Both halves were wrong: rust registers the op (it is in
+		// the `registry-peer-issued` bootstrap op list beside the three write
+		// verbs, core/peer/src/lib.rs) and go implements it too — the
+		// registry_issuer category's three set_issuer_policy_* checks PASS
+		// against all three. And rust registers its RegisterRequestHandler
+		// UNCONDITIONALLY, inert until an issuer-policy is written, exactly like
+		// python.
+		//
+		// So the arming divergence is narrower than this said: it is a CLI
+		// convenience only. The category writes system/registry/issuer-policy
+		// itself, so `registry_issuer` is fully reachable against both siblings
+		// with no flag at all — measured 2026-08-12 (e): python 19/19,
+		// rust 17/19 (the two manual-mode rows, which is the arch-ruled
+		// register-result gap, not an arming gap).
+		fmt.Fprintf(os.Stderr, "Warning: --issuer-policy-mode ignored for this peer type (Go's CLI arming mechanism only; rust and python register the handler unconditionally and are armed over the wire by the validator's own set-issuer-policy call, so no coverage is lost)\n")
 	}
-	// §2.3 keepalive overrides (Python 0a0eb48 — same flag names as the Go
+	// §2.3 keepalive overrides ([historical] Python 0a0eb48 — same flag names as the Go
 	// peer in argparse's double-dash dialect; omitted fields keep spec defaults).
 	cmdArgs = append(cmdArgs, keepalive.args("--")...)
 

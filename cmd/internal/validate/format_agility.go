@@ -620,15 +620,41 @@ func attemptHandshakeWithKeyType(ctx context.Context, addr string, keyTypeByte b
 // envelope. Code extraction handles cross-impl ErrorData schema variation
 // via a strict-then-generic decode fallback (Go/Rust use the {code,
 // message} struct shape; some impls may use a generic CBOR map).
+//
+// Extraction is gated on the RESULT'S TYPE, not on the status class, and that
+// is load-bearing. It used to require `status >= 400`, which encodes the
+// assumption that codes only ever ride failures. They do not:
+// EXTENSION-REGISTRY §6a.9's status table pins a code on a **2xx** row —
+// `202 | pending_review` for manual mode, which Go emits as an error-SHAPED
+// entity precisely so the code has somewhere to live. Under the status gate
+// that code was silently dropped to "", so a check asserting it could not have
+// passed against ANY peer, however conformant.
+//
+// Found while discharging arch's R-5 ("a check of a pinned status-table row
+// MUST assert the code, not the status alone"): the audit reached a row the
+// instrument was structurally incapable of asserting. That is the same family
+// as R-5 itself, one layer down — the check was not merely unwritten; the
+// extractor could not have fed it. *(First attempt at this fix moved the gate
+// to `>= 300`, which still excludes 202. The status class was never the right
+// discriminator.)*
 func extractStatusAndCode(respEnv entity.Envelope) (uint, string, types.ExecuteResponseData, error) {
 	resp, err := types.ExecuteResponseDataFromEntity(respEnv.Root)
 	if err != nil {
 		return 0, "", types.ExecuteResponseData{}, fmt.Errorf("decode execute response data: %w", err)
 	}
 	var code string
-	if resp.Status >= 400 && len(resp.Result) > 0 {
+	if len(resp.Result) > 0 {
 		var resultEnt entity.Entity
 		if err := ecf.Decode(resp.Result, &resultEnt); err == nil {
+			// Gate on the result's TYPE, not the status class. A code lives
+			// wherever an error-shaped entity does, and §6a.9 pins one on a
+			// 2xx row. The status-class gate is kept only as the fallback's
+			// trigger, so a >=400 response whose body is NOT an error entity
+			// still reports something rather than silently nothing.
+			isErrorShaped := resultEnt.Type == types.TypeError
+			if !isErrorShaped && resp.Status < 400 {
+				return resp.Status, "", resp, nil
+			}
 			var errData types.ErrorData
 			if err := ecf.Decode(resultEnt.Data, &errData); err == nil && errData.Code != "" {
 				code = errData.Code

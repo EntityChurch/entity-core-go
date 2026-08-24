@@ -56,6 +56,24 @@
 #              the ruling and the validator's own SHA-256 assumptions land with
 #              it. Go did both at e166971. Run it; treat a failure as a failure.
 #
+#              AND FOR TWO DAYS NOBODY DID. Promoted to a gate 2026-08-10, first
+#              measured 2026-08-12 (e): it was **1 F**, and had been the whole
+#              time — published_root.v5_outbound_dial, `signer
+#              ecf-sha256:ef55… ≠ pinned identity ecfv1-sha384:f2ed…`, the
+#              validator deriving the publisher's identity under its own home
+#              format while the publisher authored it at the §4.5a item 1a
+#              floor. Two more of the same defect were invisible until
+#              core/entity started refusing the construction. All three fixed;
+#              this run is now 1571 · 0F · 0S · 0W / 633 / 55 / 19, exit 0 on
+#              all four passes.
+#
+#              THE LESSON IS NOT THE BUG. A gate whose number no tracker carries
+#              is indistinguishable from one nobody runs — the same class as a
+#              conformance profile nothing invokes (G-2/G-2a). docs/status/
+#              WORK-STATUS.md §1 now has a row for this run, and it is not
+#              redundant with the SHA-256 row: every check exercises exactly one
+#              format, so a home-format defect is reachable ONLY here.
+#
 #              This block previously read "IT DOES NOT PASS TODAY, AND THAT IS
 #              THE FINDING — 27 F + 1 S in pass 1, 13 F in pass 2 at 502ac9c."
 #              Every word of that was true when written and false four commits
@@ -148,6 +166,51 @@ else
     echo "    --peer-issued-registry is unavailable for $TYPE; the six"
     echo "    REG-PEERISSUED-* vectors will skip rather than fail an unbuilt surface."
 fi
+
+# PASS 0 — the v767 conformance corpus, before any peer starts.
+#
+# A-3, closed 2026-08-12. This is a STATIC artifact check: it decodes the
+# corpus, re-derives every crypto vector, and asserts the file sha. It needs no
+# peer, so it runs first and fails fast — a bad corpus invalidates every
+# cross-impl claim made against it, and finding that out after four peer passes
+# is four passes too late.
+#
+# It is wired here rather than left as a manual command because that is the
+# defect that produced A-3 in the first place: the corpus was generated once by
+# a script that was never committed, drifted from its source for two months, and
+# nothing noticed — because nothing ran. A verifier nobody invokes is the same
+# class as the SHA-384 gate nobody read (G-9) and the core profile nothing ran
+# (G-2). If it is not in the gate, it is not a check.
+#
+# TWO CHECKS, AND THEY ASSERT DIFFERENT THINGS. Running only the first is what
+# let the corpus drift:
+#   v767-corpus-verify  — the artifact is the one we expect (pinned sha, decodes,
+#                         every crypto vector re-derives).
+#   v767-corpus-build -check — the artifact is what the SOURCE produces, and the
+#                         two copies agree. Writes nothing.
+# The F16 correction landed in the .cbor and never in the .diag; both files
+# stayed internally plausible and the corpus verified 52/0 against itself for
+# two months. Only the second check can see that.
+echo "==> PASS 0 — v767 conformance corpus (static; no peer)"
+RC0=0
+if [ -d "../entity-core-protocol/specs/test-vectors/v767" ]; then
+    set +e
+    go run ./cmd/v767-corpus-verify
+    RC0=$?
+    if [ "$RC0" -eq 0 ]; then
+        echo
+        echo "    source-produces-artifact:"
+        go run ./cmd/v767-corpus-build -check
+        RC0=$?
+    fi
+    set -e
+else
+    echo "    SKIPPED — ../entity-core-protocol is not present."
+    echo "    This is the spec repo's artifact; without it there is nothing to verify."
+    echo "    Clone the sibling to run this pass. Not an allowlisted skip: it is an"
+    echo "    absent input, and it is reported rather than silently passed."
+fi
+echo
 
 echo "==> reference peer (origination / A-role target)"
 REF_ADDR=$(go run ./cmd/peer-manager start --name "$REF" --type go --debug \
@@ -360,7 +423,7 @@ if [ "${KEEP:-0}" != "1" ]; then
 fi
 
 echo
-echo "PASS 1 exit $RC1 (all surfaces, closure scope) · PASS 1b exit $RC1B (core profile, same target) · PASS 2 exit $RC2 (serving_mode, namespace scope) · PASS 3 exit $RC3 (registry_issuer, registry posture)"
+echo "PASS 0 exit $RC0 (v767 corpus, static) · PASS 1 exit $RC1 (all surfaces, closure scope) · PASS 1b exit $RC1B (core profile, same target) · PASS 2 exit $RC2 (serving_mode, namespace scope) · PASS 3 exit $RC3 (registry_issuer, registry posture)"
 echo "Zero failures AND zero skips is the bar for passes 1, 2 and 3 — read each COVERAGE"
 echo "block for anything that did not run, and close it rather than allowlisting it."
 echo
@@ -369,5 +432,5 @@ echo "matters: they are PROFILE-KEYED skips — the extension surface that sits 
 echo "v7.72 §9.0 core tier by definition, exempted in HasFailures via isProfileKeyedSkip,"
 echo "NOT by an -allow-skip allowlist. A skip there that is not profile-keyed still fails"
 echo "the pass. Read 1b's exit code, not its skip count."
-[ "$RC1" -eq 0 ] && [ "$RC1B" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 0 ] || exit 1
+[ "$RC0" -eq 0 ] && [ "$RC1" -eq 0 ] && [ "$RC1B" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 0 ] || exit 1
 exit 0

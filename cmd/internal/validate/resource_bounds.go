@@ -56,6 +56,29 @@ const (
 	r3ConnectionAttempts  = 256
 	r3PerConnectTimeout   = 2 * time.Second
 	r3KeepServingDeadline = 5 * time.Second
+
+	// r3RefusalReadWindow is how long a freshly-dialed socket is watched for
+	// an immediate close before it is treated as admitted.
+	//
+	// This exists because a TCP dial CANNOT see a close-based refusal, and
+	// §4.10(c) explicitly permits one ("an implementation MAY instead refuse
+	// by closing the connection"). The kernel completes the handshake out of
+	// the listen backlog, so Dial returns success whether the peer went on to
+	// serve the connection or closed it on sight. Counting only Dial errors
+	// therefore scores a conformant self-bounded peer as "no refusals" —
+	// which is exactly what happened when Go implemented the bound.
+	//
+	// The discriminator: an ADMITTED connection is silent until we send a
+	// request, so a read blocks; a REFUSED one returns EOF/RST almost
+	// immediately. Probed concurrently across all sockets, so the window is
+	// paid once, not per connection.
+	r3RefusalReadWindow = 250 * time.Millisecond
+
+	// r3RecoverySettle bounds how long the peer is given to notice the
+	// drained flood and free its admission slots before the post-flood serve
+	// probe is believed. A bounded peer legitimately refuses while at
+	// capacity; what it must not do is stay full after the load is gone.
+	r3RecoverySettle = 3 * time.Second
 )
 
 // runResourceBounds is the entry point invoked by the suite. addr is the
@@ -284,46 +307,117 @@ func runR3ConnectionFlood(ctx context.Context, addr string, newClient func() (*P
 	}
 
 	conns := make([]net.Conn, 0, r3ConnectionAttempts)
-	defer func() {
+	closeFlood := func() {
 		for _, c := range conns {
 			_ = c.Close()
 		}
-	}()
+		conns = nil
+	}
+	defer closeFlood()
 
 	floodDialer := net.Dialer{Timeout: r3PerConnectTimeout}
-	refused, accepted := 0, 0
+	dialRefused := 0
 	var firstRefusal string
 	for i := 0; i < r3ConnectionAttempts; i++ {
 		c, err := floodDialer.DialContext(ctx, "tcp", addr)
 		if err != nil {
-			refused++
+			dialRefused++
 			if firstRefusal == "" {
-				firstRefusal = fmt.Sprintf("attempt %d/%d: %v", i+1, r3ConnectionAttempts, err)
+				firstRefusal = fmt.Sprintf("dial refused at attempt %d/%d: %v", i+1, r3ConnectionAttempts, err)
 			}
 			continue
 		}
 		conns = append(conns, c)
-		accepted++
 	}
 
-	// Keeps-serving check — independent of acceptance outcome.
-	keepCtx, cancel := context.WithTimeout(ctx, r3KeepServingDeadline)
-	defer cancel()
-	keepServing, keepReason := r3KeepServingProbe(keepCtx, newClient)
+	// Second refusal shape: accepted by the kernel, closed by the peer. See
+	// r3RefusalReadWindow — a dial cannot see this, and it is the shape
+	// §4.10(c) explicitly permits.
+	closeRefused := r3CountClosedByPeer(conns)
+	if closeRefused > 0 && firstRefusal == "" {
+		firstRefusal = fmt.Sprintf("%d of %d connections were accepted then closed by the peer (§4.10(c) close-refusal)", closeRefused, len(conns))
+	}
+	refused := dialRefused + closeRefused
+	admitted := len(conns) - closeRefused
+
+	// Probed WHILE the flood is held. For a self-bounded peer a refusal here
+	// is correct behaviour, not a failure — it is at capacity, and that is
+	// the whole point of a bound. So this result only decides the
+	// no-refusal branches (is admission delegated externally, or absent).
+	heldCtx, cancelHeld := context.WithTimeout(ctx, r3KeepServingDeadline)
+	keepServingHeld, heldReason := r3KeepServingProbe(heldCtx, newClient)
+	cancelHeld()
+
+	// Now drain the flood and ask the question that IS universal: once the
+	// load is gone, does the peer serve again? A bounded peer that stays
+	// full after its clients disconnect has leaked admission slots, which is
+	// a real defect and the one this arm exists to catch.
+	closeFlood()
+	recovered, recoveredReason := false, ""
+	deadline := time.Now().Add(r3RecoverySettle)
+	for {
+		recCtx, cancelRec := context.WithTimeout(ctx, r3KeepServingDeadline)
+		recovered, recoveredReason = r3KeepServingProbe(recCtx, newClient)
+		cancelRec()
+		if recovered || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 
 	switch {
-	case refused > 0 && keepServing:
-		return PassCheck(fmt.Sprintf("opened %d/%d connections; peer began refusing at %s (self-bounded admission); reconnect + tree.get succeeded (keeps serving)", accepted, r3ConnectionAttempts, firstRefusal))
-	case refused > 0 && !keepServing:
-		return FailCheck(fmt.Sprintf("opened %d/%d connections; peer refused some (self-bounded admission) but then failed the follow-up serve probe: %s", accepted, r3ConnectionAttempts, keepReason))
-	case refused == 0 && keepServing:
-		// All accepted, peer still serving. Spec-allowed per §4.10(c)
-		// external-admission carve-out; not a FAIL.
-		return WarnCheck(fmt.Sprintf("opened all %d connections without refusal and peer kept serving — admission likely delegated externally (systemd / proxy / OS); §4.10(c) SHOULD, not gated", r3ConnectionAttempts))
+	case refused > 0 && recovered:
+		served := "refused the probe while at capacity (correct — it is bounded)"
+		if keepServingHeld {
+			served = "kept serving even while at capacity"
+		}
+		return PassCheck(fmt.Sprintf("admitted %d/%d connections, then refused: %s (self-bounded admission); %s, and served again once the flood drained",
+			admitted, r3ConnectionAttempts, firstRefusal, served))
+	case refused > 0 && !recovered:
+		return FailCheck(fmt.Sprintf("admitted %d/%d and refused the rest (self-bounded), but did NOT serve again after the flood drained (%s) — admission slots leaked; the bound must release when connections close",
+			admitted, r3ConnectionAttempts, recoveredReason))
+	case keepServingHeld:
+		// All admitted, peer still serving under the full load. Spec-allowed
+		// per §4.10(c)'s external-admission carve-out; not a FAIL.
+		return WarnCheck(fmt.Sprintf("admitted all %d connections without refusal and kept serving — no self-imposed bound, so admission is delegated externally (systemd / proxy / OS fd limit) or absent; §4.10(c) is a SHOULD, so this is not gated", r3ConnectionAttempts))
 	default:
-		// All accepted, peer NOT serving — fell over without rejecting.
-		return FailCheck(fmt.Sprintf("opened all %d connections without refusal AND peer fell over on the follow-up serve probe (%s) — neither self-bounded nor externally delegated; this is the §4.10(c) failure shape", r3ConnectionAttempts, keepReason))
+		// All admitted, peer NOT serving — fell over without rejecting.
+		return FailCheck(fmt.Sprintf("admitted all %d connections without refusal AND fell over on the serve probe (%s) — neither self-bounded nor externally delegated; this is the §4.10(c) failure shape", r3ConnectionAttempts, heldReason))
 	}
+}
+
+// r3CountClosedByPeer reports how many of the dialed sockets the peer closed
+// on sight — the close-based refusal §4.10(c) permits, which a successful
+// Dial cannot distinguish from admission.
+//
+// An admitted connection is silent until the client speaks, so a read blocks
+// until the window expires; a refused one returns EOF (or a reset) at once.
+// Probed concurrently so the window is paid once for the whole flood rather
+// than once per socket — 256 sequential reads would add a minute to the suite.
+func r3CountClosedByPeer(conns []net.Conn) int {
+	if len(conns) == 0 {
+		return 0
+	}
+	results := make(chan bool, len(conns))
+	for _, c := range conns {
+		go func(c net.Conn) {
+			_ = c.SetReadDeadline(time.Now().Add(r3RefusalReadWindow))
+			var b [1]byte
+			_, err := c.Read(b[:])
+			// A deadline expiry means the socket is still open and silent:
+			// admitted. Anything else (EOF, reset) means the peer hung up.
+			var ne net.Error
+			results <- !(errors.As(err, &ne) && ne.Timeout())
+			_ = c.SetReadDeadline(time.Time{})
+		}(c)
+	}
+	closed := 0
+	for range conns {
+		if <-results {
+			closed++
+		}
+	}
+	return closed
 }
 
 func r3KeepServingProbe(ctx context.Context, newClient func() (*PeerClient, error)) (bool, string) {

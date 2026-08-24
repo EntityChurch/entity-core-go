@@ -47,6 +47,7 @@ func runMultiSig(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("n_equals_one_rejected", "V7 §3.6 (multisig M3)")
 	r.Declare("local_not_in_signers_rejected", "V7 §5.5 (multisig M6)")
 	r.Declare("below_threshold_rejected", "V7 §5.5 (multisig M4)")
+	r.Declare("below_threshold_denied_write", "V7 §5.5 (multisig M4) + GUIDE-CONFORMANCE §2.4a")
 	// Multisig amendment §3.3 — within-cap precedence (M3 fires before M4):
 	r.Declare("precedence_m3_beats_missing_sigs", "V7 §3.6 (M3 precedence 25a)")
 	r.Declare("precedence_m3_beats_invalid_sigs", "V7 §3.6 (M3 precedence 25b)")
@@ -77,6 +78,9 @@ func runMultiSig(ctx context.Context, client *PeerClient) []CheckResult {
 	})
 	r.Run("below_threshold_rejected", func() CheckOutcome {
 		return toOutcome(checkMultiSigBelowThreshold(ctx, client))
+	})
+	r.Run("below_threshold_denied_write", func() CheckOutcome {
+		return toOutcome(checkMultiSigBelowThresholdWrite(ctx, client))
 	})
 
 	r.Run("precedence_m3_beats_missing_sigs", func() CheckOutcome {
@@ -117,6 +121,33 @@ func buildMultiSigExecute(
 	threshold uint64,
 	signWith []multiSigSigner,
 	parent *hash.Hash,
+) (entity.Envelope, error) {
+	// Every pre-2026-08-12 caller drives a read against the type surface.
+	// Preserved exactly so a divergence between the read rows and the new
+	// write row is attributable to read-vs-write and nothing else.
+	return buildMultiSigExecuteOp(client, signers, threshold, signWith, parent,
+		"get", "system/type/system/peer")
+}
+
+// buildMultiSigExecuteOp is buildMultiSigExecute with the driven operation and
+// resource target made explicit.
+//
+// WHY IT IS PARAMETERIZED (2026-08-12 §2.4a re-sweep). Every one of the
+// category's eleven checks — the whole M3/M4/M6 surface, positive half
+// included — drove `Operation: "get"` from a single hardcoded site. That is
+// the coverage shape N-2 found in the temporal family, in a class N-2's
+// sampling note did not name: a peer that verifies multi-granter structure and
+// counts K-of-N signatures on its READ path and not on its WRITE path scores
+// 11/11 here and still accepts a forged joint authority to write. The status
+// assertion cannot see it, because the status is correct.
+func buildMultiSigExecuteOp(
+	client *PeerClient,
+	signers []multiSigSigner,
+	threshold uint64,
+	signWith []multiSigSigner,
+	parent *hash.Hash,
+	operation string,
+	resourcePath string,
 ) (entity.Envelope, error) {
 	kp := client.Keypair()
 	identity := client.IdentityEntity()
@@ -171,7 +202,7 @@ func buildMultiSigExecute(
 		included[sigEntity.ContentHash] = sigEntity
 	}
 
-	params, resource, err := buildSimpleGetParams()
+	params, _, err := buildSimpleGetParams()
 	if err != nil {
 		return entity.Envelope{}, fmt.Errorf("build params: %w", err)
 	}
@@ -179,10 +210,11 @@ func buildMultiSigExecute(
 	if err != nil {
 		return entity.Envelope{}, fmt.Errorf("encode params: %w", err)
 	}
+	resource := &types.ResourceTarget{Targets: []string{resourcePath}}
 	execData := types.ExecuteData{
 		RequestID:  client.NextRequestID(),
 		URI:        uri,
-		Operation:  "get",
+		Operation:  operation,
 		Params:     cbor.RawMessage(raw),
 		Author:     identity.ContentHash,
 		Capability: capEntity.ContentHash,
@@ -247,6 +279,31 @@ func sendExpectRejection(client *PeerClient, env entity.Envelope, checkName, spe
 // normalization rule: M3 violations and M6 root-trust violations MUST surface
 // as `403 capability_denied` regardless of detection layer.
 func sendExpectStatus403(client *PeerClient, env entity.Envelope, checkName, specRef string) CheckResult {
+	return sendExpectStatus403Probed(context.Background(), client, env, checkName, specRef, nil)
+}
+
+// sendExpectStatus403Probed is sendExpectStatus403 with §2.4a conjuncts 2 and 3
+// asserted. A nil probe means the guarded operation is a read — true of every
+// caller in this category before 2026-08-12 — where both conjuncts are vacuous.
+//
+// The probe lives HERE rather than in the caller for the reason
+// GUIDE-CONFORMANCE §2.4a gives directly: the gap pools in shared deny
+// helpers, so a future multi-sig row that drives a write inherits the negative
+// half by construction instead of by the author remembering. The
+// UnchangedPrefix snapshot must also be taken before the send, which a caller
+// cannot do after the fact.
+func sendExpectStatus403Probed(
+	ctx context.Context,
+	client *PeerClient,
+	env entity.Envelope,
+	checkName, specRef string,
+	probe *denyStateProbe,
+) CheckResult {
+	var beforeKeys map[string]bool
+	if probe != nil && probe.UnchangedPrefix != "" {
+		beforeKeys = listingKeys(ctx, client, probe.UnchangedPrefix)
+	}
+
 	respEnv, _, err := client.SendRawEnvelope(env)
 	if err != nil {
 		return fail(catMultiSig, checkName, specRef,
@@ -257,11 +314,15 @@ func sendExpectStatus403(client *PeerClient, env entity.Envelope, checkName, spe
 		return fail(catMultiSig, checkName, specRef,
 			"could not decode response: "+err.Error())
 	}
-	if respData.Status == 403 {
-		return pass(catMultiSig, checkName, specRef, "peer correctly rejected with 403 capability_denied")
+	if respData.Status != 403 {
+		return fail(catMultiSig, checkName, specRef,
+			fmt.Sprintf("expected 403 (capability_denied) per §3.3 status normalization; got %d", respData.Status))
 	}
-	return fail(catMultiSig, checkName, specRef,
-		fmt.Sprintf("expected 403 (capability_denied) per §3.3 status normalization; got %d", respData.Status))
+	msg, ok := applyDenyStateProbe(ctx, client, respEnv, probe, beforeKeys)
+	if !ok {
+		return fail(catMultiSig, checkName, specRef, msg)
+	}
+	return pass(catMultiSig, checkName, specRef, msg)
 }
 
 // sendExpectAccept sends an envelope and reports PASS only if the peer accepts
@@ -450,16 +511,110 @@ func checkMultiSigPrecedenceM3BeatsInvalidSigs(ctx context.Context, client *Peer
 	return sendExpectStatus403(client, env, "precedence_m3_beats_invalid_sigs", "V7 §3.6 (M3 precedence 25b)")
 }
 
-// V3 — below threshold (only 1 sig of 2 required).
+// buildM4BelowThresholdExecute builds an envelope that fails M4 — and ONLY M4
+// — driving the given operation at the given resource path.
+//
+// WHY THIS EXISTS, AND IT IS THE FINDING OF THE 2026-08-12 §2.4a RE-SWEEP.
+// `below_threshold_rejected` is declared against "V7 §5.5 (multisig M4)" and
+// built from `makeNAuxSigners(3)` — three fresh aux keys, none of them the
+// local peer. Per §5.5's own pseudocode the **M6 root check runs before the
+// per-level M4 signature loop**: a multi-sig root whose signer set does not
+// contain the local peer is DENIED at M6 and never reaches the threshold
+// count. So that row is denied for an M6 reason, is observationally identical
+// to `local_not_in_signers_rejected`, and **cannot fail for the reason its
+// name and spec-ref claim.**
+//
+// Not caught by review, and not catchable by review — it PASSes, against a
+// correct peer, for a correct reason. It was caught by MUTATING it: satisfying
+// the threshold (signWith 2 of 2) left the response at 403 where an M4 row
+// must have gone green. A check that still refuses when you remove the thing
+// it tests is measuring something else (§2.4a's corollary; doctrine 3).
+//
+// Isolating M4 requires satisfying M6 first: the local peer must be in
+// `signers` AND have signed. That needs the peer's own key, so these rows
+// SKIP on an ephemeral peer exactly as the accept row does.
+func buildM4BelowThresholdExecute(client *PeerClient, operation, resourcePath string) (entity.Envelope, error, bool) {
+	peerKP, _, err := crypto.LookupKeypairByPeerID(string(client.RemotePeerID()))
+	if err != nil {
+		return entity.Envelope{}, err, false
+	}
+	peerIdentity, err := peerKP.IdentityEntity()
+	if err != nil {
+		return entity.Envelope{}, fmt.Errorf("build peer identity entity: %w", err), true
+	}
+	peerSigner := multiSigSigner{kp: peerKP, identity: peerIdentity}
+
+	aux, err := makeNAuxSigners(2)
+	if err != nil {
+		return entity.Envelope{}, fmt.Errorf("setup: %w", err), true
+	}
+	// N=3, K=2, and the local peer is in the signer set and signs — so M3 is
+	// structurally clean and M6 is satisfied. Only the peer signs, giving ONE
+	// valid signature against a threshold of two: M4, and nothing else, is the
+	// rule that denies this.
+	signers := []multiSigSigner{peerSigner, aux[0], aux[1]}
+	env, err := buildMultiSigExecuteOp(client, signers, 2, []multiSigSigner{peerSigner}, nil, operation, resourcePath)
+	return env, err, true
+}
+
+// V3w — below threshold, driven against a WRITE. The §2.4a negative half for
+// M4 on the path where conjuncts 2 and 3 are not vacuous.
+//
+// SAMPLED DELIBERATELY, AND SAID OUT LOUD (no silent caps). Before this row,
+// all eleven checks in this category drove `get` from one hardcoded site, so
+// the whole M3/M4/M6 surface was read-only — a peer that verifies joint
+// authority on its read path and not its write path scored 11/11 and still
+// accepted a forged joint authority to write. This closes the hole for the
+// **M4 signature-count** class only: the one carrying the security
+// consequence, and the one most often hoisted into a read-side authorization
+// cache. The M3 structural rows and the M6 root-trust row remain read-only and
+// are recorded as such here rather than left implied; extending them is the
+// same three lines and is deliberately not done in this pass.
+func checkMultiSigBelowThresholdWrite(ctx context.Context, client *PeerClient) CheckResult {
+	const checkName = "below_threshold_denied_write"
+	const specRef = "V7 §5.5 (multisig M4) + GUIDE-CONFORMANCE §2.4a"
+
+	// A path we control, so conjunct 2+3 absence is directly assertable.
+	const writePath = "system/validate/multisig-test"
+
+	env, err, haveKey := buildM4BelowThresholdExecute(client, "put", writePath)
+	if !haveKey {
+		return skip(catMultiSig, checkName, specRef,
+			"M4 isolation requires the peer's on-disk key (M6 must be satisfied before M4 is reachable): "+err.Error())
+	}
+	if err != nil {
+		return fail(catMultiSig, checkName, specRef, err.Error())
+	}
+	return sendExpectStatus403Probed(ctx, client, env, checkName, specRef,
+		&denyStateProbe{AbsentPath: writePath})
+}
+
+// V3 — below threshold (one valid signature against a threshold of two).
+//
+// CORRECTED 2026-08-12. This row previously built its cap from three aux
+// signers with none of them the local peer, so §5.5's M6 root check denied it
+// before the M4 threshold count ever ran: it was declared against M4, was
+// observationally identical to `local_not_in_signers_rejected`, and passed
+// unchanged when the threshold was SATISFIED. It now shares
+// `buildM4BelowThresholdExecute` with the write row, which satisfies M6 so
+// that M4 is the only rule left to deny it — see that function for how the
+// mutation surfaced it.
+//
+// The cost of the correction is stated rather than hidden: isolating M4 needs
+// the peer's own key, so this row now SKIPs against an ephemeral peer where it
+// used to PASS. That is the honest reading — it was never measuring M4 on
+// those peers either, and a skip is visible where a false pass is not.
 func checkMultiSigBelowThreshold(ctx context.Context, client *PeerClient) CheckResult {
-	signers, err := makeNAuxSigners(3)
-	if err != nil {
-		return fail(catMultiSig, "below_threshold_rejected", "V7 §5.5 (multisig M4)", "setup: "+err.Error())
+	const checkName = "below_threshold_rejected"
+	const specRef = "V7 §5.5 (multisig M4)"
+
+	env, err, haveKey := buildM4BelowThresholdExecute(client, "get", "system/type/system/peer")
+	if !haveKey {
+		return skip(catMultiSig, checkName, specRef,
+			"M4 isolation requires the peer's on-disk key (M6 must be satisfied before M4 is reachable): "+err.Error())
 	}
-	// Only one signature of two required.
-	env, err := buildMultiSigExecute(client, signers, 2, signers[:1], nil)
 	if err != nil {
-		return fail(catMultiSig, "below_threshold_rejected", "V7 §5.5 (multisig M4)", err.Error())
+		return fail(catMultiSig, checkName, specRef, err.Error())
 	}
-	return sendExpectStatus403(client, env, "below_threshold_rejected", "V7 §5.5 (multisig M4)")
+	return sendExpectStatus403(client, env, checkName, specRef)
 }

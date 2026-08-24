@@ -20,7 +20,26 @@ type PeerEntry struct {
 	ReadyFile string `json:"ready_file"`
 	LogFile   string `json:"log_file"`
 	StartedAt string `json:"started_at"`
+
+	// Owner tags the session that started this peer, from ENTITY_PEER_OWNER.
+	//
+	// WHY (2026-08-12): the state file is ONE file per host —
+	// ~/.entity/peer-manager.json — and go, rust and py sessions all drive this
+	// same tool against it. `stop --all` iterated every entry, so any session's
+	// teardown killed every other session's peers. That is not hypothetical: a
+	// core-rust session's `stop --all` stopped a peer named `pyf1` belonging to
+	// the core-py session mid-run, and reported it.
+	//
+	// Empty means unattributed — a peer started before this field existed, or
+	// by a session that set no owner. `stop --all` will not touch a peer whose
+	// owner does not match the caller's; see cmdStop.
+	Owner string `json:"owner,omitempty"`
 }
+
+// currentOwner is the caller's session tag. Empty is a legitimate value and
+// means "unattributed": the caller cannot claim any peer, and `stop --all`
+// degrades to refusing rather than to killing everything.
+func currentOwner() string { return os.Getenv("ENTITY_PEER_OWNER") }
 
 // State is the peer-manager state file.
 type State struct {

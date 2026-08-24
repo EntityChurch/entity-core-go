@@ -761,21 +761,31 @@ func runCompute(ctx context.Context, client *PeerClient) []CheckResult {
 		if out, ok := r.Require("handler_present"); !ok {
 			return out
 		}
-		// Build a nested if chain: if(true, if(true, if(true, ... 42 ...)))
-		// Each if nesting adds eval depth. Use 600 levels — above recommended
-		// max depth of 1024 when counting sub-expression evaluations (~3 per if).
-		// All entities share the same condition (true literal) to minimize puts.
-		condEnt, _ := types.ComputeLiteralData{Value: true}.ToEntity()
-		condHash := putCE(ctx, client, tp+"/depth-cond", condEnt)
+		// Nest in a NON-TAIL position. This check used to build
+		// if(true, if(true, ... 42 ...)) 601 deep and assume "~3 evals per
+		// if" would blow a 1024 limit. It did not, and the WARN it produced
+		// ("peer may have higher depth limit") was a misdiagnosis that stood
+		// for weeks: an `if` branch is a TAIL position, and an evaluator with
+		// the v3.8 T2 trampoline resolves tail calls in O(1) depth by design.
+		// So the check was measuring TCO, not the depth limit, and against a
+		// conformant tail-call evaluator it could never fail — doctrine 3, a
+		// check that cannot be made to fail has not been shown to measure
+		// anything.
+		//
+		// An arithmetic ARGUMENT is not a tail position: `add(1, <inner>)`
+		// must evaluate <inner> and come back to add. So this nests there,
+		// and 1200 > the §5.4 RECOMMENDED_MAX_DEPTH of 1024.
+		oneEnt, _ := types.ComputeLiteralData{Value: uint64(1)}.ToEntity()
+		oneHash := putCE(ctx, client, tp+"/depth-one", oneEnt)
 		innerEnt, _ := types.ComputeLiteralData{Value: uint64(42)}.ToEntity()
 		currentHash := putCE(ctx, client, tp+"/depth-inner", innerEnt)
-		for i := 0; i < 600; i++ {
-			ifEnt, _ := types.ComputeIfData{Condition: condHash, Then: currentHash}.ToEntity()
-			currentHash = putCE(ctx, client, fmt.Sprintf("%s/depth-%d", tp, i), ifEnt)
+		for i := 0; i < 1200; i++ {
+			addEnt, _ := types.ComputeArithmeticData{Op: "add", Left: oneHash, Right: currentHash}.ToEntity()
+			currentHash = putCE(ctx, client, fmt.Sprintf("%s/depth-%d", tp, i), addEnt)
 		}
 		depthPath := tp + "/depth-test"
-		outerIf, _ := types.ComputeIfData{Condition: condHash, Then: currentHash}.ToEntity()
-		if _, err := client.TreePut(ctx, depthPath, outerIf); err != nil {
+		outerAdd, _ := types.ComputeArithmeticData{Op: "add", Left: oneHash, Right: currentHash}.ToEntity()
+		if _, err := client.TreePut(ctx, depthPath, outerAdd); err != nil {
 			return FailCheck("put depth test: " + err.Error())
 		}
 		resp, err := computeEvalAtPath(ctx, client, peerID, depthPath)
@@ -786,7 +796,12 @@ func runCompute(ctx context.Context, client *PeerClient) []CheckResult {
 		// Treat "200 with non-error result" as the only true success path.
 		if resp.Status == 200 {
 			if resultEnt, decErr := decodeComputeEntity(resp); decErr == nil && resultEnt.Type != types.TypeComputeError {
-				return WarnCheck("depth test succeeded at 601 nested ifs — peer may have higher depth limit")
+				// §5.4's values are RECOMMENDED, not MUST, so a higher limit
+				// is conformant and this stays a WARN — but it now means what
+				// it says. Nesting is in argument position, so a peer that
+				// evaluates 1201 of them either has a limit above 1200 or
+				// enforces none at all, and the two are worth telling apart.
+				return WarnCheck("depth test succeeded at 1201 non-tail nestings — peer's eval depth limit is above 1200, or absent (§5.4 RECOMMENDED_MAX_DEPTH is 1024; a higher limit is conformant, no limit is a resource-exhaustion surface)")
 			}
 		}
 		return PassCheck(fmt.Sprintf("deeply nested expression rejected (status %d / compute/error)", resp.Status))
