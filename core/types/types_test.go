@@ -506,8 +506,10 @@ func TestRegistryCoreTypes(t *testing.T) {
 	// EXTENSION-REGISTRY v1.3 §6a.9.3 adds system/registry/pending-binding
 	// → 211. (Only the one: the section's approve-request / deny-request
 	// input types are not named by the spec, so go does not publish a
-	// definition for them — see RegisterCoreTypes.)
-	if len(defs) != 212 {
+	// definition for them — see RegisterCoreTypes.) → 212 (a prior bump).
+	// EXTENSION-REGISTRY §4.3 [v1.18] adds system/registry/set-resolver-config-request
+	// (the set-resolver-config wrapper carrying acknowledge_name_disclosure) → 213.
+	if len(defs) != 213 {
 		names := make([]string, len(defs))
 		for i, d := range defs {
 			names[i] = d.Name
@@ -584,9 +586,10 @@ func TestReflectedTypesMatchSpec(t *testing.T) {
 	// release-result, status, peer-summary, close-request) → 212 total.
 	// EXTENSION-NETWORK Amendment 13 §6.7 reachability facts add three → 215.
 	// EXTENSION-REGISTRY v1.3 §6a.9.3 adds system/registry/pending-binding
-	// → 216 total.
+	// → 216 total. → 217 (a prior bump).
+	// EXTENSION-REGISTRY §4.3 [v1.18] set-resolver-config-request → 218 total.
 	all := r.All()
-	if len(all) != 217 {
+	if len(all) != 218 {
 		names := make([]string, len(all))
 		for i, d := range all {
 			names[i] = d.Name

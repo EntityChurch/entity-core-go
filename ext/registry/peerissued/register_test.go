@@ -254,7 +254,7 @@ func TestRegister_AllowlistMode_DenyThenAllow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("backend New: %v", err)
 	}
-	res, err := backend.Resolve(hctx, "billslab.com")
+	res, err := backend.Resolve(hctx, "billslab.com", nil)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}

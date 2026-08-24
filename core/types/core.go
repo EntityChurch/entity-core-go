@@ -209,6 +209,14 @@ func RegisterCoreTypes(r *TypeRegistry) {
 	r.ReflectType(TypeRegistryResolveRequest, reflect.TypeOf(ResolveRequestData{}))
 	r.ReflectType(TypeRegistryResolveResult, reflect.TypeOf(ResolveResultData{}))
 	r.ReflectType(TypeRegistryInvalidateCacheRequest, reflect.TypeOf(InvalidateCacheRequestData{}))
+	r.ReflectType(TypeRegistrySetResolverConfigRequest, reflect.TypeOf(SetResolverConfigRequestData{}))
+	// `config` carries the FULL system/registry/resolver-config entity (§4.3's
+	// own table names the precise token), so pin its type_ref precisely rather
+	// than the looser core/entity that the Go struct field (entity.Entity)
+	// reflects to — the same disposition as SubstituteTryRequest.entry below
+	// (RULINGS-STORAGE-SUBSTITUTE-CROSS-IMPL Ruling 2 / matrix F2). Lets the
+	// type checker validate the config's own fields, and converges with py.
+	r.OverrideField(TypeRegistrySetResolverConfigRequest, "config", FieldSpec{TypeRef: TypeRegistryResolverConfig})
 	r.ReflectType(TypeRegistryLocalNameBindRequest, reflect.TypeOf(LocalNameBindRequestData{}))
 	r.ReflectType(TypeRegistryLocalNameBindResult, reflect.TypeOf(LocalNameBindResultData{}))
 	r.ReflectType(TypeRegistryLocalNameUnbindRequest, reflect.TypeOf(LocalNameUnbindRequestData{}))

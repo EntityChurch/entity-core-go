@@ -80,7 +80,7 @@ func TestManifest_HitResolvesWithoutPointerFetch(t *testing.T) {
 	}
 
 	reader.calls = nil
-	r, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "billslab.com")
+	r, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "billslab.com", nil)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestManifest_HitStillVerifiesBindingSignature(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("admit: %v", err)
 	}
-	if _, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "evil.example"); err == nil {
+	if _, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "evil.example", nil); err == nil {
 		t.Fatal("a manifest hit MUST still fail signature verification against the pinned key")
 	}
 }
@@ -262,7 +262,7 @@ func TestManifest_PartialCoverageFallsThrough(t *testing.T) {
 	if _, err := backend.LoadManifest(context.Background()); err != nil {
 		t.Fatalf("LoadManifest: %v", err)
 	}
-	r, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "unlisted.example")
+	r, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "unlisted.example", nil)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestManifest_EmptyCoverageDefaultsToPartial(t *testing.T) {
 	if _, err := backend.LoadManifest(context.Background()); err != nil {
 		t.Fatalf("LoadManifest: %v", err)
 	}
-	r, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "defaulted.example")
+	r, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "defaulted.example", nil)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestManifest_CompleteCoverageIsAuthoritativeAbsence(t *testing.T) {
 		t.Fatalf("LoadManifest: %v", err)
 	}
 	reader.calls = nil
-	r, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "listed-elsewhere.example")
+	r, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "listed-elsewhere.example", nil)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -370,7 +370,7 @@ func TestManifest_DanglingEntryFallsThrough(t *testing.T) {
 	if _, err := backend.LoadManifest(context.Background()); err != nil {
 		t.Fatalf("LoadManifest: %v", err)
 	}
-	r, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "racy.example")
+	r, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "racy.example", nil)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestManifest_AbsentIsPurelyAdditive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	r, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "nomanifest.example")
+	r, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "nomanifest.example", nil)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}

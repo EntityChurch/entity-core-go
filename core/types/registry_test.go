@@ -19,6 +19,32 @@ func TestRegistryAll(t *testing.T) {
 	}
 }
 
+// TestSetResolverConfigRequestConfigFieldIsPrecise pins §4.3's own table: the
+// `config` field of set-resolver-config-request MUST reflect to the precise
+// system/registry/resolver-config, NOT the looser core/entity the Go struct
+// field (entity.Entity) reflects to by default. Without the OverrideField in
+// RegisterCoreTypes this reads core/entity, which erases the config's own
+// fields from the type checker and FAILs py's cross-impl type_system check
+// (RULINGS-STORAGE-SUBSTITUTE-CROSS-IMPL Ruling 2, applied here). Teeth: this
+// goes RED the moment the override is dropped or clobbered.
+func TestSetResolverConfigRequestConfigFieldIsPrecise(t *testing.T) {
+	r := NewTypeRegistry()
+	RegisterCoreTypes(r)
+
+	def, ok := r.Get(TypeRegistrySetResolverConfigRequest)
+	if !ok {
+		t.Fatalf("%s not registered", TypeRegistrySetResolverConfigRequest)
+	}
+	spec, ok := def.Fields["config"]
+	if !ok {
+		t.Fatal("config field absent from published descriptor")
+	}
+	if spec.TypeRef != TypeRegistryResolverConfig {
+		t.Fatalf("config type_ref: got %q want %q (§4.3 table — the precise token, not core/entity)",
+			spec.TypeRef, TypeRegistryResolverConfig)
+	}
+}
+
 func TestRegistryOverrideField(t *testing.T) {
 	r := NewTypeRegistry()
 	r.RegisterManual(TypeDefinition{

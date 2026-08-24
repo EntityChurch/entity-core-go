@@ -735,7 +735,7 @@ func verifyResolve(registryKey crypto.Keypair, registryEnt entity.Entity, regist
 	if err != nil {
 		return err
 	}
-	r, err := be.Resolve(newHctx(), v.Name)
+	r, err := be.Resolve(newHctx(), v.Name, nil)
 	if err != nil {
 		return fmt.Errorf("unexpected error: %w", err)
 	}
@@ -767,7 +767,7 @@ func verifyVerifyFail(attackerKey crypto.Keypair, registryEnt entity.Entity, reg
 	reader.content[sig.ContentHash] = sig
 	be, _ := peerissued.New(registryEnt, registryPID, reader,
 		peerissued.WithClock(func() uint64 { return v.ClockMs }))
-	_, err := be.Resolve(newHctx(), v.Name)
+	_, err := be.Resolve(newHctx(), v.Name, nil)
 	if err == nil {
 		return errors.New("expected verify-fail error, got nil")
 	}
@@ -791,7 +791,7 @@ func verifyRevoked(registryKey crypto.Keypair, registryEnt entity.Entity, regist
 	reader.content[revSig.ContentHash] = revSig
 	be, _ := peerissued.New(registryEnt, registryPID, reader,
 		peerissued.WithClock(func() uint64 { return v.ClockMs }))
-	_, err := be.Resolve(newHctx(), v.Name)
+	_, err := be.Resolve(newHctx(), v.Name, nil)
 	if err == nil {
 		return errors.New("expected revoked error, got nil")
 	}
@@ -813,7 +813,7 @@ func verifyExpired(registryKey crypto.Keypair, registryEnt entity.Entity, regist
 	reader.content[sig.ContentHash] = sig
 	be, _ := peerissued.New(registryEnt, registryPID, reader,
 		peerissued.WithClock(func() uint64 { return v.ClockMs }))
-	_, err := be.Resolve(newHctx(), v.Name)
+	_, err := be.Resolve(newHctx(), v.Name, nil)
 	if err == nil {
 		return errors.New("expected expired error, got nil")
 	}
@@ -844,7 +844,7 @@ func verifyPrecede(registryKey crypto.Keypair, registryEnt entity.Entity, regist
 	}
 	be, _ := peerissued.New(registryEnt, registryPID, reader,
 		peerissued.WithClock(func() uint64 { return v.ClockMs }))
-	r, err := be.Resolve(hctx, v.Name)
+	r, err := be.Resolve(hctx, v.Name, nil)
 	if err != nil {
 		return fmt.Errorf("offline resolve failed: %w", err)
 	}
@@ -868,7 +868,7 @@ func verifyOfflineNotFound(registryEnt entity.Entity, registryPID string, v vect
 	reader := newMemReader()
 	be, _ := peerissued.New(registryEnt, registryPID, reader,
 		peerissued.WithNegativeTTLMillis(NegativeTTL))
-	r, err := be.Resolve(newHctx(), v.Name)
+	r, err := be.Resolve(newHctx(), v.Name, nil)
 	if err != nil {
 		return fmt.Errorf("not_found should NOT error: %w", err)
 	}

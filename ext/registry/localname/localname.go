@@ -399,7 +399,7 @@ func (h *Handler) UpdateTransports(hctx *handler.HandlerContext, name string, tr
 // Resolve implements §6.5 :resolve for the local-name backend. Returns a
 // ResolveResultData with status=resolved (transports MAY be empty) or
 // status=not_found. Called by the meta-resolver in ext/registry.
-func (h *Handler) Resolve(hctx *handler.HandlerContext, name string) (types.ResolveResultData, error) {
+func (h *Handler) Resolve(hctx *handler.HandlerContext, name string, localMaxTTL *uint64) (types.ResolveResultData, error) {
 	cfg, err := h.loadOrDefaultConfig(hctx)
 	if err != nil {
 		return types.ResolveResultData{}, err
@@ -423,12 +423,20 @@ func (h *Handler) Resolve(hctx *handler.HandlerContext, name string) (types.Reso
 		return types.ResolveResultData{}, fmt.Errorf("decode local-name body: %w", err)
 	}
 	binding := pointer
+	// Resolver-side TTL ceiling (REGISTRY [v1.16], ruling #3): a local-name
+	// binding carries no ttl (local-trust, no temporal bound of its own), so
+	// under a resolver ceiling it takes local_max as its surfaced lifetime —
+	// the bound a downstream cache honors. No expiry check here: local-name is
+	// locally authoritative and always present; the ceiling bounds how long
+	// others may cache the answer, not whether we hold it. `max_ttl: 0` already
+	// arrived as nil (undeclared) from resolverHintMaxTTL.
 	return types.ResolveResultData{
 		Status:      types.ResolutionStatusResolved,
 		Binding:     &binding,
 		PeerID:      bind.TargetPeerID,
 		Transports:  bind.Transports,
 		TrustAnchor: types.TrustAnchorLocalName,
+		TTL:         localMaxTTL,
 		BackendID:   string(h.peerID),
 	}, nil
 }

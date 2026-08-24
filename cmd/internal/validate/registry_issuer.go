@@ -76,6 +76,7 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("pending_approve_issues_and_leaves_head", "EXTENSION-REGISTRY §6a.9.3 REG-PENDING-DECIDE-1 (approve half) — approve issues a binding that resolves BY NAME and leaves an `approved` head carrying its binding_hash")
 	r.Declare("pending_decide_unknown_handle_404", "EXTENSION-REGISTRY §6a.9.3 — a pending_hash naming no stored pending-binding MUST answer 404 not_found. Probed with a well-formed body the registry never minted, not a random hash: a peer that rejects garbage but accepts a plausible unminted entity has the weaker check")
 	r.Declare("name_constraints_rejects_nonmatching", "EXTENSION-REGISTRY §6a.9.1 — a name outside the policy's name_constraints glob MUST be refused 403 not_entitled")
+	r.Declare("name_constraints_grammar", "EXTENSION-REGISTRY §6a.9.1 + §4 REG-NAME-CONSTRAINTS-GRAMMAR-1 [v1.15] — name_constraints uses §4's ONE matcher: '*' is the only metacharacter, every other byte is a literal, and NO pattern is invalid. Four discriminating rows the spec's `*.lab` example cannot: '?'/'[…]' are literals (a shell-glob inverts rows 1-2); the malformed shell-glob `a[b` is ACCEPTED by set-issuer-policy and ADMITTED on register with NO 5xx (row 4 — a path.Match impl 500s every register here); plus the `*.lab` control. Row 3 ('*' crosses '/') is unbindable — §6.3 forbids '/' in a name — so it is pinned in-tree, not on the wire")
 	r.Declare("layer1_unsigned_request_rejected", "EXTENSION-REGISTRY §6a.9 layer 1 — a register-request with no system/signature at its invariant pointer MUST be refused; ownership proof is the floor beneath every policy mode")
 	r.Declare("revoke_request_publishes_revocation", "EXTENSION-REGISTRY §6a.9 — revoke-request MUST publish a verifying revocation at the by-target index, which is the §2.1 step-4 signal a resolver excludes the binding on. Revocation is ADDITIVE: the immutable binding and its by-name pointer stay put.")
 	r.Declare("renew_request_accepted", "EXTENSION-REGISTRY §6a.9 — renew-request extends an existing binding's expiry")
@@ -87,8 +88,8 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("set_issuer_policy_round_trip", "EXTENSION-REGISTRY §6a.9.2 — set-issuer-policy stores the policy and get-issuer-policy returns it as written. Before this ruling the capability system/capability/registry-manage-issuer-policy named an act the corpus never defined, and a client had nothing to call")
 	r.Declare("set_issuer_policy_replaces_whole", "EXTENSION-REGISTRY §6a.9.2 [MUST] — set replaces the policy WHOLE; an absent optional field means *unset*, not *unchanged*. A merge would make the result depend on write order, which two peers cannot reconstruct")
 	r.Declare("set_issuer_policy_domain_control_rejected", "EXTENSION-REGISTRY §6a.9.2 — mode \"domain-control\" MUST be refused 400 unsupported_mode and NOT stored, rather than arming a mode the issuer cannot enforce. The negative half is checked too: a 400 that stored anyway passes a status-only assertion")
-	r.Declare("set_issuer_policy_null_default_ttl_rejected", "EXTENSION-REGISTRY §6a.9.2 CAP registry D11 (arch 2026-08-18) — a live-registration policy with default_ttl=null can only mint null-ttl bindings, which CAP D3 makes unresolvable; set-issuer-policy MUST refuse it 400 and NOT store it, the same move as domain-control. Owed by py/rust; go implements it")
-	r.Declare("set_issuer_policy_max_ttl_ceiling", "EXTENSION-REGISTRY §6a.9 v1.11 REG-TTL-CEILING-1 — set-issuer-policy MUST reject a live policy whose max_ttl is absent (400) and one whose default_ttl exceeds max_ttl (400); control: both present with default_ttl <= max_ttl is accepted 200. Same trigger and site as the default_ttl gate. Owed by py/rust; go implements it")
+	r.Declare("set_issuer_policy_null_default_ttl_rejected", "EXTENSION-REGISTRY §6a.9.2 CAP registry D11 (arch 2026-08-18) — a live-registration policy with default_ttl=null can only mint null-ttl bindings, which CAP D3 makes unresolvable; set-issuer-policy MUST refuse it 400 and NOT store it, the same move as domain-control. Landed in all three: go, rust (b388026), py (registry.py refuse-at-door)")
+	r.Declare("set_issuer_policy_max_ttl_ceiling", "EXTENSION-REGISTRY §6a.9 v1.11 REG-TTL-CEILING-1 — set-issuer-policy MUST reject a live policy whose max_ttl is absent (400) and one whose default_ttl exceeds max_ttl (400); control: both present with default_ttl <= max_ttl is accepted 200. Same trigger and site as the default_ttl gate. Landed in all three: go, rust (c06a6ab), py (registry.py §6a.9.1 ceiling)")
 	r.Declare("get_issuer_policy_unset_404", "EXTENSION-REGISTRY §6a.9.2 — unset is not a mode: with no policy stored, get MUST answer 404 not_found and MUST NOT synthesize a default `open`, which would silently turn a curated registry into a first-come-first-serve one")
 
 	// --- surface reachability -------------------------------------------
@@ -777,6 +778,120 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 			return FailCheck(fmt.Sprintf("name outside name_constraints %q → %d/%q, want 403/%s", glob, status, code, types.RegistryErrNotEntitled))
 		}
 		return PassCheck("name outside name_constraints refused 403 not_entitled")
+	}))
+
+	r.Run("name_constraints_grammar", gate(func() CheckOutcome {
+		// REG-NAME-CONSTRAINTS-GRAMMAR-1 (§6a.9.1, §4) [v1.15]: name_constraints
+		// uses §4's ONE matcher — '*' is the only metacharacter, every other byte
+		// is a literal, and no pattern is invalid. The spec's own `*.lab` example
+		// is grammar-identical under every candidate reading and discriminates
+		// nothing; these rows do. Row 3 (`x*z` admits `x/y/z`, proving '*' crosses
+		// '/') is UNBINDABLE on the wire — normalizeName forbids '/' in a name
+		// (§6.3) — so it is pinned in-tree (ext/registry/glob_dispatch_test.go via
+		// registry.MatchName, the SAME function this field now calls) and
+		// deliberately not asserted here.
+
+		// "admitted" = the name passed the name_constraints admission gate.
+		// admission (403) runs BEFORE the name_taken check (409), so on a fresh
+		// peer an admitted name binds (200) and on a re-run it is 409 name_taken
+		// — both prove admission let it through, and neither is a 5xx.
+		admitted := func(st uint, code string) bool {
+			return st == 200 || (st == 409 && code == types.RegistryErrNameTaken)
+		}
+		// arm an open policy with `constraint` (via tree:put) then register `name`.
+		armReg := func(constraint, name string) (uint, string, *CheckOutcome) {
+			c := constraint
+			if out := setIssuerPolicy(ctx, client, types.IssuerPolicyData{
+				Mode:            types.IssuerPolicyModeOpen,
+				NameConstraints: &c,
+			}); out != nil {
+				return 0, "", out
+			}
+			st, code, err := issuerRegister(ctx, client, uri, name)
+			if err != nil {
+				out := FailCheck(fmt.Sprintf("register %q under name_constraints %q: %v", name, constraint, err))
+				return 0, "", &out
+			}
+			return st, code, nil
+		}
+
+		// Row 1: `a?c` — '?' is a literal. `a?c` admitted; `abc` refused.
+		if st, code, out := armReg("a?c", "a?c"); out != nil {
+			return *out
+		} else if !admitted(st, code) {
+			return FailCheck(fmt.Sprintf("row1: name_constraints \"a?c\" + register \"a?c\" → %d/%q, want admitted — '?' is a literal, not a single-char wildcard (a shell-glob would REFUSE this and admit \"abc\")", st, code))
+		}
+		if st, code, out := armReg("a?c", "abc"); out != nil {
+			return *out
+		} else if st != 403 || code != types.RegistryErrNotEntitled {
+			return FailCheck(fmt.Sprintf("row1: name_constraints \"a?c\" + register \"abc\" → %d/%q, want 403/%s — a shell-glob would ADMIT \"abc\"", st, code, types.RegistryErrNotEntitled))
+		}
+
+		// Row 2: `a[bc]d` — '[' ']' are literals. `a[bc]d` admitted; `abd` refused.
+		if st, code, out := armReg("a[bc]d", "a[bc]d"); out != nil {
+			return *out
+		} else if !admitted(st, code) {
+			return FailCheck(fmt.Sprintf("row2: name_constraints \"a[bc]d\" + register \"a[bc]d\" → %d/%q, want admitted — the class is literal bytes", st, code))
+		}
+		if st, code, out := armReg("a[bc]d", "abd"); out != nil {
+			return *out
+		} else if st != 403 || code != types.RegistryErrNotEntitled {
+			return FailCheck(fmt.Sprintf("row2: name_constraints \"a[bc]d\" + register \"abd\" → %d/%q, want 403 — a shell-glob would ADMIT \"abd\"", st, code))
+		}
+
+		// Row 4: `a[b` — a malformed shell-glob. set-issuer-policy MUST accept it
+		// (no 400/500), register for the literal `a[b` MUST be admitted, and a
+		// non-match refused — NO 5xx anywhere. Under path.Match this pattern makes
+		// EVERY register 500; asserted separately from row 2 because a shell-glob
+		// fails it by ERRORING, which a result-asserting row never reaches.
+		unruly := "a[b"
+		dttl := uint64(1_000_000_000)
+		mttl := uint64(100_000_000_000)
+		setEnt, err := types.IssuerPolicyData{
+			Mode:            types.IssuerPolicyModeOpen,
+			NameConstraints: &unruly,
+			DefaultTTL:      &dttl,
+			MaxTTL:          &mttl,
+		}.ToEntity()
+		if err != nil {
+			return FailCheck("row4: build policy: " + err.Error())
+		}
+		setStatus, setCode, err := issuerDispatch(ctx, client, uri, peerissued.OpSetIssuerPolicy, setEnt)
+		if err != nil {
+			return FailCheck("row4: set-issuer-policy dispatch: " + err.Error())
+		}
+		if setStatus != 200 {
+			return FailCheck(fmt.Sprintf("row4: set-issuer-policy name_constraints \"a[b\" → %d/%q, want 200 — no pattern is invalid under §4's grammar, so there is no syntax to reject (a shell-glob impl would 400/500 storing this)", setStatus, setCode))
+		}
+		if st, code, err := issuerRegister(ctx, client, uri, "a[b"); err != nil {
+			return FailCheck("row4: register \"a[b\": " + err.Error())
+		} else if st >= 500 {
+			return FailCheck(fmt.Sprintf("row4: register the literal \"a[b\" → %d/%q — a 5xx means name_constraints delegates to a shell-glob whose parse of \"a[b\" errors; §4's grammar makes it a literal that matches itself", st, code))
+		} else if !admitted(st, code) {
+			return FailCheck(fmt.Sprintf("row4: register the literal \"a[b\" → %d/%q, want admitted — it matches its own constraint literally", st, code))
+		}
+		if st, code, err := issuerRegister(ctx, client, uri, "axb"); err != nil {
+			return FailCheck("row4: register \"axb\": " + err.Error())
+		} else if st >= 500 {
+			return FailCheck(fmt.Sprintf("row4: register \"axb\" under \"a[b\" → %d/%q — no path may 5xx on this policy", st, code))
+		} else if st != 403 || code != types.RegistryErrNotEntitled {
+			return FailCheck(fmt.Sprintf("row4: register \"axb\" under \"a[b\" → %d/%q, want 403 — \"axb\" is not the literal \"a[b\"", st, code))
+		}
+
+		// Control: `*.lab` — passes under BOTH readings; included so a failure of
+		// rows 1/2/4 cannot be misread as the constraint being ignored entirely.
+		if st, code, out := armReg("*.lab", "alice.lab"); out != nil {
+			return *out
+		} else if !admitted(st, code) {
+			return FailCheck(fmt.Sprintf("control: name_constraints \"*.lab\" + register \"alice.lab\" → %d/%q, want admitted", st, code))
+		}
+		if st, code, out := armReg("*.lab", "alice.dev"); out != nil {
+			return *out
+		} else if st != 403 || code != types.RegistryErrNotEntitled {
+			return FailCheck(fmt.Sprintf("control: name_constraints \"*.lab\" + register \"alice.dev\" → %d/%q, want 403", st, code))
+		}
+
+		return PassCheck("name_constraints uses §4's matcher: '?'/'[…]' are literals (rows 1-2 invert a shell-glob), malformed \"a[b\" is accepted by set-issuer-policy and admitted on register with NO 5xx (row 4), '*.lab' control holds; '*'-crosses-'/' pinned in-tree (§6.3 forbids '/' in a name)")
 	}))
 
 	// --- layer 1 ----------------------------------------------------------

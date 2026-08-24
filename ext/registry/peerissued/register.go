@@ -27,7 +27,6 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"path"
 	"reflect"
 	"sync"
 	"time"
@@ -38,6 +37,7 @@ import (
 	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/store"
 	"go.entitychurch.org/entity-core-go/core/types"
+	"go.entitychurch.org/entity-core-go/ext/registry"
 )
 
 // IssuerHandlerPattern is the handler-registration pattern carrying the
@@ -611,21 +611,17 @@ func replayKey(targetPeerID string, nonce []byte) string {
 // applyAdmission runs Layer-2 per §6a.9.1.
 func (i *Issuer) applyAdmission(policy types.IssuerPolicyData, body types.RegistryRegisterRequestData, normalized string) (uint, string, string) {
 	if policy.NameConstraints != nil && *policy.NameConstraints != "" {
-		// DELIBERATE, NAMED divergence from name_format_dispatch's matcher
-		// (registry.matchDispatchName, ruled [REGISTRY 1.13]): name_constraints
-		// (§6a.9, "<glob>") is a SEPARATE field whose grammar arch has NOT
-		// ruled, so its matcher is not converged onto the §4.1a grammar here.
-		// Both fields glob the same user-facing name, so this is exactly the
-		// silently-diverging-matcher shape — routed rather than shipped
-		// unilaterally: docs/validation/spec-issues/2026-08-18-e-name-constraints-grammar-vs-dispatch.md.
-		// Until ruled, name_constraints keeps path.Match (note the err→500 arm
-		// below, which the §4.1a grammar cannot reach).
-		matched, err := path.Match(*policy.NameConstraints, normalized)
-		if err != nil {
-			return 500, "internal_error",
-				"invalid name_constraints glob: " + err.Error()
-		}
-		if !matched {
+		// §6a.9.1 name_constraints uses §4's matcher — ONE name matcher per
+		// registry [REGISTRY 1.15]. It globs the same user-facing name string
+		// §4 globs, in the same handler, so it is the SAME matcher
+		// (registry.MatchName): '*' is the only metacharacter, every other byte
+		// is a literal, and NO pattern is invalid. So there is no syntax to
+		// reject and no write-time failure — the old `path.Match` err→500
+		// internal_error arm is deleted, not merely handled: it is unreachable
+		// under this grammar. (A shell-glob would make e.g. name_constraints
+		// "a[b" fail EVERY register with a 5xx — the divergence the ruling
+		// closed.) Conformance: REG-NAME-CONSTRAINTS-GRAMMAR-1.
+		if !registry.MatchName(*policy.NameConstraints, normalized) {
 			return 403, types.RegistryErrNotEntitled,
 				fmt.Sprintf("name %q does not match issuer-policy name_constraints", normalized)
 		}

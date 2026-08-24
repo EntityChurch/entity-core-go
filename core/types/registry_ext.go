@@ -37,6 +37,14 @@ const (
 	// is retained as ResolveResult for source-compat; the wire string moved.
 	TypeRegistryResolveResult             = "system/registry/resolution-result"
 	TypeRegistryInvalidateCacheRequest    = "system/registry/invalidate-cache-request"
+	// TypeRegistrySetResolverConfigRequest is the §4.3 [v1.18] wrapper for
+	// set-resolver-config: it carries the resolver-config entity plus the
+	// operator's acknowledge_name_disclosure act. The acknowledgement rides
+	// the operation, NEVER the config entity — a field would be writable by
+	// whoever writes the bytes (so a distribution could set it) and would move
+	// the content-addressed resolver-config's hash to carry an unsecurable
+	// claim (§4.3 [MUST]). get-resolver-config takes no params (§3.2 empty).
+	TypeRegistrySetResolverConfigRequest = "system/registry/set-resolver-config-request"
 	TypeRegistryLocalNameBindRequest      = "system/registry/local-name/bind-request"
 	TypeRegistryLocalNameBindResult       = "system/registry/local-name/bind-result"
 	TypeRegistryLocalNameUnbindRequest    = "system/registry/local-name/unbind-request"
@@ -76,6 +84,28 @@ const (
 	BackendKindOutOfBand         = "out-of-band"
 	BackendKindConsensusAnchored = "consensus-anchored"
 )
+
+// nameTransmittingBackendKinds is the closed set of backend kinds §4.1 step 2
+// [MUST, v1.14] DECLARES name-transmitting: consultation of one of these puts
+// the queried name on the wire to a third party (as a query, a path segment,
+// or a document name). It is EXACTLY these four — an unknown / undeclared kind
+// MUST NOT be treated as name-transmitting (§4.2 [MUST, v1.14]): refusing a
+// config because a broad rule names a kind this build does not recognize would
+// reject a deployment authored against a newer vocabulary, the case §4.2
+// exists to permit. The safe kinds (local-name, self-certifying, out-of-band,
+// peer-issued) either do no network consultation or are content-addressed and
+// name-blind (§6a.4).
+var nameTransmittingBackendKinds = map[string]bool{
+	BackendKindDNSTXT:            true,
+	BackendKindWellKnownURL:      true,
+	BackendKindDIDWeb:            true,
+	BackendKindConsensusAnchored: true,
+}
+
+// IsNameTransmittingKind reports whether a backend_kind is one §4.1 step 2
+// declares name-transmitting. See nameTransmittingBackendKinds — the set is
+// closed and an undeclared kind returns false by design (§4.2).
+func IsNameTransmittingKind(kind string) bool { return nameTransmittingBackendKinds[kind] }
 
 // ResolutionStatus values per §2.1 ResolutionResult.status enum.
 const (
@@ -281,7 +311,12 @@ type PinnedEntry struct {
 }
 
 // DispatchEntry — one entry in resolver-config.name_format_dispatch per
-// §4. `Pattern` is a POSIX shell-glob matched against the queried name.
+// §4. `Pattern` is matched against the queried name with the registry-local
+// name matcher (registry.MatchName, §4.1a): '*' is the only metacharacter and
+// crosses every byte, every other byte is a literal, no pattern is invalid.
+// NOT a POSIX shell-glob / path.Match — the spec's `<POSIX shell-glob>`
+// schema word was the entire provenance of the '?' question and was removed
+// (REGISTRY 1.14 §3).
 type DispatchEntry struct {
 	Pattern      string   `cbor:"pattern"`
 	BackendKinds []string `cbor:"backend_kinds"`
@@ -311,6 +346,33 @@ func ResolverConfigDataFromEntity(e entity.Entity) (ResolverConfigData, error) {
 	var d ResolverConfigData
 	if err := ecf.Decode(e.Data, &d); err != nil {
 		return ResolverConfigData{}, err
+	}
+	return d, nil
+}
+
+// SetResolverConfigRequestData is the §4.3 [v1.18] set-resolver-config params.
+// `Config` is the resolver-config entity to store, carried nested so its bytes
+// round-trip byte-exact through the write. `AcknowledgeNameDisclosure` is the
+// operator MAY made expressible: absent/false, a config violating §4.1 step 2
+// is refused 403 policy_rejected; true, it is stored and surfaced at load. It
+// is a parameter of the OPERATION, not a field of the config entity (§4.3).
+type SetResolverConfigRequestData struct {
+	Config                    entity.Entity `cbor:"config"`
+	AcknowledgeNameDisclosure bool          `cbor:"acknowledge_name_disclosure,omitempty"`
+}
+
+func (d SetResolverConfigRequestData) ToEntity() (entity.Entity, error) {
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(TypeRegistrySetResolverConfigRequest, cbor.RawMessage(raw))
+}
+
+func SetResolverConfigRequestDataFromEntity(e entity.Entity) (SetResolverConfigRequestData, error) {
+	var d SetResolverConfigRequestData
+	if err := ecf.Decode(e.Data, &d); err != nil {
+		return SetResolverConfigRequestData{}, err
 	}
 	return d, nil
 }

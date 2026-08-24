@@ -168,7 +168,7 @@ func TestResolve_HappyPath(t *testing.T) {
 	}
 	hctx := newHctx(t, newLocalPeer(t))
 
-	r, err := backend.Resolve(hctx, "billslab.com")
+	r, err := backend.Resolve(hctx, "billslab.com", nil)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestResolve_NameSubstitutionRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	r, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "evil.example")
+	r, err := backend.Resolve(newHctx(t, newLocalPeer(t)), "evil.example", nil)
 	if err == nil {
 		t.Fatalf("resolve of a substituted binding succeeded (status=%s peer=%s) — D1 name check missing: a query for evil.example was answered with billslab.com's target", r.Status, r.PeerID)
 	}
@@ -258,7 +258,7 @@ func TestResolve_NullTTLRefused(t *testing.T) {
 	hctx.TreeSet(types.PeerIssuedByNamePath("billslab.com"), bindingEnt.ContentHash, "test-nullttl")
 	hctx.TreeSet(types.LocalSignaturePath(bindingEnt.ContentHash), sigEnt.ContentHash, "test-nullttl")
 
-	r, err := backend.Resolve(hctx, "billslab.com")
+	r, err := backend.Resolve(hctx, "billslab.com", nil)
 	if err == nil {
 		t.Fatalf("resolve of a null-ttl peer-issued binding succeeded (status=%s) — D3 refusal missing: the binding has no temporal bound and a withheld revocation makes it permanently unrevokable", r.Status)
 	}
@@ -267,8 +267,10 @@ func TestResolve_NullTTLRefused(t *testing.T) {
 	}
 }
 
-// Resolver-side TTL ceiling (REGISTRY §6a.4 / v1.11) — WithLocalMaxTTL makes the
-// resolver honor min(binding.ttl, local_max). This is the LOAD-BEARING ceiling:
+// Resolver-side TTL ceiling (REGISTRY §6a.9.1, ruled [v1.16]) — the ceiling is
+// the durable resolver_chain[].hints.max_ttl, passed into Resolve at resolution
+// (here as the localMaxTTL arg), making the resolver honor min(binding.ttl,
+// local_max). This is the LOAD-BEARING ceiling:
 // a ceiling the issuer enforces cannot protect a consumer from that same issuer,
 // so only the resolver holding the cached binding can bound its own exposure.
 // The clamp is computed at resolution and NEVER written back — the stored binding
@@ -292,13 +294,12 @@ func TestResolve_LocalMaxTTL_Clamps(t *testing.T) {
 		bindingHash := publishBinding(t, reader, registryKey, body, "clamp.example")
 		localMax := uint64(5_000_000) // well below longTTL, still unexpired at the clock
 		backend, err := New(registryEnt, registryPID, reader,
-			WithClock(func() uint64 { return 2_000_000 }),
-			WithLocalMaxTTL(localMax))
+			WithClock(func() uint64 { return 2_000_000 }))
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
 		hctx := newHctx(t, newLocalPeer(t))
-		res, err := backend.Resolve(hctx, "clamp.example")
+		res, err := backend.Resolve(hctx, "clamp.example", &localMax)
 		if err != nil {
 			t.Fatalf("Resolve: %v", err)
 		}
@@ -328,14 +329,14 @@ func TestResolve_LocalMaxTTL_Clamps(t *testing.T) {
 		_ = publishBinding(t, reader, registryKey, body, "clamp.example")
 		// local_max so small that issued_at + local_max <= clock → expired under the
 		// ceiling even though the binding's own ttl is far from lapsing.
+		tight := uint64(500_000) // 1_000_000 + 500_000 = 1_500_000 <= 2_000_000
 		backend, err := New(registryEnt, registryPID, reader,
-			WithClock(func() uint64 { return 2_000_000 }),
-			WithLocalMaxTTL(500_000)) // 1_000_000 + 500_000 = 1_500_000 <= 2_000_000
+			WithClock(func() uint64 { return 2_000_000 }))
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
 		hctx := newHctx(t, newLocalPeer(t))
-		_, err = backend.Resolve(hctx, "clamp.example")
+		_, err = backend.Resolve(hctx, "clamp.example", &tight)
 		if err == nil || !strings.Contains(err.Error(), "expired") {
 			t.Fatalf("Resolve under a tight ceiling: want expired error, got %v", err)
 		}
@@ -365,7 +366,7 @@ func TestResolve_VerifyFail_NonPinnedSigner(t *testing.T) {
 	}
 	hctx := newHctx(t, newLocalPeer(t))
 
-	_, err = backend.Resolve(hctx, "billslab.com")
+	_, err = backend.Resolve(hctx, "billslab.com", nil)
 	if err == nil {
 		t.Fatalf("Resolve: want verify-fail error, got nil")
 	}
@@ -389,7 +390,7 @@ func TestResolve_Revoked(t *testing.T) {
 		WithClock(func() uint64 { return 2_000_000 }))
 	hctx := newHctx(t, newLocalPeer(t))
 
-	_, err := backend.Resolve(hctx, "billslab.com")
+	_, err := backend.Resolve(hctx, "billslab.com", nil)
 	if err == nil {
 		t.Fatalf("Resolve: want revoked error, got nil")
 	}
@@ -413,7 +414,7 @@ func TestResolve_Expired(t *testing.T) {
 		WithClock(func() uint64 { return 1_001_001 }))
 	hctx := newHctx(t, newLocalPeer(t))
 
-	_, err := backend.Resolve(hctx, "billslab.com")
+	_, err := backend.Resolve(hctx, "billslab.com", nil)
 	if err == nil {
 		t.Fatalf("Resolve: want expired error, got nil")
 	}
@@ -452,7 +453,7 @@ func TestResolve_PrecedeOffline(t *testing.T) {
 	hctx.TreeSet(types.PeerIssuedByNamePath("billslab.com"), bindingEnt.ContentHash, "test-precede")
 	hctx.TreeSet(types.LocalSignaturePath(bindingEnt.ContentHash), sigEnt.ContentHash, "test-precede")
 
-	r, err := backend.Resolve(hctx, "billslab.com")
+	r, err := backend.Resolve(hctx, "billslab.com", nil)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -480,7 +481,7 @@ func TestResolve_OfflineNotFound(t *testing.T) {
 	backend, _ := New(registryEnt, registryPID, reader, WithNegativeTTLMillis(negTTL))
 	hctx := newHctx(t, newLocalPeer(t))
 
-	r, err := backend.Resolve(hctx, "nope.example")
+	r, err := backend.Resolve(hctx, "nope.example", nil)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -525,7 +526,7 @@ func TestResolve_ReaderError(t *testing.T) {
 	_, registryEnt, pid := newRegistry(t)
 	b, _ := New(registryEnt, pid, &errReader{err: errors.New("boom")})
 	hctx := newHctx(t, newLocalPeer(t))
-	_, err := b.Resolve(hctx, "billslab.com")
+	_, err := b.Resolve(hctx, "billslab.com", nil)
 	if err == nil {
 		t.Fatal("want reader-error to surface")
 	}

@@ -54,8 +54,8 @@ func TestRegDispatchGrammar(t *testing.T) {
 		{"**", "xy", true, "consecutive '*' collapse — empty middle segment"},
 	}
 	for _, c := range cases {
-		if got := matchDispatchName(c.pattern, c.name); got != c.want {
-			t.Errorf("matchDispatchName(%q, %q) = %v, want %v — %s",
+		if got := MatchName(c.pattern, c.name); got != c.want {
+			t.Errorf("MatchName(%q, %q) = %v, want %v — %s",
 				c.pattern, c.name, got, c.want, c.note)
 		}
 	}
@@ -78,8 +78,8 @@ func TestRegDispatchGrammarDivergesFromPathMatch(t *testing.T) {
 			// ours never does) — still a divergence, still fine.
 			continue
 		}
-		if pm == matchDispatchName(r.pattern, r.name) {
-			t.Errorf("row (%q,%q): path.Match and matchDispatchName AGREE (%v) — "+
+		if pm == MatchName(r.pattern, r.name) {
+			t.Errorf("row (%q,%q): path.Match and MatchName AGREE (%v) — "+
 				"this row no longer has teeth against a path.Match regression",
 				r.pattern, r.name, pm)
 		}

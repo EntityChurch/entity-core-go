@@ -101,22 +101,6 @@ func WithCacheOnResolve(on bool) Option {
 	return func(b *Backend) { b.cacheOnResolve = on }
 }
 
-// WithLocalMaxTTL declares this resolver's own TTL ceiling (ms). When set,
-// a resolved binding's effective lifetime is min(binding.ttl, local_max),
-// computed at resolution and NEVER written back into the binding (the stored
-// entity's content hash is unchanged; this is a *use* bound, not a re-issue) —
-// REGISTRY §6a.4 / v1.11. This is the load-bearing ceiling: §6a.3's whole
-// argument is about the consumer, and a ceiling the issuer enforces cannot
-// protect a consumer from that same issuer setting max_ttl high. Only the party
-// bearing the staleness risk — the resolver holding the cached binding — can
-// bound it. This is DNS's max-cache-ttl. Default: no local ceiling.
-func WithLocalMaxTTL(ms uint64) Option {
-	return func(b *Backend) {
-		v := ms
-		b.localMaxTTL = &v
-	}
-}
-
 // Backend implements ext/registry.Backend for one pinned registry peer.
 // Multiple registries → multiple Backend instances, each registered with
 // the meta-resolver under its own backend_id (the registry's base58
@@ -133,9 +117,12 @@ type Backend struct {
 	clock  func() uint64
 	negTTL *uint64
 
-	// localMaxTTL is the resolver-side TTL ceiling (§6a.4 / v1.11). Nil = none.
-	// Applied as min(binding.ttl, local_max) at resolution, never written back.
-	localMaxTTL *uint64
+	// The resolver-side TTL ceiling is NO LONGER a backend field: it is the
+	// durable resolver_chain[].hints.max_ttl, read fresh at resolution and
+	// passed into Resolve (REGISTRY [v1.16]). A construction-time option was
+	// the non-conformant seat — it applied on a cold boot and silently not on
+	// a warm one, and a control present on one boot path and absent on the
+	// other tests green on whichever path the test happens to take.
 
 	cacheOnResolve bool
 
@@ -225,7 +212,7 @@ func (b *Backend) ID() string { return b.registryPeerID }
 // identical to live-fetch. Live-fetch is gated on no local cache, then
 // caches its result for next-time (when WithCacheOnResolve is on, the
 // default).
-func (b *Backend) Resolve(hctx *handler.HandlerContext, name string) (types.ResolveResultData, error) {
+func (b *Backend) Resolve(hctx *handler.HandlerContext, name string, localMaxTTL *uint64) (types.ResolveResultData, error) {
 	if hctx == nil || hctx.Store == nil || hctx.LocationIndex == nil {
 		return types.ResolveResultData{}, errors.New("peerissued.Resolve: missing store / location index")
 	}
@@ -345,8 +332,8 @@ func (b *Backend) Resolve(hctx *handler.HandlerContext, name string) (types.Reso
 	// expiry check AND the TTL surfaced to the meta-resolver, while the binding on
 	// the wire and in the result's authority is unchanged.
 	effectiveTTL := *body.TTL
-	if b.localMaxTTL != nil && *b.localMaxTTL < effectiveTTL {
-		effectiveTTL = *b.localMaxTTL
+	if localMaxTTL != nil && *localMaxTTL < effectiveTTL {
+		effectiveTTL = *localMaxTTL
 	}
 	if effectiveTTL > 0 {
 		if body.IssuedAt+effectiveTTL <= b.clock() {
