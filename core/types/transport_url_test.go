@@ -2,6 +2,8 @@ package types
 
 import (
 	"bytes"
+	"encoding/hex"
+	"strings"
 	"testing"
 
 	"go.entitychurch.org/entity-core-go/core/ecf"
@@ -23,9 +25,16 @@ func TestBuildContentURL_Flat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildContentURL: %v", err)
 	}
-	want := "https://cdn.example.com/content/ab00000000000000000000000000000000000000000000000000000000000000"
+	// Full wire form — format byte `00` (SHA-256) INCLUDED, then the digest.
+	wire := hex.EncodeToString(h.Bytes())
+	want := "https://cdn.example.com/content/" + wire
 	if got != want {
 		t.Errorf("flat:\n  got  %s\n  want %s", got, want)
+	}
+	// Guard the shape directly: the URL carries the format byte, not the
+	// 64-char digest-only form the pre-ruling code emitted.
+	if !strings.HasSuffix(got, "/00ab"+strings.Repeat("00", 31)) {
+		t.Errorf("flat URL is not the full wire form (format byte `00` + digest): %s", got)
 	}
 }
 
@@ -35,9 +44,15 @@ func TestBuildContentURL_Sharded2Flat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildContentURL: %v", err)
 	}
-	want := "https://cdn.example.com/content/ab/ab00000000000000000000000000000000000000000000000000000000000000"
+	// `[0:2]` is the FORMAT-CODE byte (the algorithm partition, §6.5.3.1), not
+	// the first digest byte — the property a digest-only hex silently killed.
+	wire := hex.EncodeToString(h.Bytes())
+	want := "https://cdn.example.com/content/" + wire[0:2] + "/" + wire
 	if got != want {
 		t.Errorf("sharded-2-flat:\n  got  %s\n  want %s", got, want)
+	}
+	if !strings.HasPrefix(wire, "00") {
+		t.Errorf("sharded prefix must be the format byte `00`, wire=%s", wire)
 	}
 }
 
@@ -48,7 +63,9 @@ func TestBuildContentURL_Sharded24(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildContentURL: %v", err)
 	}
-	want := "https://cdn.example.com/content/ab/cd/abcd000000000000000000000000000000000000000000000000000000000000"
+	// wire = 00 ab cd 00…  →  /00/ab/00abcd00…  ([0:2]=format, [2:4]=digest[0]).
+	wire := hex.EncodeToString(h.Bytes())
+	want := "https://cdn.example.com/content/" + wire[0:2] + "/" + wire[2:4] + "/" + wire
 	if got != want {
 		t.Errorf("sharded-2-4:\n  got  %s\n  want %s", got, want)
 	}
@@ -84,9 +101,53 @@ func TestBuildContentURL_TrimsTrailingSlash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildContentURL: %v", err)
 	}
-	want := "https://cdn.example.com/content/ab00000000000000000000000000000000000000000000000000000000000000"
+	want := "https://cdn.example.com/content/" + hex.EncodeToString(h.Bytes())
 	if got != want {
 		t.Errorf("trailing-slash trim:\n  got  %s\n  want %s", got, want)
+	}
+}
+
+// TestBuildContentURL_FullWireFormLengthPerFormatByte is the teeth for the
+// -g ruling (EXTENSION-NETWORK §6.5.3 "Hex strictness"; corrected 2026-08-10):
+// the content-hash hex is the FULL wire form (format byte included), and its
+// length is the one the leading format byte IMPLIES — never a hardcoded 66.
+// Exercising SHA-384 (98 chars, format byte `01`) alongside SHA-256 (66, `00`)
+// mutation-guards the 2026-08-10 defect class where a fixed-66 gate 400'd a
+// valid SHA-384 hash. A regression to h.EffectiveDigest() (digest-only) makes
+// the format-byte prefix and the length assertions both fail.
+func TestBuildContentURL_FullWireFormLengthPerFormatByte(t *testing.T) {
+	cases := []struct {
+		name       string
+		h          hash.Hash
+		formatByte string
+		wantLen    int // 2 (format byte) + 2*digestLen
+	}{
+		{"sha256", hash.Hash{Algorithm: hash.AlgorithmSHA256}, "00", 2 + 2*hash.SHA256DigestSize},
+		{"sha384", hash.Hash{Algorithm: hash.AlgorithmSHA384}, "01", 2 + 2*hash.SHA384DigestSize},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.h.Digest[0] = 0xab
+			got, err := BuildContentURL("https://cdn.example.com/content", ContentLayoutFlat, tc.h)
+			if err != nil {
+				t.Fatalf("BuildContentURL: %v", err)
+			}
+			hexPart := strings.TrimPrefix(got, "https://cdn.example.com/content/")
+			if !strings.HasPrefix(hexPart, tc.formatByte) {
+				t.Errorf("%s: hex must begin with format byte %q (full wire form), got %s", tc.name, tc.formatByte, hexPart)
+			}
+			if len(hexPart) != tc.wantLen {
+				t.Errorf("%s: hex length %d, want %d (= 2 + 2*digestLen, byte-implied — NOT a hardcoded 66)",
+					tc.name, len(hexPart), tc.wantLen)
+			}
+			// It must equal the full wire form, and NOT the digest-only form.
+			if hexPart != hex.EncodeToString(tc.h.Bytes()) {
+				t.Errorf("%s: hex is not hex(H.Bytes()) — full wire form required", tc.name)
+			}
+			if hexPart == hex.EncodeToString(tc.h.EffectiveDigest()) {
+				t.Errorf("%s: hex is the 64/96-char digest-only form — the -g ruling forbids it", tc.name)
+			}
+		})
 	}
 }
 

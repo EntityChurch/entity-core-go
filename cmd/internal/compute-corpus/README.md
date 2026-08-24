@@ -216,16 +216,18 @@ Now pinned:
 
 **Honest scope of this freeze — read before treating it as complete:**
 
-- Pinned state: **350 vectors, SHA `c1fb6578…`, `spec_version 3.20`.**
-- **The v3.25 corner vectors CV-1…CV-6 (C-5) are partially seeded:** **7 of the 9 arms** are in the
+- Pinned state: **352 vectors, SHA `7d09f108…`, `spec_version 3.20`.**
+- **The v3.25/v3.26 corner vectors CV-1…CV-6 (C-5) are FULLY seeded:** **all 9 arms** are in the
   corpus (`worked/v325-corner/*`) and verified against arch's §7c.6 outcomes (`TestV325CornerOutcomes`).
-  **CV-4a and CV-5 are held, not seeded** (`v325BlockedOnMaterialization`): they put a `compute/error`
-  in a contained data-position, which go's `materialize()` guard rejects — routed as **spec-issue
-  2026-08-20-f**. They seed once ruled + go's `materialize()` is fixed (a re-freeze).
+  **CV-4a and CV-5 joined** once COMPUTE v3.26 ruled the contained-error boundary (**spec-issue
+  2026-08-20-f**, RESOLVED) and go's `materialize()` gained the array-element carve-out: a contained
+  `compute/error` now materializes code-only in the output array. `TestV325ContainedErrorBoundaryIsCodeOnly`
+  is the positive teeth (message-independence) that replaced the old blocked-pin.
 - The broader **sweep** still does not cover the v3.24/v3.25 primitives beyond these corners, and
   `spec_version` is still `3.20` — extending the sweep re-freezes under the guard.
 - The last **three-way cross-bless** was at the older 330-vector corpus; a fresh three-way bless at
-  350 is gated on `entity-core-rust` / `entity-core-py` building v3.25 (C-6). The frozen artifact is
-  **inputs only** — freezing it does not bless outcomes.
+  352 is gated on `entity-core-rust` / `entity-core-py` building v3.26 (C-6) — and the two newly-seeded
+  CV-4a/CV-5 have **never** been three-way'd. The frozen artifact is **inputs only** — freezing it does
+  not bless outcomes.
 - **Vendor** into `entity-core-protocol/specs/test-vectors/compute-conformance/` routes out (boundary
   repo); the frozen bytes + MANIFEST here are what gets vendored.

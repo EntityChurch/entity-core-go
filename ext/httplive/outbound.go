@@ -334,25 +334,18 @@ func (o *Outbound) contentURL(h hash.Hash) (string, error) {
 	if prefix == "" {
 		return "", fmt.Errorf("content URL: profile has no content_url_prefix or tree_url_prefix")
 	}
-	// Go's serveContent (poll.go) gates by hex(H.Bytes()) — 66 chars including
-	// the 1-byte algorithm prefix. types.BuildContentURL renders the 32-byte
-	// digest only (per the spec's §10.1 examples convention). To dial Go's
-	// own poll surface, we use the 33-byte form here; the cohort-wide content
-	// URL shape is being reconciled separately (snapshot-manifest §3-RES.2
-	// vs Amendment 5's hash-shape pin). Once that lands, this can collapse
-	// back into types.BuildContentURL.
-	prefix = strings.TrimRight(prefix, "/")
-	hexHash := hex.EncodeToString(h.Bytes())
-	switch o.endpoint.ContentLayout {
-	case "", types.ContentLayoutFlat:
-		return prefix + "/" + hexHash, nil
-	case types.ContentLayoutSharded2Flat:
-		return prefix + "/" + hexHash[0:2] + "/" + hexHash, nil
-	case types.ContentLayoutSharded24, types.ContentLayoutSharded22:
-		return prefix + "/" + hexHash[0:2] + "/" + hexHash[2:4] + "/" + hexHash, nil
-	default:
-		return "", fmt.Errorf("unknown content_layout %q", o.endpoint.ContentLayout)
+	// COLLAPSED 2026-08-21: types.BuildContentURL now renders the full wire form
+	// hex(H.Bytes()) — the format-byte-included hash this surface hand-rolled
+	// while the cohort hash-shape pin was settling. It landed (EXTENSION-NETWORK
+	// §6.5.3 "Hex strictness", full wire form, length per format byte), so the two
+	// are now identical and the workaround collapses onto the shared builder. An
+	// unset content_layout keeps this surface's historical flat default (the
+	// builder errors on "" — resolve it here so behavior is unchanged).
+	layout := o.endpoint.ContentLayout
+	if layout == "" {
+		layout = types.ContentLayoutFlat
 	}
+	return types.BuildContentURL(prefix, layout, h)
 }
 
 func (o *Outbound) treeLeafURL(signerPeerIDHex, treePath string) string {

@@ -187,6 +187,15 @@ func builtinConcat(d types.ComputeApplyData, scope *Scope, budget *Budget, ctx *
 	var tag string
 	var typed bool
 	for _, c := range colls {
+		// §7.2: each `collection` is a CONSUMED position (its length is read to
+		// copy), so an error sub-collection SHORT-CIRCUITS — distinct from an
+		// error ELEMENT of a valid sub-collection, which is contained (below).
+		// Bare-typing it via c.([]interface{}) reported type_mismatch, masking the
+		// error, the same Evaluate-vs-evalOperand slip resolveCollection carried
+		// (core-rust/core-py routed both — 2026-08-21 reports).
+		if ce, isErr := computeErrorFromValue(c); isErr {
+			return nil, ce
+		}
 		sub, ok := c.([]interface{})
 		if !ok {
 			return nil, newComputeError(ErrTypeMismatch,

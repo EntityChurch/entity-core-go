@@ -188,7 +188,21 @@ func resolveCollection(d types.ComputeApplyData, scope *Scope, budget *Budget, c
 	if err != nil {
 		return nil, err
 	}
-	val, err := Evaluate(target, scope, budget, ctx)
+	// The `collection` operand is a CONSUMED position (§7.2 — its length/elements
+	// are read to drive map/filter/fold/assoc/group-by), so a compute/error there
+	// MUST short-circuit, exactly as compute/index's and compute/length's array
+	// operands do (both use evalOperand). Using bare Evaluate here masked a
+	// value-form error as `type_mismatch`: an SA-1 error (or a lookup onto a stored
+	// error) is not a Go-error, so it fell through to the "not an array" branch
+	// below and reported the wrong code. is_error is kind-based (§4.1), so both
+	// representations funnel through evalOperand — the minted form via its
+	// Go-error, the value form via the is_error check inside evalOperand.
+	// (Cross-impl: core-rust + core-py each traced go's type_mismatch here to this
+	// one Evaluate-vs-evalOperand slip and routed it back — docs/validation/reports
+	// 2026-08-21. The go compute corpus LOCKED 352/352 anyway because no vector
+	// placed an error in the COLLECTION operand: the exact "two readings agree
+	// everywhere your fixtures live" gap.)
+	val, err := evalOperand(target, scope, budget, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -256,8 +270,82 @@ func invokeClosure(closureEnt entity.Entity, args []interface{}, scope *Scope, b
 	return Evaluate(bodyTarget, newScope, budget, ctx)
 }
 
+// isEvalLimitCode reports whether a compute/error code is an EVALUATION-LIMIT
+// abort — the evaluator hitting a resource ceiling — as distinct from a
+// value-error the program computed. The limit codes PROPAGATE everywhere,
+// including map's otherwise-contained closure-result position (below):
+//
+//   - a limit reached is not "a poisoned value OF the element type" (§1.5's NaN
+//     analogy describes a computed value like division_by_zero, not a resource
+//     ceiling the evaluator signalled about the whole computation); and
+//   - budget_exhausted specifically FORKS cross-impl if contained — Evaluate
+//     decrements the shared, cumulative Operations budget once per call
+//     (eval.go:60, never restored), so a map that contains it and keeps looping
+//     yields [be, be, …] at a shifted final budget, where one that propagates
+//     yields a single be. That is exactly the §5.1/§5.4 budget-determinism
+//     boundary two conformant peers must agree on.
+//
+// go's lead call (spec-issue 2026-08-21-b): the three limit codes propagate,
+// every other code — the produced value-errors, incl. permission_denied and
+// scope_unreachable, which §685/N8 already rule are error VALUES — contains. If
+// a sibling or arch reads the limit set differently, that is the next round, a
+// named divergence, not a silent one.
+func isEvalLimitCode(code string) bool {
+	switch code {
+	case ErrBudgetExhausted, ErrDepthExceeded, ErrCascadeLimit:
+		return true
+	}
+	return false
+}
+
+// containOrPropagate implements the §2.4 provenance-independence boundary (arch
+// C-8 ruling 172589e) at a CONTAINED closure-result position — map's output
+// element and fold's accumulator, the two places a primitive PLACES a closure
+// result without reading it. A MINTED *ComputeError (the closure body raised)
+// must produce the same contained bytes as a value-form compute/error that flowed
+// in on the success path, so it is converted to its entity form and returned as a
+// value with a nil error. The ONE exception is an eval-limit abort
+// (isEvalLimitCode — budget/depth/cascade): a resource ceiling the evaluator
+// signalled about the whole computation is not a value of the element type, so it
+// PROPAGATES. A non-*ComputeError infra failure (corrupt/unresolvable closure)
+// also propagates.
+//
+// Callers pass a NON-NIL err from invokeClosure/Evaluate and branch:
+//
+//	contained, perr := containOrPropagate(err)
+//	if perr != nil { return nil, perr }   // eval-limit abort or infra failure
+//	v = contained                          // minted error → contained value
+//
+// This is the single implementation of a boundary-hash-determining rule shared by
+// map and fold; keep it that way (charter: a hash-determining concept implemented
+// in more than one place MUST share the implementation).
+func containOrPropagate(err error) (interface{}, error) {
+	ce, ok := err.(*ComputeError)
+	if !ok || isEvalLimitCode(ce.Code) {
+		return nil, err
+	}
+	errEnt, eerr := ce.ToEntity()
+	if eerr != nil {
+		return nil, eerr
+	}
+	return errEnt, nil
+}
+
 // builtinMap applies fn to each element of collection in index order, returns
 // a new array of results (§962).
+//
+// The closure RESULT is a CONTAINED output element (arch C-8 ruling 172589e:
+// "map never reads it; §1.5's NaN model is element-wise"). A closure that yields
+// a compute/error for an element places that error INTO the output array as a
+// value — it does NOT short-circuit the map — so mapping a fallible fn returns
+// an array with error markers, NaN-style. Both error representations converge
+// here: a value-form error result already flowed in as the element value; a
+// minted *ComputeError (the closure body raised — div-by-zero, type_mismatch, …)
+// is now converted to its entity form and contained the same way, killing the
+// §2.4 provenance asymmetry (minted used to abort the whole map). The boundary
+// reduces every contained compute/error element to code-only (materialize(),
+// eval_construct.go), so the two representations produce identical boundary
+// bytes. The ONE exception is the evaluation-limit codes — see isEvalLimitCode.
 func builtinMap(d types.ComputeApplyData, scope *Scope, budget *Budget, ctx *EvalContext) (interface{}, error) {
 	arr, err := resolveCollection(d, scope, budget, ctx)
 	if err != nil {
@@ -271,7 +359,13 @@ func builtinMap(d types.ComputeApplyData, scope *Scope, budget *Budget, ctx *Eva
 	for _, elt := range arr {
 		v, err := invokeClosure(fn, []interface{}{elt}, scope, budget, ctx)
 		if err != nil {
-			return nil, err
+			// A minted produced-error is contained as the output element; only an
+			// eval-limit abort (or a non-*ComputeError infra failure) propagates.
+			contained, perr := containOrPropagate(err)
+			if perr != nil {
+				return nil, perr
+			}
+			v = contained
 		}
 		out = append(out, v)
 	}
@@ -294,6 +388,17 @@ func builtinFilter(d types.ComputeApplyData, scope *Scope, budget *Budget, ctx *
 		v, err := invokeClosure(pred, []interface{}{elt}, scope, budget, ctx)
 		if err != nil {
 			return nil, err
+		}
+		// The predicate RESULT is CONSUMED — read for truthiness (§7.2 general
+		// rule + arch C-8 ruling: "filter's predicate result short-circuits").
+		// A value-form compute/error here MUST short-circuit, not be run through
+		// truthy(): truthy(errorEntity) hits the default `return true`, so the
+		// element would be silently KEPT on a failed predicate — the provenance
+		// asymmetry §2.4 forbids (a minted predicate error already short-circuits
+		// via the err!=nil return above). This is the same evalOperand chokepoint
+		// the collection operand uses, applied to the closure result.
+		if ce, isErr := computeErrorFromValue(v); isErr {
+			return nil, ce
 		}
 		if truthy(v) {
 			out = append(out, elt)
@@ -321,15 +426,39 @@ func builtinFold(d types.ComputeApplyData, scope *Scope, budget *Budget, ctx *Ev
 	if err != nil {
 		return nil, err
 	}
+	// The accumulator is a CONTAINED position (arch C-8 ruling 172589e: "fold binds
+	// it into the next closure invocation and never reads it, so a closure that
+	// ignores its accumulator RECOVERS" — CV-8d). An error accumulator — value-form
+	// or minted — is threaded onward as an ordinary value; fold NEVER short-circuits
+	// on it. This is the shape §1.5's error-as-value model requires (errors are
+	// ordinary values a program may inspect, §4.1 is_error), and it is what the old
+	// short-circuit got exactly backwards. The empty-collection case pins it:
+	// fold([], fn, E) = E, the error contained as the final accumulator.
+	//
+	// `initial` is bound (contained), not consumed: a value-form error initial
+	// arrives as a value from Evaluate (err==nil); a minted one is contained the
+	// same way map's output element is (containOrPropagate). Only an eval-limit
+	// abort propagates. `collection`, by contrast, is CONSUMED — resolveCollection
+	// short-circuits a value-form error collection (§7.2), unchanged.
 	acc, err := Evaluate(initialTarget, scope, budget, ctx)
 	if err != nil {
-		return nil, err
-	}
-	for _, elt := range arr {
-		acc, err = invokeClosure(fn, []interface{}{acc, elt}, scope, budget, ctx)
+		acc, err = containOrPropagate(err)
 		if err != nil {
 			return nil, err
 		}
+	}
+	for _, elt := range arr {
+		next, ierr := invokeClosure(fn, []interface{}{acc, elt}, scope, budget, ctx)
+		if ierr != nil {
+			// Minted closure result contained as the new accumulator (map's rule);
+			// an eval-limit abort propagates. No short-circuit on an error acc — the
+			// closure may ignore it on the next iteration and recover.
+			next, ierr = containOrPropagate(ierr)
+			if ierr != nil {
+				return nil, ierr
+			}
+		}
+		acc = next
 	}
 	return acc, nil
 }
@@ -356,7 +485,19 @@ func builtinStore(d types.ComputeApplyData, scope *Scope, budget *Budget, ctx *E
 	if err != nil {
 		return nil, err
 	}
-	pathVal, err := Evaluate(pathTarget, scope, budget, ctx)
+	// store's `path` is a CONSUMED operand — it steers WHERE the write goes, like
+	// assoc's `index` steers where the update lands — so a compute/error path
+	// SHORT-CIRCUITS, it does not become type_mismatch. §200 states this as the
+	// store model directly: an error-valued store field "would short-circuit to
+	// that error" (which is exactly why `resource`/`capability` are shape-checked
+	// BEFORE eval). Bare Evaluate + .(string) masked a value-form error path as
+	// type_mismatch — the resolveCollection slip on store's own operand, and
+	// internally inconsistent with assoc's index (which routes through evalOperand).
+	// Only `value` is the write/contain position (materialized code-only below).
+	// [Cross-impl coordination: found by the 2026-08-21 consumed-operand sweep, not
+	//  by a peer or a vector; flagged to rust/py to confirm their store-path handling
+	//  agrees rather than seeding a store vector unilaterally.]
+	pathVal, err := evalOperand(pathTarget, scope, budget, ctx)
 	if err != nil {
 		return nil, err
 	}

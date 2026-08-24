@@ -132,6 +132,37 @@ func materialize(v interface{}, cs store.ContentStore) (interface{}, error) {
 		// element-wise so a constructed array-element becomes its bare hash.
 		out := make([]interface{}, len(t))
 		for i, e := range t {
+			// (B) carve-out (COMPUTE v3.26 §3.5): a compute/error CONTAINED as an
+			// array element materializes CODE-ONLY (content-hashed over `code`
+			// alone, §2.4 — message/at/expression are in-flight diagnostics) and is
+			// referenced by a bare system/hash, exactly like any other
+			// entity-valued element. This is the v3.26 SCOPED reversal of ruling B:
+			// v3.25's collection primitives created DATA positions where an error
+			// is contained in a value rather than consumed — assoc's `value`,
+			// concat's elements, group-by's `members` (and map's output-element
+			// precedent) — and N1 applies there. The load-bearing reason it is
+			// code-only: a contained `message` would fork the containing array's
+			// bytes cross-impl on a string no spec pins. The guard in the
+			// entity.Entity branch below still fires for an error reaching
+			// materialization anywhere that is NOT a contained array element
+			// (top-level result, a construct-field scalar, a scope-binding scalar):
+			// those short-circuit upstream, so an error arriving there is the §4.1
+			// defect it has always been. Scope discipline: the carve-out is exactly
+			// the contained-element position — the tell you got it wrong is a
+			// non-element error materializing quietly.
+			if ce, isErr := computeErrorFromValue(e); isErr {
+				errEnt, err := ce.ToMaterializedEntity()
+				if err != nil {
+					return nil, err
+				}
+				if cs != nil {
+					if _, err := cs.Put(errEnt); err != nil {
+						return nil, err
+					}
+				}
+				out[i] = errEnt.ContentHash
+				continue
+			}
 			me, err := materialize(e, cs)
 			if err != nil {
 				return nil, err
@@ -144,20 +175,23 @@ func materialize(v interface{}, cs store.ContentStore) (interface{}, error) {
 		}
 		return out, nil
 	case entity.Entity:
-		// (B) INVARIANT (COMPUTE v3.23): a compute/error must NEVER reach
-		// materialize(). Every consumption site short-circuits it as an error
-		// first (§4.1 is_error [MUST] — construct field, apply arg, top-level
-		// result), and the one place an error legitimately materializes — where
-		// it is WRITTEN (§7.2 result_path / SA-9 store) — goes through
-		// ToMaterializedEntity directly (engine.go), not here. Pre-v3.23 this
-		// branch code-only-materialized an error into a construct field: that was
-		// behaviour (A), which the ruling reversed. If an error arrives now, a
-		// short-circuit was missed upstream — fail loudly rather than silently
-		// re-embedding it. Any other entity is already bare — pass through.
+		// (B) INVARIANT (COMPUTE v3.23, scoped v3.26): a compute/error reaching
+		// materialize() as a SCALAR (a top-level result, a construct-field scalar,
+		// a scope-binding scalar) is still the defect. Every consumption site
+		// short-circuits it as an error first (§4.1 is_error [MUST]), and the one
+		// place an error legitimately materializes as a written scalar — §7.2
+		// result_path / SA-9 store — goes through ToMaterializedEntity directly
+		// (engine.go / builtinStore), not here. The v3.26 carve-out is the
+		// CONTAINED case only: an error that is a direct ARRAY ELEMENT (the []interface{}
+		// branch above) materializes code-only, because §3.5's collection primitives
+		// created data positions. An error arriving HERE — not as an array element —
+		// means a short-circuit was missed upstream, so fail loudly rather than
+		// silently re-embedding it. Any other entity is already bare — pass through.
 		if t.Type == types.TypeComputeError {
 			return nil, fmt.Errorf(
-				"internal: compute/error reached materialize() — a §4.1 is_error short-circuit was missed " +
-					"(COMPUTE v3.23 ruling B: an error propagates from a consumption site, it never materializes there)")
+				"internal: compute/error reached materialize() as a scalar — a §4.1 is_error short-circuit was missed " +
+					"(COMPUTE v3.23 ruling B, scoped v3.26: a CONTAINED error materializes code-only as an array element; " +
+					"a scalar error propagates from its consumption site, it never materializes there)")
 		}
 		return v, nil
 	default:

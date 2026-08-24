@@ -9,24 +9,28 @@ seed:              20260716
 sweep_cases:       300
 profile:           inproc
 spec_version:      3.20
-vectors:           350 (worked 50, sweep 300)
-bytes:             518796
-sha256:            c1fb657841fd5a3ec67530b9d60573a714b7fad7a310207bfa32b1d4eda9f6e6
+vectors:           359 (worked 59, sweep 300)
+bytes:             525503
+sha256:            1844d231ffe52447afa5443336c11b56bd42d3ace02e7fb3e1f1ed0768799927
 
 # feature coverage (vectors carrying each tag)
-  assoc                        3
+  assoc                        5
   bit-reinterpretation         4
   budget                       1
   builtin-alias                2
-  closure                      119
+  closure                      124
+  concat                       2
   deep-navigation              1
   empty-collection             1
   error-path                   23
-  error-value                  2
-  group-by                     2
+  error-value                  11
+  filter                       1
+  fold                         1
+  group-by                     3
   heterogeneous-array          1
   invalid-expression           2
   major-type-is-not-intent     2
+  map                          2
   materialized-error           2
   materialized-hash-readback   1
   nested-collection            1
@@ -38,5 +42,5 @@ sha256:            c1fb657841fd5a3ec67530b9d60573a714b7fad7a310207bfa32b1d4eda9f
   tail-recursion               1
   tree-lookup                  3
   unsigned-at-use-site         158
-  v325-corner                  7
+  v325-corner                  16
   value-form-error             9

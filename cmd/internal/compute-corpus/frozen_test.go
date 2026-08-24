@@ -18,7 +18,33 @@ import (
 // If this constant needs updating, the corpus changed: the old value described
 // a DIFFERENT set of inputs, so re-pin here AND re-run the three-way cross-bless
 // — a fresh SHA invalidates the prior emissions.
-const goldenCorpusSHA256 = "c1fb657841fd5a3ec67530b9d60573a714b7fad7a310207bfa32b1d4eda9f6e6"
+// Re-pinned 2026-08-21 (COMPUTE v3.26 -f): CV-4a + CV-5 moved from held into the
+// seeded corner set (350 → 352) once the contained-error carve-out landed in
+// materialize().
+// Re-pinned again 2026-08-21 (collection-operand §7.2 fix): CV-7a/b/c added
+// (352 → 355) after core-rust + core-py caught go answering type_mismatch where a
+// consumed collection/sub-collection error must short-circuit — the exact
+// discriminator the corpus lacked, which is why go LOCKED three-way with the bug
+// live.
+// Re-pinned again 2026-08-21 (COMPUTE Corner 1, arch C-8 ruling 172589e): CV-8a/b/c
+// added (355 → 358) for the CLOSURE-RESULT dispositions. That freeze encoded fold as
+// PROPAGATE — WRONG: arch's ruling makes fold's accumulator CONTAINED (a closure that
+// ignores its accumulator recovers), and go had read arch's word "propagates" (=
+// threads onward) as short-circuit. rust and py both measured the go peer and caught
+// it. The freeze also lacked CV-8d — the fold recovery discriminator — which is why
+// the 358 LOCK passed go-on-go with the bug live ("the two readings agree everywhere
+// your fixtures live").
+// Re-pinned again 2026-08-21 (Corner 1 fold fix + CV-8 reconcile to arch's §6 set,
+// 358 → 359): fold now CONTAINS/recovers (ext/compute builtinFold). Vectors realigned
+// to arch's numbering — CV-8a map MINTED, CV-8b map VALUE-FORM (the provenance pair,
+// newly added), CV-8c filter short-circuit, CV-8d fold ignores-accumulator RECOVERS
+// (replacing the old fold-propagates vector, which asserted the defect). The eval-limit
+// codes (budget/depth/cascade) remain OUT of the corpus — their disposition is the open
+// carve-out routed to arch (spec-issue 2026-08-21-b; depth vs budget/cascade split
+// contested cross-impl), held until ruled.
+// A fresh SHA is a fresh cross-bless obligation: the 359 set has not yet been
+// three-way'd (rust/py locked the 352 set; 355/358 were never three-way'd either).
+const goldenCorpusSHA256 = "1844d231ffe52447afa5443336c11b56bd42d3ace02e7fb3e1f1ed0768799927"
 
 const frozenCorpusPath = "testdata/compute-corpus-v1.cbor"
 

@@ -161,10 +161,20 @@ func EffectiveContentURLPrefix(ep TransportEndpoint) string {
 // bytes of content-hash h from a publisher whose http-poll profile (or
 // snapshot manifest endpoint block) advertises the given prefix + layout.
 //
-// The hash is rendered as the hex of its 32-byte digest — the algorithm
-// byte is implicit at the URL layer (currently only ecf-sha256). This
-// matches the conventional content-addressed URL shape used in
-// STORAGE-SUBSTITUTE-HTTP §3-RES.2 and the §10.1 examples.
+// The hash is rendered as the lowercase hex of the FULL wire form —
+// format-code byte INCLUDED (h.Bytes(), ENTITY-CORE-PROTOCOL §3.5 "Hex
+// encoding convention"), NOT the 64-char digest-only form. Its length is
+// implied by the leading format byte and is NEVER a constant: 66 chars
+// beginning `00` under ECFv1-SHA-256, 98 beginning `01` under
+// ECFv1-SHA-384, and so on (SPECIFICATION-FORMAT §8.4.5). This keeps the
+// algorithm discriminator in the URL (crypto-agility) and preserves URL ⇄
+// tree-binding parity — the content-namespace key is the same hex, so
+// in_scope(H) == tree:get({ns}/{same-hex}) with no boundary conversion
+// (EXTENSION-NETWORK §6.5.3 / §6.5.3.1 "Hex strictness"; EXTENSION-CONTENT
+// §6.4.2). It also makes the sharded layouts' `[0:2]` slice the format-code
+// byte (the algorithm partition, §6.5.3.1), not the first digest byte —
+// the property a digest-only hex silently killed (the corrected 2026-08-10
+// cohort bug, where a hardcoded-66 length gate 400'd a valid SHA-384 hash).
 //
 // Returns an error on an unknown layout value — the spec's enum is
 // closed, and a publisher advertising a layout outside it is publishing
@@ -175,7 +185,7 @@ func EffectiveContentURLPrefix(ep TransportEndpoint) string {
 // resolution rule applies automatically.
 func BuildContentURL(contentURLPrefix, layout string, h hash.Hash) (string, error) {
 	prefix := strings.TrimRight(contentURLPrefix, "/")
-	hexHash := hex.EncodeToString(h.EffectiveDigest())
+	hexHash := hex.EncodeToString(h.Bytes())
 
 	switch layout {
 	case ContentLayoutFlat:
