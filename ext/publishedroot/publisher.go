@@ -98,22 +98,36 @@ type Publisher struct {
 	lastEntity  *entity.Entity
 	rootPath    string // the LI path RootTracker writes the tracked root to
 	authorityOK bool
-	publishing  bool // re-entry guard for Publish-cascade-Publish recursion
-	// pending is the trailing edge of the coalescing window: a root that
-	// arrived while a publish was in flight and so could not be published
-	// then. The in-flight publish drains it on completion. Without this
-	// the guard DROPS that root, and if the write burst has stopped there
-	// is no next cascade to pick it up — the published root stays behind
-	// the tracked root forever, which is a §6.5.6 convergence failure and
-	// not merely a slow one. Measured: reproducible at 5000 sequential
-	// writes before this existed.
-	pending *hash.Hash
+	publishing  bool // re-entry guard: exactly one publish drain runs at a time
 
+	// dirty is the SINGLE coalescing slot: the newest tracked root observed
+	// since it was last published, or nil when the published root is caught
+	// up. Every OnTreeChange overwrites it UNDER p.mu, and because that hook
+	// fires synchronously and in tracked-root order (RootTracker serializes
+	// root advances under its per-prefix mutex and emits inline), this slot
+	// always holds the genuinely NEWEST root — never a stale midpoint. The
+	// publish drain consumes it, and the "consume-or-clear-publishing"
+	// decision happens under one lock hold, so a root recorded during a
+	// publish is never lost (the classic lost-wakeup this structure prevents).
+	//
+	// This one slot is why convergence (§6.5.6) holds under adversarial
+	// goroutine scheduling. The earlier undebounced design spawned one
+	// goroutine PER advance, each carrying a CAPTURED evt.Hash, and let them
+	// race: under CPU starvation a late goroutine holding an OLD root could
+	// publish last, leaving the published root behind the tracked root forever
+	// — a convergence FAILURE, not merely a slow one. It was reproducible at
+	// GOMAXPROCS=1 over a 5000-write burst, and the signature of the bug was
+	// seq>writes with converged=false: the work was done, the wrong root
+	// landed last. Routing every advance through this newest-wins slot removes
+	// the captured hashes, and the race with them. The debounced path was
+	// always immune for exactly this reason — it already used the slot.
+	//
 	// Debounce coalescing (§6.5.6: "coalescing / debouncing is explicitly
-	// permitted — a signature per tree:put is write-amplifying and is not
-	// the intent; a cascade SHOULD produce one republish, not one per
-	// binding"). dirty holds the newest tracked root observed since the
-	// last publish; the timer collapses a burst into one signature.
+	// permitted — a signature per tree:put is write-amplifying and is not the
+	// intent; a cascade SHOULD produce one republish, not one per binding").
+	// timerArmed guards a single scheduled flush; debounce>0 delays the flush,
+	// a zero/negative debounce fires it immediately on its own goroutine.
+	// Either way the flush publishes whatever `dirty` holds when it runs.
 	debounce   time.Duration
 	dirty      *hash.Hash
 	timerArmed bool
@@ -142,7 +156,8 @@ type PublisherOption func(*Publisher)
 // WithDebounce sets the coalescing window. Zero or negative disables
 // debouncing entirely — every tracked-root advance publishes immediately,
 // which is the maximum-freshness / maximum-amplification end of the trade
-// §6.5.6 describes.
+// §6.5.6 describes. Convergence holds either way: both settings feed the
+// same newest-wins `dirty` slot, differing only in WHEN the flush fires.
 func WithDebounce(d time.Duration) PublisherOption {
 	return func(p *Publisher) { p.debounce = d }
 }
@@ -283,66 +298,97 @@ func (p *Publisher) Current() (*entity.Entity, bool) {
 }
 
 // Publish mints a new system/peer/published-root binding rootHash, signs it
-// with the publisher's keypair, and binds both at their canonical storage
-// paths. Seq monotonicity is enforced internally: every call uses lastSeq+1.
-// Returns the bound published-root entity.
+// with the publisher's keypair, binds both at their canonical storage paths,
+// and then drains any newer root the coalescing slot has accumulated. Seq
+// monotonicity is enforced internally: every mint uses lastSeq+1. Returns the
+// last bound published-root entity.
 //
-// The lock is released before LI writes so the sync-hook cascade the writes
-// trigger (rootTracker → re-rebuild → publisher.OnTreeChange → Publish) can
-// re-enter without deadlocking. Re-entry is short-circuited by the `publishing`
-// guard: when set, OnTreeChange skips its Publish call (the next cascade will
-// pick up the new root once we're done).
+// This is the DIRECT entry point — SetupAuthority's initial publish and the
+// fixture / benchmark drivers use it to publish an exact root. The sync-hook
+// path (OnTreeChange) does NOT come through here with a captured per-event
+// hash; it feeds the newest-wins slot and lets flushDirty run the drain. That
+// separation is the fix for the §6.5.6 convergence failure — see the `dirty`
+// field comment and publishPending.
 func (p *Publisher) Publish(rootHash hash.Hash) (entity.Entity, error) {
+	return p.publishPending(&rootHash)
+}
+
+// maxTrailingRepublishes bounds the drain loop so a pathological feedback
+// loop degrades into a visible stall rather than a spinning goroutine. The
+// RootTracker skips PublisherHandlerPattern writes, so our own bindings do
+// not advance the tracked root, and a burst-that-stopped drains in one or
+// two rounds.
+const maxTrailingRepublishes = 64
+
+// publishPending runs the single publish drain. At most one runs at a time
+// (the `publishing` guard); a concurrent caller records its root in the
+// coalescing slot and returns errPublishInProgress, leaving the work to the
+// in-flight drain. If seed is non-nil it is published first (the direct
+// Publish entry point); the drain then publishes successive NEWEST roots from
+// `dirty` until the published root is caught up.
+//
+// The convergence-critical invariant lives at the loop head: reading `dirty`
+// (or finding it empty) and clearing `publishing` happen under ONE lock hold.
+// Split across two, a root recorded between "dirty is empty" and
+// "publishing = false" would see publishing still set, park itself in
+// `dirty`, and then be dropped by a drain that has already decided to exit —
+// the exact lost wakeup this structure exists to prevent.
+func (p *Publisher) publishPending(seed *hash.Hash) (entity.Entity, error) {
 	p.mu.Lock()
 	if !p.authorityOK {
 		p.mu.Unlock()
 		return entity.Entity{}, fmt.Errorf("publishedroot.Publish: authority not configured")
 	}
 	if p.publishing {
-		// Another Publish is in flight (we're being re-entered via the
-		// LI-write cascade). Record this root as the trailing edge rather
-		// than discarding it: the in-flight call republishes it before it
-		// returns. Dropping it is only safe while writes keep arriving —
-		// and the case that matters is the burst that just stopped.
-		r := rootHash
-		p.pending = &r
+		// A drain is in flight (a concurrent caller, or our own LI-write
+		// cascade re-entering us). Record this root as the newest pending
+		// edge rather than discarding it: the in-flight drain republishes it
+		// before it returns. Newest-wins, because the drain always reads the
+		// latest value of the slot — and dropping it is exactly the lost
+		// wakeup that broke convergence when the burst had already stopped.
+		if seed != nil {
+			s := *seed
+			p.dirty = &s
+		}
 		p.mu.Unlock()
 		return entity.Entity{}, errPublishInProgress
 	}
 	p.publishing = true
+	p.timerArmed = false
+	next := seed
 	p.mu.Unlock()
 
 	var last entity.Entity
-	current := rootHash
-	// Bounded so a pathological feedback loop degrades into a stall we can
-	// see rather than a goroutine that never returns. The RootTracker skips
-	// PublisherHandlerPattern writes, so our own bindings do not advance the
-	// tracked root and this normally runs once, twice at a burst tail.
+	var lastTarget hash.Hash
+	have := false
 	for round := 0; round < maxTrailingRepublishes; round++ {
-		ent, err := p.publishOnce(current)
+		p.mu.Lock()
+		if next == nil {
+			next = p.dirty
+			p.dirty = nil
+		}
+		if next == nil || (have && *next == lastTarget) {
+			// Caught up. Clearing `publishing` here, under the SAME lock hold
+			// that just found the slot empty (or unchanged), is what closes
+			// the lost-wakeup window: a concurrent OnTreeChange either set
+			// `dirty` before this read (so we see it and loop) or runs after
+			// this unlock (so it sees publishing=false and arms a fresh flush).
+			p.publishing = false
+			p.mu.Unlock()
+			return last, nil
+		}
+		target := *next
+		next = nil
+		p.mu.Unlock()
+
+		ent, err := p.publishOnce(target)
 		if err != nil {
 			p.clearPublishing()
 			return entity.Entity{}, err
 		}
 		last = ent
-		// Draining `pending` and releasing the `publishing` flag MUST happen
-		// under one lock hold. Split across two, there is a window between
-		// "pending is empty" and "publishing = false" in which a new root
-		// arrives, sees publishing still set, parks itself in pending, and
-		// is then dropped by a loop that has already decided to exit — the
-		// exact lost wakeup this drain exists to prevent, reintroduced one
-		// level down. Caught by TestRepublishConvergenceAfterBurst under
-		// parallel-package load, not by review.
-		p.mu.Lock()
-		next := p.pending
-		p.pending = nil
-		if next == nil || *next == current {
-			p.publishing = false
-			p.mu.Unlock()
-			return last, nil
-		}
-		p.mu.Unlock()
-		current = *next
+		lastTarget = target
+		have = true
 	}
 	p.clearPublishing()
 	if p.debugLog != nil {
@@ -351,9 +397,6 @@ func (p *Publisher) Publish(rootHash hash.Hash) (entity.Entity, error) {
 	}
 	return last, nil
 }
-
-// maxTrailingRepublishes bounds the drain loop in Publish.
-const maxTrailingRepublishes = 64
 
 func (p *Publisher) clearPublishing() {
 	p.mu.Lock()
@@ -476,9 +519,10 @@ func (p *Publisher) publishOnce(rootHash hash.Hash) (entity.Entity, error) {
 	return prEntity, nil
 }
 
-// errPublishInProgress is the sentinel returned by Publish when a recursive
-// re-entry is detected. Callers (notably OnTreeChange) ignore it — the
-// outer Publish in flight already covers the new root.
+// errPublishInProgress is the sentinel returned by Publish/publishPending
+// when a drain is already in flight. Callers (notably OnTreeChange and
+// flushDirty) ignore it — the in-flight drain already covers the new root,
+// which was recorded in the coalescing slot.
 var errPublishInProgress = fmt.Errorf("publishedroot: publish already in progress")
 
 // OnTreeChange is the sync-hook entry point. Registered via
@@ -525,83 +569,73 @@ func (p *Publisher) OnTreeChange(evt store.TreeChangeEvent) *store.ConsumerResul
 		return nil
 	}
 
-	// Publish OUT-OF-BAND on a goroutine. Calling Publish synchronously
-	// here would deadlock against rootTracker's per-prefix mutex: this
-	// hook fires INSIDE rootTracker's applyEventWithDepth (which holds
-	// prefixMu for our prefix), and Publish's own li.Set re-triggers
-	// applyEventWithDepth which would try to re-acquire the same prefix
-	// mutex. Spawning lets the outer rootTracker call return and release
-	// the lock before the publish runs. The Publish-internal re-entry
-	// guard then compresses bursts (each Publish triggers cascade writes
-	// that re-fire this hook; the spawned Publish sees publishing=true
-	// and returns errPublishInProgress without doing duplicate work).
+	// Record the newest tracked root in the single coalescing slot and,
+	// unless a drain is already running or a flush already scheduled, arm one.
+	// Recording UNDER the lock and in hook order is what guarantees the slot
+	// holds the genuinely newest root; the debounced and undebounced paths
+	// differ only in WHEN the flush fires, never in WHAT it publishes.
+	//
+	// The publish itself runs OUT-OF-BAND (flush goroutine or debounce timer).
+	// Publishing synchronously here would deadlock against rootTracker's
+	// per-prefix mutex: this hook fires INSIDE rootTracker's
+	// applyEventWithDepth (holding prefixMu for our prefix), and publishOnce's
+	// own li.Set re-triggers applyEventWithDepth, which would try to
+	// re-acquire the same prefix mutex. Deferring the publish lets the outer
+	// rootTracker call return and release the lock first.
+	//
+	// Deliberately NOT `go Publish(evt.Hash)` per event: that spawned one
+	// goroutine per advance carrying a captured hash, and under load a late
+	// goroutine could publish a stale root last — the §6.5.6 convergence
+	// failure the `dirty` field comment describes. One newest-wins slot, one
+	// flush, removes the race.
 	p.mu.Lock()
-	debounce := p.debounce
-	if debounce > 0 {
-		// Trailing-edge coalescing. Record the newest root and arm one
-		// timer; every further advance inside the window just overwrites
-		// `dirty`, so a burst of any length costs ONE signature and the
-		// value published is the newest — never a stale midpoint.
-		root := evt.Hash
-		p.dirty = &root
-		if p.timerArmed {
-			p.mu.Unlock()
-			return nil
-		}
-		p.timerArmed = true
+	root := evt.Hash
+	p.dirty = &root
+	if p.publishing || p.timerArmed {
+		// A drain is running or a flush is already scheduled; it will pick up
+		// the newest `dirty` we just set. Nothing to arm.
 		p.mu.Unlock()
-		time.AfterFunc(debounce, p.flushDirty)
 		return nil
 	}
+	p.timerArmed = true
+	debounce := p.debounce
 	p.mu.Unlock()
 
-	go func(root hash.Hash) {
-		if _, err := p.Publish(root); err != nil {
-			if err == errPublishInProgress {
-				return
-			}
-			if p.debugLog != nil {
-				p.debugLog.Printf("[publishedroot] async publish error: %v", err)
-			}
-		}
-	}(evt.Hash)
+	if debounce > 0 {
+		time.AfterFunc(debounce, p.flushDirty)
+	} else {
+		go p.flushDirty()
+	}
 	return nil
 }
 
-// flushDirty publishes the newest root observed during the debounce
-// window. It is the trailing edge: the timer measures QUIET, so this runs
-// once the writes stop rather than on a fixed cadence.
+// flushDirty runs the publish drain for whatever root the coalescing slot
+// holds. It is the trailing edge of the debounce window (the timer measures
+// QUIET, so this runs once the writes stop rather than on a fixed cadence)
+// and, when debouncing is disabled, the immediate publish path.
 //
-// Convergence (§6.5.6) rests on this being unconditional — if it ever
-// returned without either publishing `dirty` or handing it to an in-flight
-// publish, the burst tail would be lost and the published root would sit
-// behind the tracked root forever. errPublishInProgress is precisely that
-// hand-off: Publish parked the root in `pending` and its drain loop will
-// carry it.
+// Convergence (§6.5.6) rests on two things this relies on: the slot always
+// holds the NEWEST tracked root (set synchronously and in order by
+// OnTreeChange), and the drain consumes it under the same lock that clears
+// the publishing guard (see publishPending). errPublishInProgress is not an
+// error here — it means a drain is already in flight and will carry the root
+// we just recorded.
 func (p *Publisher) flushDirty() {
-	p.mu.Lock()
-	p.timerArmed = false
-	d := p.dirty
-	p.dirty = nil
-	p.mu.Unlock()
-	if d == nil {
-		return
-	}
-	if _, err := p.Publish(*d); err != nil && err != errPublishInProgress {
+	if _, err := p.publishPending(nil); err != nil && err != errPublishInProgress {
 		if p.debugLog != nil {
-			p.debugLog.Printf("[publishedroot] debounced publish error: %v", err)
+			p.debugLog.Printf("[publishedroot] flush publish error: %v", err)
 		}
 	}
 }
 
-// Flush publishes any root still sitting in the debounce window, without
-// waiting for the timer. Call it before shutting a publisher down so a
-// burst that ended inside the window is not left unpublished.
+// Flush publishes any root still sitting in the coalescing slot, without
+// waiting for the debounce timer. Call it before shutting a publisher down so
+// a burst that ended inside the window is not left unpublished.
 //
-// Not calling it is recoverable rather than fatal: SetupAuthority
-// publishes the tracker's current root on startup, so a peer that dies
-// with a pending debounce re-converges on its next boot. Flush turns that
-// from "fixed on restart" into "never wrong".
+// Not calling it is recoverable rather than fatal: SetupAuthority publishes
+// the tracker's current root on startup, so a peer that dies with a pending
+// debounce re-converges on its next boot. Flush turns that from "fixed on
+// restart" into "never wrong".
 func (p *Publisher) Flush() {
 	p.flushDirty()
 }

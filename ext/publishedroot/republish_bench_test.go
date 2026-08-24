@@ -214,14 +214,23 @@ func (s *republishStack) awaitConvergence(tb testing.TB, deadline time.Duration)
 // infinity, not 30 s. So the measurement writes a burst, quiesces, and then
 // polls for the published root to catch up.
 // TestRepublishConvergenceUndebounced gates the SAME §6.5.6 property with
-// debouncing switched off — the configuration in which the `pending`
-// trailing-edge drain is actually load-bearing.
+// debouncing switched off — the configuration in which the newest-wins
+// coalescing slot is actually load-bearing.
 //
 // This exists because of a measured result: with the 25 ms debounce on,
-// deleting the drain does NOT break convergence, since flushDirty rarely
-// collides with an in-flight publish. So the debounced test alone cannot
-// gate the drain, and a regression there would ship silently while every
-// test stayed green. Two configurations, two gates.
+// a regression in the undebounced coalescing does NOT break convergence,
+// since the timer rarely collides with an in-flight publish. So the debounced
+// test alone cannot gate it, and a regression there would ship silently while
+// every test stayed green. Two configurations, two gates.
+//
+// It once FAILED under CPU starvation (GOMAXPROCS=1 / --cpus<1), and that was
+// a real defect, not a flake: the undebounced path spawned one goroutine per
+// advance carrying a captured root hash, and under load a late goroutine could
+// publish a stale root LAST — leaving the published root behind the tracked
+// root indefinitely (seq>writes with converged=false: work done, wrong root
+// landed). Fixed by routing every advance through the single newest-wins slot
+// (see publisher.go `dirty`); it now converges in ~1 ms regardless of load.
+// TestOnTreeChangeRecordsNewestInSlot pins the same invariant deterministically.
 func TestRepublishConvergenceUndebounced(t *testing.T) {
 	s := buildRepublishStack(t, PrefixForLocalPeer, WithDebounce(0))
 	const n = 5000
@@ -237,7 +246,8 @@ func TestRepublishConvergenceUndebounced(t *testing.T) {
 		got, _ := s.publishedRoot(t)
 		t.Errorf("§6.5.6 VIOLATED with debouncing off: published root did not converge after the burst stopped.\n"+
 			"  tracked root:   %s\n  published root: %s\n"+
-			"  The re-entry guard dropped the tail republish and nothing re-fires it.", tracked, got)
+			"  The published root is stuck behind the tracked root — a coalesced advance was lost\n"+
+			"  (a stale root published last, or a trailing advance never drained).", tracked, got)
 	}
 }
 
@@ -260,7 +270,8 @@ func TestRepublishConvergenceAfterBurst(t *testing.T) {
 				got, _ := s.publishedRoot(t)
 				t.Errorf("§6.5.6 VIOLATED: published root did not converge within 30 s after the burst stopped.\n"+
 					"  tracked root:   %s\n  published root: %s\n"+
-					"  The re-entry guard dropped the tail republish and nothing re-fires it.", tracked, got)
+					"  The published root is stuck behind the tracked root — a coalesced advance was lost\n"+
+					"  (a stale root published last, or a trailing advance never drained).", tracked, got)
 			}
 		})
 	}

@@ -54,6 +54,17 @@ read it as a fleet version.)
 Development lands on `dev`; `master` carries the last release. **Will be cut as
 `0.9.0`** — see Versioning above. Highlights since `v0.8.0`, all measured in-tree:
 
+- **Published-root convergence holds under load (§6.5.6).** The undebounced
+  publisher spawned one goroutine per tracked-root advance, each carrying a
+  captured root hash; under CPU contention a late goroutine could publish a
+  **stale** root last, leaving the published root behind the tracked root
+  indefinitely — a convergence failure, not a slow one (the tell was
+  `seq > writes` with `converged=false`: work done, wrong root landed). Fixed by
+  routing every advance through a single newest-wins coalescing slot, the same
+  path the debounced mode always used. `TestRepublishConvergenceUndebounced`
+  now converges in ~1 ms at `GOMAXPROCS=1` (0/8 failures, was reproducible ~3/8
+  before); `TestOnTreeChangeRecordsNewestInSlot` pins the invariant
+  deterministically; race-clean. Measured 2026-08-24.
 - **Compute budget: the `depth` limit is honored end-to-end (§5.2).** The eval
   depth limit is sourced from the capability's **grant-level**
   `constraints["system/compute"]["max_compute_depth"]` (ENTITY-CORE-PROTOCOL §5),

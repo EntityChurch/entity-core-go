@@ -39,7 +39,7 @@ PODMAN_BUILD_CAPS := --memory=$(CAP_MEM) --memory-swap=$(CAP_SWAP) $(_cap_cgp)
 PODMAN_RUN_CAPS   := --memory=$(CAP_MEM) --memory-swap=$(CAP_SWAP) \
                      --pids-limit=$(CAP_PIDS) --cpus=$(CAP_CPUS) $(_cap_cgp)
 
-.PHONY: help build image test vet lint fmt check race tidy clean \
+.PHONY: help build image test test-starved vet lint fmt check race tidy clean \
         validate validate-rust validate-python validate-save
 
 .DEFAULT_GOAL := help
@@ -53,6 +53,7 @@ help:
 	@echo
 	@echo "  build    compile every cmd/ binary in-container (alias: image)"
 	@echo "  test     go test ./... across all workspace modules"
+	@echo "  test-starved  go test single-threaded (GOMAXPROCS=1), repeated — the scheduling-race net"
 	@echo "  lint     go vet ./... — read-only static checks (alias: vet)"
 	@echo "  fmt      gofmt -w across all modules (writes)"
 	@echo "  check    lint + test (the green gate)"
@@ -98,6 +99,27 @@ check: lint test
 
 race:
 	$(call GO,go test -race ./...)
+
+# test-starved — the SCHEDULING-race net, orthogonal to `race` (data races).
+#
+# A multi-core run (--cpus=8) schedules async goroutines in near-order and so
+# passes convergence/coalescing tests every time, hiding lost-update races that
+# only surface when goroutines actually reorder. A lost update is NOT a data
+# race, so `make race` stays green on it — starvation is what exposes it. This
+# runs the whole suite single-threaded (GOMAXPROCS=1) and repeated, which is the
+# lever that reproduces the published-root convergence race on demand. Run it as
+# a release-gate step alongside `make race` and the wire gate; raise STARVE_COUNT
+# for a stronger net (a known regression is caught ~1-(0.6)^N of the time).
+STARVE_COUNT ?= 3
+test-starved:
+	mkdir -p $(GOMOD)
+	podman run --rm $(PODMAN_RUN_CAPS) \
+		-e GOMAXPROCS=1 \
+		-v $(CURDIR):/src:Z \
+		-v $(GOMOD):/go/pkg/mod:Z \
+		-w /src \
+		$(TOOLCHAIN) \
+		sh -c 'set -e; for m in $(MODULES); do echo "== $$m (GOMAXPROCS=1 x$(STARVE_COUNT)) =="; (cd $$m && go test -count=$(STARVE_COUNT) ./...); done'
 
 tidy:
 	$(call GO,go mod tidy)

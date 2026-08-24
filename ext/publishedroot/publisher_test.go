@@ -252,6 +252,63 @@ func TestOnTreeChangeFiltersUnrelatedPaths(t *testing.T) {
 	}
 }
 
+// TestOnTreeChangeRecordsNewestInSlot pins the convergence invariant behind
+// TestRepublishConvergenceUndebounced, deterministically — without needing
+// CPU starvation to surface the race.
+//
+// The undebounced hook path MUST route every tracked-root advance through the
+// single newest-wins `dirty` slot, not spawn a per-event goroutine carrying a
+// captured hash. This drives two advances (older then newer) while a publish
+// is "in flight" (the guard held, exactly the window the lost update lived
+// in), asserts the slot holds the NEWER root, then runs the drain and asserts
+// the published root is the newer one — never the older midpoint.
+//
+// Teeth: reverting OnTreeChange to `go Publish(evt.Hash)` per event leaves
+// `dirty` nil (that path never populated the slot), so the slot assertion
+// fails; a drain that published a captured stale hash last would fail the
+// RootHash assertion.
+func TestOnTreeChangeRecordsNewestInSlot(t *testing.T) {
+	p, kp := newTestPublisher(t)
+	p.debounce = 0 // exercise the immediate (undebounced) path
+	rootPath := "/" + string(kp.PeerID()) + "/system/tree/root/" + strings.TrimRight(PrefixForLocalPeer, "/")
+
+	// Hold the publish guard so no flush can drain between the two events —
+	// this is the "publish already in flight" window. With it held,
+	// OnTreeChange records into the slot and returns without arming a flush.
+	p.mu.Lock()
+	p.publishing = true
+	p.mu.Unlock()
+
+	older := fakeRoot(0x10)
+	newer := fakeRoot(0x20)
+	p.OnTreeChange(store.TreeChangeEvent{Path: rootPath, Hash: older, ChangeType: store.ChangeCreated})
+	p.OnTreeChange(store.TreeChangeEvent{Path: rootPath, Hash: newer, ChangeType: store.ChangeCreated})
+
+	p.mu.Lock()
+	slot := p.dirty
+	p.mu.Unlock()
+	if slot == nil || *slot != newer {
+		t.Fatalf("coalescing slot must hold the NEWEST advance; want %x got %v", newer.Bytes(), slot)
+	}
+
+	// Release the guard and run the drain, as the in-flight publish would on
+	// completion. The published root must converge to the newest advance.
+	p.mu.Lock()
+	p.publishing = false
+	p.mu.Unlock()
+	if _, err := p.publishPending(nil); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	curr, ok := p.Current()
+	if !ok {
+		t.Fatal("no published root after drain")
+	}
+	pd, _ := types.PublishedRootDataFromEntity(*curr)
+	if pd.RootHash != newer {
+		t.Fatalf("drain converged to a STALE root: want newer %x got %x", newer.Bytes(), pd.RootHash.Bytes())
+	}
+}
+
 func TestOnTreeChangeTriggersPublish(t *testing.T) {
 	p, kp := newTestPublisher(t)
 	root := fakeRoot(0xCC)
