@@ -133,7 +133,7 @@ func TestHomeFormatIndependence(t *testing.T) {
 	entity.SetDefaultHashAlgorithm(hash.AlgorithmSHA256)
 	k256 := d(TagKey("chess"))
 	probeData := cbor.RawMessage([]byte{0x63, 'a', 'b', 'c'}) // CBOR tstr "abc"
-	ent256, err := entity.NewEntity("system/nat/rendezvous-key", probeData)
+	ent256, err := entity.NewEntity("system/signaling/rendezvous-key", probeData)
 	if err != nil {
 		t.Fatalf("NewEntity under SHA-256: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestHomeFormatIndependence(t *testing.T) {
 	if entity.DefaultHashAlgorithm() != hash.AlgorithmSHA384 {
 		t.Fatal("home-format flip is not live — test would be vacuous")
 	}
-	ent384, err := entity.NewEntity("system/nat/rendezvous-key", probeData)
+	ent384, err := entity.NewEntity("system/signaling/rendezvous-key", probeData)
 	if err != nil {
 		t.Fatalf("NewEntity under SHA-384: %v", err)
 	}

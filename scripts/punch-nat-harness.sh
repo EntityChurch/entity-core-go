@@ -56,11 +56,21 @@ CROSSIMPL="${_PUNCH_CROSSIMPL:-}"
 # candidate and the bind agree by construction even if the NAT disagrees with
 # both, so a §6.7.3 violation is structurally undetectable. Discovered, it isn't.
 REFLECT="${_PUNCH_REFLECT:-}"
+# --rust-reflector <entity-signaling-node>: run RUST's node as the §6.7.1
+# responder on the bridge, so the reflector is the OTHER implementation. Closes
+# the client×responder matrix edge that only ever ran on loopback: Go's
+# observe-address client vs Rust's responder, with a real NAT in between — the
+# case where a wrong answer means advertising a hole that never opens. The
+# carrier stays Go's node so exactly one variable moves.
+RUST_REFLECTOR="${_PUNCH_RUST_REFLECTOR:-}"
+REFLECTOR_ADDR="10.0.0.254:4050"
+RNODE_PORT=4051
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--crossimpl) CROSSIMPL="$2"; shift 2 ;;
 		--reflector) REFLECT=1; shift ;;
+		--rust-reflector) REFLECT=1; RUST_REFLECTOR="$2"; shift 2 ;;
 		-h|--help) sed -n '2,30p' "$0"; exit 0 ;;
 		*) echo "unknown flag: $1" >&2; exit 2 ;;
 	esac
@@ -81,7 +91,12 @@ if [ -z "${_PUNCH_NS:-}" ]; then
 		cp "$CROSSIMPL" "$BIN/signaling-punch-rust"
 		echo "cross-impl peer: $CROSSIMPL"
 	fi
-	export _PUNCH_NS=1 _PUNCH_BIN="$BIN" _PUNCH_CROSSIMPL="$CROSSIMPL" _PUNCH_REFLECT="$REFLECT"
+	if [ -n "$RUST_REFLECTOR" ]; then
+		[ -x "$RUST_REFLECTOR" ] || { echo "FAIL: --rust-reflector binary not executable: $RUST_REFLECTOR" >&2; exit 1; }
+		cp "$RUST_REFLECTOR" "$BIN/signaling-node-rust"
+		echo "rust reflector: $RUST_REFLECTOR"
+	fi
+	export _PUNCH_NS=1 _PUNCH_BIN="$BIN" _PUNCH_CROSSIMPL="$CROSSIMPL" _PUNCH_REFLECT="$REFLECT" _PUNCH_RUST_REFLECTOR="$RUST_REFLECTOR"
 	# --mount-proc keeps /proc sane; --fork so unshare waits for us.
 	exec unshare --user --map-root-user --net --mount --fork "$0" "$@"
 fi
@@ -94,6 +109,7 @@ NODE_PID=""
 
 cleanup() {
 	[ -n "$NODE_PID" ] && kill "$NODE_PID" 2>/dev/null || true
+	[ -n "${RNODE_PID:-}" ] && kill "$RNODE_PID" 2>/dev/null || true
 	rm -rf "$WORK" 2>/dev/null || true
 	# netns/bridge vanish with the namespace on exit.
 }
@@ -153,6 +169,24 @@ for _ in $(seq 1 50); do [ -s "$WORK/node.ready" ] && break; sleep 0.1; done
 if [ ! -s "$WORK/node.ready" ]; then echo "FAIL: node did not become ready"; cat "$WORK/node.log"; exit 1; fi
 echo "node ready: $(cat "$WORK/node.ready")"
 
+RNODE_PID=""
+if [ -n "$RUST_REFLECTOR" ]; then
+	# Second bridge address so the Rust reflector is a distinct peer from the Go
+	# carrier — one variable moves, not two.
+	ip addr add 10.0.0.253/24 dev br0
+	"$BIN/signaling-node-rust" --listen 10.0.0.253:$RNODE_PORT --open >"$WORK/rnode.log" 2>&1 &
+	RNODE_PID=$!
+	for _ in $(seq 1 60); do
+		timeout 1 bash -c ":</dev/tcp/10.0.0.253/$RNODE_PORT" 2>/dev/null && break
+		sleep 0.25
+	done
+	if ! timeout 1 bash -c ":</dev/tcp/10.0.0.253/$RNODE_PORT" 2>/dev/null; then
+		echo "FAIL: rust reflector did not come up"; cat "$WORK/rnode.log"; exit 1
+	fi
+	REFLECTOR_ADDR="10.0.0.253:$RNODE_PORT"
+	echo "rust reflector ready on $REFLECTOR_ADDR"
+fi
+
 # run_punch <ns> <role> <priv> <pub> <port> [extra flags...]
 # Uses the phase-local $INPUT lobby so each phase gets a CLEAN rendezvous bucket —
 # reusing one bucket lets a prior phase's stale blobs muddy coordination (the §4.5
@@ -160,7 +194,7 @@ echo "node ready: $(cat "$WORK/node.ready")"
 # reason instead of at the punch itself.
 # How this side gets its srflx: discovered from the node-as-reflector, or asserted.
 mapping_args() {
-	if [ -n "$REFLECT" ]; then echo "--reflector 10.0.0.254:$NODE_PORT"; else echo "--srflx $1:$2"; fi
+	if [ -n "$REFLECT" ]; then echo "--reflector $REFLECTOR_ADDR"; else echo "--srflx $1:$2"; fi
 }
 
 run_punch() {

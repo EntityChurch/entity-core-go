@@ -164,6 +164,21 @@ func suppressedDial() signaling.DialFunc {
 	}
 }
 
+// socketsFormed names which of the two §7.1-step-4 paths produced a connection.
+// "both" is the distinct-4-tuple race: the only case where the peer-id tie-break
+// actually decides anything.
+func socketsFormed(dialed, accepted bool) string {
+	switch {
+	case dialed && accepted:
+		return "both"
+	case dialed:
+		return "dialed"
+	case accepted:
+		return "accepted"
+	}
+	return "none"
+}
+
 func pingURI(peerID string) string {
 	return fmt.Sprintf("entity://%s/system/protocol/connect", peerID)
 }
@@ -280,6 +295,7 @@ type punchOpts struct {
 	localAddr               string // the socket bind (private, behind a NAT)
 	srflx                   string // the advertised srflx candidate, ASSERTED by the harness
 	reflector               string // §6.7.1 reflector to DISCOVER the mapping from; wins over srflx
+	dialFrom                string // NEGATIVE CONTROL: punch from an endpoint that is NOT the advertised one
 	suppressDial            bool   // negative control: never dial (listen-only)
 	debug                   bool   // peer debug log -> stderr; stdout stays the JSON line
 	timeout                 float64
@@ -374,6 +390,36 @@ func punch(o punchOpts) (map[string]any, error) {
 	if o.suppressDial {
 		dial = suppressedDial()
 	}
+	// §7.3/§6.7.3 NEGATIVE CONTROL. §7.3 requires punching from the very socket
+	// whose mapping was advertised; this deliberately dials from a DIFFERENT
+	// endpoint while the listener stays on the advertised one. Two uses, and both
+	// need a violation that is real rather than described:
+	//
+	//   - behind a NAT it must FAIL — the counterpart dials a mapping with no
+	//     conntrack entry behind it, so the hole never opens. That is the harness
+	//     proving it can detect a §6.7.3 violation at all.
+	//   - on loopback the two dials stop being reverses of one 4-tuple, so BOTH a
+	//     dialed and an accepted socket form — the distinct-4-tuple race that the
+	//     peer-id tie-break exists for and that no honest substrate can produce.
+	if o.dialFrom != "" {
+		from, ferr := net.ResolveTCPAddr("tcp", o.dialFrom)
+		if ferr != nil {
+			return nil, fmt.Errorf("resolve --dial-from %q: %w", o.dialFrom, ferr)
+		}
+		inner := dial
+		dial = func(ctx context.Context, _ *net.TCPAddr, remote string) (net.Conn, error) {
+			return inner(ctx, from, remote)
+		}
+	}
+
+	// Socket outcome, so a harness can assert the tie-break EXECUTED rather than
+	// infer it from a punch that merely converged.
+	var sockDialed, sockAccepted, keptDialed atomic.Bool
+	onSelect := func(d, a, kd bool) {
+		sockDialed.Store(d)
+		sockAccepted.Store(a)
+		keptDialed.Store(kd)
+	}
 	party := &signaling.PunchParty{
 		Carrier:         signaling.NewClient(client),
 		Key:             key,
@@ -385,6 +431,7 @@ func punch(o punchOpts) (map[string]any, error) {
 		CrossingRetries: crossingRetries,
 		DialTimeout:     dialTimeout,
 		ExchangeTimeout: exchangeTimeout,
+		OnSelect:        onSelect,
 	}
 	deadline := time.Now().Add(time.Duration(o.timeout * float64(time.Second)))
 
@@ -404,12 +451,82 @@ func punch(o punchOpts) (map[string]any, error) {
 		"local_addr":   local.String(),
 		"srflx":        srflxAddr,
 		"srflx_source": srflxSource,
+		"sockets":      socketsFormed(sockDialed.Load(), sockAccepted.Load()),
+		"kept":         map[bool]string{true: "dialed", false: "accepted"}[keptDialed.Load()],
 		"key":          hex.EncodeToString(key),
 	}
 	for k, v := range outcome {
 		result[k] = v
 	}
 	return result, nil
+}
+
+// probeNATType runs the §6.7.1 multi-reflector NAT-type detection against one
+// pinned local endpoint and reports the classification. It punches nothing and
+// needs no node, no role and no rendezvous mode: this is the screening step that
+// runs BEFORE a crossing is attempted (EXTENSION-SIGNALING §11.2 SHOULD, and the
+// G4 precheck — a symmetric NAT on either side fails the punch late and looks
+// exactly like a counterpart that never appeared).
+//
+// `ok` means a CONCLUSION WAS REACHABLE — two or more reflectors answered — not
+// that the verdict was favourable. An endpoint-dependent verdict is a successful
+// probe reporting a relay-only pair; one reachable reflector is a failed probe,
+// because §6.7.1 forbids concluding a NAT type from a single observation.
+func probeNATType(o punchOpts, reflectors []string) (map[string]any, error) {
+	local, err := net.ResolveTCPAddr("tcp", o.localAddr)
+	if err != nil {
+		return nil, fmt.Errorf("resolve --local-addr %q: %w", o.localAddr, err)
+	}
+	kp, err := crypto.Generate()
+	if err != nil {
+		return nil, fmt.Errorf("generate keypair: %w", err)
+	}
+	peerOpts := []peer.Option{
+		peer.WithIdentity(kp),
+		peer.WithListenAddr("127.0.0.1:0"),
+		peer.WithStore(store.NewMemoryContentStore()),
+		peer.WithLocationIndex(store.NewMemoryLocationIndex()),
+		peer.WithConnectionGrants(peer.OpenAccessGrants()),
+	}
+	if o.debug {
+		peerOpts = append(peerOpts, peer.WithDebugLog(log.New(os.Stderr, "[nat-type] ", log.Ltime|log.Lmicroseconds)))
+	}
+	p, err := peer.New(peerOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("build probe peer: %w", err)
+	}
+	defer p.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(o.timeout*float64(time.Second)))
+	defer cancel()
+
+	assessment, errs := punchwire.DetectMapping(ctx, p, local, reflectors)
+
+	// Every failure is named. A probe that quietly consulted fewer reflectors than
+	// it was given is how a wrong verdict gets published with a straight face.
+	failures := make([]string, 0, len(errs))
+	for _, e := range errs {
+		failures = append(failures, e.Error())
+	}
+	observed := make([]map[string]string, 0, len(assessment.Observations))
+	for _, ob := range assessment.Observations {
+		observed = append(observed, map[string]string{"reflector": ob.Reflector, "observed": ob.Observed})
+	}
+	return map[string]any{
+		"probe":         "nat-type",
+		"ok":            len(assessment.Observations) >= 2,
+		"peer_id":       p.PeerID().String(),
+		"local_addr":    local.String(),
+		"class":         string(assessment.Class),
+		"punchable":     assessment.Class.Punchable(),
+		"mapping":       assessment.Mapping,
+		"reason":        assessment.Reason,
+		"observations":  observed,
+		"reflectors":    reflectors,
+		"errors":        failures,
+		"reflector_ok":  len(assessment.Observations),
+		"reflector_all": len(reflectors),
+	}, nil
 }
 
 func main() {
@@ -421,6 +538,9 @@ func main() {
 	srflx := flag.String("srflx", "", "host:port to advertise as this side's srflx candidate — the public NAT mapping the counterpart dials. Empty → --local-addr (loopback, no NAT).")
 	suppressDial := flag.Bool("suppress-dial", false, "G3 negative control: never dial (listen-only). Behind a NAT this side's hole never opens and the punch MUST fail — the pre-G1 one-dials regression.")
 	reflector := flag.String("reflector", "", "host:port of a §6.7.1 observe-address reflector to DISCOVER this side's srflx mapping from (dialed from --local-addr). Wins over --srflx; a failed gather is fatal, never a fallback.")
+	dialFrom := flag.String("dial-from", "", "NEGATIVE CONTROL (§7.3/§6.7.3 violation): punch from this endpoint instead of --local-addr, while still listening on --local-addr. Behind a NAT the punch MUST fail; on loopback it produces the distinct-4-tuple race the peer-id tie-break exists for.")
+	natType := flag.Bool("nat-type", false, "PROBE MODE (§6.7.1 / §11.2): consult --reflectors about --local-addr and classify the NAT mapping, then exit. Punches nothing; needs no --node/--role/--mode/--input. This is the G4 precheck — same mapping from every reflector => punchable, differing => symmetric => relay-only.")
+	reflectors := flag.String("reflectors", "", "comma-separated §6.7.1 reflectors for --nat-type. TWO OR MORE: a single reflector is advisory and MUST NOT conclude a NAT type (§6.7.1, §9.3). All are dialed from --local-addr, since a mapping belongs to a socket (§6.7.3).")
 	debug := flag.Bool("debug", false, "log the peer's activity to stderr; stdout stays the JSON line")
 	timeout := flag.Float64("timeout", 20.0, "seconds to run")
 	flag.Parse()
@@ -430,6 +550,40 @@ func main() {
 		fmt.Println(string(out))
 		os.Exit(1)
 	}
+
+	if *natType {
+		var list []string
+		for _, r := range strings.Split(*reflectors, ",") {
+			if r = strings.TrimSpace(r); r != "" {
+				list = append(list, r)
+			}
+		}
+		// ONE reflector is accepted and then REFUSED BY THE CLASSIFIER, not rejected
+		// here. §6.7.1 says a single reflector is *advisory* — advisory means the
+		// observation is usable (it is a valid srflx candidate) while the NAT-TYPE
+		// conclusion is not. Rejecting at the arity check throws away a usable fact
+		// and, found by running the two impls side by side, emits a refusal with no
+		// `class` field at all — so a harness gating on class=="unknown" passed one
+		// impl and failed the other. Both refusals were correct; the SHAPES diverged.
+		// Go moved: probe, report the observation, and let the §6.7.1 rule refuse.
+		switch {
+		case *localAddr == "":
+			fail("--local-addr is required (the socket whose mapping is being classified)")
+		case len(list) == 0:
+			fail("--reflectors is required for --nat-type (comma-separated host:port)")
+		}
+		result, err := probeNATType(punchOpts{localAddr: *localAddr, debug: *debug, timeout: *timeout}, list)
+		if err != nil {
+			fail(err.Error())
+		}
+		out, _ := json.Marshal(result)
+		fmt.Println(string(out))
+		if ok, _ := result["ok"].(bool); ok {
+			os.Exit(0)
+		}
+		os.Exit(1)
+	}
+
 	switch {
 	case *node == "":
 		fail("--node is required")
@@ -446,7 +600,8 @@ func main() {
 	result, err := punch(punchOpts{
 		node: *node, role: *role, mode: *mode, input: *input,
 		localAddr: *localAddr, srflx: *srflx, reflector: *reflector, suppressDial: *suppressDial,
-		debug: *debug, timeout: *timeout,
+		dialFrom: *dialFrom,
+		debug:    *debug, timeout: *timeout,
 	})
 	if err != nil {
 		fail(err.Error())

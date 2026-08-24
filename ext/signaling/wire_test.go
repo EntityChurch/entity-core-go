@@ -99,7 +99,7 @@ func TestNegativeFireAtIsRefusedNotClamped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e, err := entity.NewEntity(types.TypeNATPunchSync, raw)
+	e, err := entity.NewEntity(types.TypeSignalingPunchSync, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestUnrecognizedBlobClassifiesAsUnknownNotAnError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e, err := entity.NewEntity("system/nat/some-future-message", raw)
+	e, err := entity.NewEntity("system/signaling/some-future-message", raw)
 	if err != nil {
 		t.Fatal(err)
 	}

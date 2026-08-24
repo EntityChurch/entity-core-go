@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # validate-punch-all.sh — the full punch validation suite in one command.
 #
-# Runs, in order: build+vet, unit+race, the G3 emulated dual-NAT harness, and the
+# Runs, in order: build+vet, unit+race, the G3 emulated dual-NAT harness, the
+# §6.7.3 endpoint-binding rung, the §6.7.1 NAT-type detection rung, and the
 # `signaling` validate-peer category against a live Go node. Reports one PASS/FAIL.
 # Everything runs on one box (loopback + rootless emulated NAT); no sudo, no
 # external network. This is the gate for the whole §7 punch stack short of G4.
@@ -34,6 +35,21 @@ mark $? "race (signaling + punchwire + validate)"
 step "3/5  G3 — emulated dual-NAT harness (positive traverses, negative control fails)"
 bash scripts/punch-nat-harness.sh;        mark $? "G3 harness"
 
+step "3b/5  endpoint binding — §6.7.3 violation: loopback certifies it, the NAT rung catches it"
+bash scripts/punch-endpoint-binding.sh;   mark $? "endpoint-binding harness"
+
+step "3c/5  NAT-type detection — §6.7.1/§11.2 multi-reflector: cone punchable, per-destination relay-only, one reflector refused"
+# Cross-impl here is NOT a bonus lap: a classifier can be unit-tested against
+# authored divergent vectors in either tree, but no unit test can PRODUCE a
+# per-destination mapping. This is the only substrate in the cohort that can, so
+# until a driver runs P2 here its endpoint-dependent verdict is an assertion
+# about its own test data. Same reflectors, same NAT policies, both binaries.
+if [ -n "${RUST_PUNCH:-}" ]; then
+	bash scripts/punch-nat-type.sh --crossimpl "$RUST_PUNCH"; mark $? "nat-type harness (go + rust)"
+else
+	bash scripts/punch-nat-type.sh;       mark $? "nat-type harness (go only)"
+fi
+
 step "4/5  validate-peer signaling category (live Go node: meet x4 + signaling_punch)"
 go run ./cmd/peer-manager stop --all >/dev/null 2>&1 || true
 START="$(go run ./cmd/peer-manager start --name "$NODE_NAME" --type go --signaling-node --debug 2>&1)"
@@ -58,6 +74,17 @@ if [ -n "${RUST_PUNCH:-}" ]; then
 	# between them the suite exercises both mapping sources and both impl pairings.
 	step "5/5  cross-impl — Go↔Rust, two NATs, reflector-discovered srflx (opt-in via RUST_PUNCH)"
 	bash scripts/punch-nat-harness.sh --reflector --crossimpl "$RUST_PUNCH"; mark $? "cross-impl NAT harness (reflector)"
+	# Stage 6 moves ONE more variable: the §6.7.1 reflector becomes Rust's node, so
+	# Go's observe-address CLIENT meets Rust's RESPONDER with a real NAT in between.
+	# A wrong answer there is not a cosmetic mismatch — it advertises a hole that
+	# never opens. Carrier stays Go's node so only the reflector changes.
+	if [ -n "${RUST_NODE:-}" ]; then
+		step "6/6  cross-impl — reflector is RUST's node (Go client × Rust responder, under NAT)"
+		bash scripts/punch-nat-harness.sh --rust-reflector "$RUST_NODE" --crossimpl "$RUST_PUNCH"
+		mark $? "cross-impl NAT harness (rust reflector)"
+	else
+		step "6/6  rust-reflector — SKIPPED (set RUST_NODE=<path to entity-signaling-node> to run it)"
+	fi
 else
 	step "5/5  cross-impl — SKIPPED (set RUST_PUNCH=<path to rust signaling-punch> to run it)"
 fi

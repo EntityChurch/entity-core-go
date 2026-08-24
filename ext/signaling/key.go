@@ -12,7 +12,7 @@ import (
 // The rendezvous key — peer-side derivation (§2.2).
 //
 //	payload        = "entity:rdv:v1" ‖ SEP ‖ mode ‖ SEP ‖ canonical(mode_input)
-//	rendezvous_key = varint(0x00) ‖ SHA-256( ecf_for_hash("system/nat/rendezvous-key",
+//	rendezvous_key = varint(0x00) ‖ SHA-256( ecf_for_hash("system/signaling/rendezvous-key",
 //	                                                      cbor_bstr(payload)) )
 //
 // This binds peers only; the node is mode-blind and derives nothing. Both peers

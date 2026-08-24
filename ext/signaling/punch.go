@@ -86,6 +86,17 @@ type PunchParty struct {
 	CrossingRetries int           // 0 → defaultCrossingRetries
 	DialTimeout     time.Duration // 0 → defaultDialTimeout
 	ExchangeTimeout time.Duration // 0 → defaultExchangeTimeout
+
+	// OnSelect observes the §7.1-step-4 socket outcome: which of the two paths
+	// produced a connection, and which end this side kept. Nil-default and purely
+	// observational — it cannot change the selection.
+	//
+	// It exists because the distinct-4-tuple tie-break is otherwise UNOBSERVABLE
+	// from outside: a punch that converges looks identical whether one socket
+	// formed (the §7.3 case) or two formed and the tie-break resolved them. A
+	// harness asserting "the tie-break executed" without this is asserting a
+	// negative it cannot see.
+	OnSelect func(dialedFormed, acceptedFormed, keptDialed bool)
 }
 
 func (pp *PunchParty) dial() DialFunc {
@@ -280,6 +291,9 @@ func (pp *PunchParty) fire(ctx context.Context, fireAt time.Time, target, peerID
 	}
 
 	kept, loser := selectSocket(dialed, accepted, pp.SelfID < peerID)
+	if pp.OnSelect != nil {
+		pp.OnSelect(dialed != nil, accepted != nil, kept != nil && kept == dialed)
+	}
 	if loser != nil {
 		loser.Close()
 	}

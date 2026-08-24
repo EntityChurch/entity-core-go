@@ -33,7 +33,7 @@ const (
 	// rendezvousKeyType is the `type` half of the §2.2 hash input. Pinned
 	// because the substrate content-hash primitive hashes ECF {data, type} and
 	// has no bare-byte form.
-	rendezvousKeyType = "system/nat/rendezvous-key"
+	rendezvousKeyType = "system/signaling/rendezvous-key"
 
 	// domain is the §2.2 domain-separation prefix. Versioned so a future
 	// derivation change is a new domain, not a silent reinterpretation.

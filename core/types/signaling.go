@@ -22,8 +22,12 @@ import (
 // system/network/candidate (EXTENSION-NETWORK §6.7.3 — NetworkCandidateData),
 // NOT a signaling-private candidate struct; the pre-v1.0 rust→cohort brief's
 // NATCandidateData (which carried an out-of-spec `priority` field) is retired.
-// Message type names system/nat/* are retained per §6.1/§12 (Open Item #1 defers
-// any system/signaling/* rename to a cohort call).
+// Namespace: the §6.1 coordination messages are system/signaling/* as of the
+// §3.1 flag-day rename (arch 2026-08-02), which also RESOLVED §13 Open Item #1 —
+// the namespace question the rename answers. The former system/nat/* names are
+// gone, not aliased: the §3.1 rendezvous-key derivation feeds its type string
+// into the content hash, so a peer on the old name derives a different key and
+// simply never meets one on the new name. There is no shape to fall back to.
 
 const (
 	// TypeSignalingOfferRequest is the offer input (§4.1).
@@ -39,12 +43,12 @@ const (
 	// TypeSignalingLimits is the published bucket/TTL limits block (§4.5, §12).
 	TypeSignalingLimits = "system/signaling/limits"
 
-	// TypeNATConnectRequest is the §6 initiator coordination message (§6.1).
-	TypeNATConnectRequest = "system/nat/connect-request"
-	// TypeNATConnectResponse is the §6 responder coordination message (§6.1).
-	TypeNATConnectResponse = "system/nat/connect-response"
-	// TypeNATPunchSync is the §6 fire-time coordination message (§6.1, §7.2).
-	TypeNATPunchSync = "system/nat/punch-sync"
+	// TypeSignalingConnectRequest is the §6 initiator coordination message (§6.1).
+	TypeSignalingConnectRequest = "system/signaling/connect-request"
+	// TypeSignalingConnectResponse is the §6 responder coordination message (§6.1).
+	TypeSignalingConnectResponse = "system/signaling/connect-response"
+	// TypeSignalingPunchSync is the §6 fire-time coordination message (§6.1, §7.2).
+	TypeSignalingPunchSync = "system/signaling/punch-sync"
 )
 
 // OfferRequestData is the system/signaling/offer-request payload (§4.1).
@@ -98,7 +102,7 @@ type AdvertiseResultData struct {
 	Limits   SignalingLimitsData `cbor:"limits"`
 }
 
-// ConnectRequestData is the system/nat/connect-request payload (§6.1).
+// ConnectRequestData is the system/signaling/connect-request payload (§6.1).
 // Candidates are system/network/candidate (EXTENSION-NETWORK §6.7.3) — the
 // same type reachability gathering produces; try order derives from the
 // candidate `type` (host→srflx→relay), not a wire priority field.
@@ -108,7 +112,7 @@ type ConnectRequestData struct {
 	Nonce      []byte                 `cbor:"nonce"`
 }
 
-// ConnectResponseData is the system/nat/connect-response payload (§6.1). Nonce
+// ConnectResponseData is the system/signaling/connect-response payload (§6.1). Nonce
 // is echoed from the request (§6.4 correlation).
 type ConnectResponseData struct {
 	Candidates []NetworkCandidateData `cbor:"candidates"`
@@ -116,7 +120,7 @@ type ConnectResponseData struct {
 	Responder  string                 `cbor:"responder"`
 }
 
-// PunchSyncData is the system/nat/punch-sync payload (§6.1). FireAt is an
+// PunchSyncData is the system/signaling/punch-sync payload (§6.1). FireAt is an
 // UNSIGNED integer of milliseconds from the receiving peer's moment of receipt
 // — never a wall-clock instant. uint64 (not int64) is load-bearing: it must
 // encode as CBOR major 0, and a negative value is refused, not clamped (§7.2).
@@ -152,17 +156,17 @@ func (d AdvertiseResultData) ToEntity() (entity.Entity, error) {
 
 // ToEntity encodes a connect-request entity.
 func (d ConnectRequestData) ToEntity() (entity.Entity, error) {
-	return toSignalingEntity(TypeNATConnectRequest, d)
+	return toSignalingEntity(TypeSignalingConnectRequest, d)
 }
 
 // ToEntity encodes a connect-response entity.
 func (d ConnectResponseData) ToEntity() (entity.Entity, error) {
-	return toSignalingEntity(TypeNATConnectResponse, d)
+	return toSignalingEntity(TypeSignalingConnectResponse, d)
 }
 
 // ToEntity encodes a punch-sync entity.
 func (d PunchSyncData) ToEntity() (entity.Entity, error) {
-	return toSignalingEntity(TypeNATPunchSync, d)
+	return toSignalingEntity(TypeSignalingPunchSync, d)
 }
 
 func toSignalingEntity(entityType string, d any) (entity.Entity, error) {

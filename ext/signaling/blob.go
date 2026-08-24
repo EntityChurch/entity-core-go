@@ -69,19 +69,19 @@ func ClassifyBlob(blob []byte) CollectedMessage {
 // negative fire_at, which will not fit uint64) is KindUnknown, not an error.
 func Classify(e entity.Entity) CollectedMessage {
 	switch e.Type {
-	case types.TypeNATConnectRequest:
+	case types.TypeSignalingConnectRequest:
 		d, err := types.ConnectRequestDataFromEntity(e)
 		if err != nil {
 			return CollectedMessage{Kind: KindUnknown}
 		}
 		return CollectedMessage{Kind: KindConnectRequest, Request: &d}
-	case types.TypeNATConnectResponse:
+	case types.TypeSignalingConnectResponse:
 		d, err := types.ConnectResponseDataFromEntity(e)
 		if err != nil {
 			return CollectedMessage{Kind: KindUnknown}
 		}
 		return CollectedMessage{Kind: KindConnectResponse, Response: &d}
-	case types.TypeNATPunchSync:
+	case types.TypeSignalingPunchSync:
 		d, err := types.PunchSyncDataFromEntity(e)
 		if err != nil {
 			return CollectedMessage{Kind: KindUnknown}
