@@ -3,6 +3,7 @@ package network
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,9 +32,22 @@ type session struct {
 	// on-reconnect deliveries); release-peer unsubscribes them.
 	subscriptionIDs []string
 
-	// attempt counts consecutive failed reconnect attempts since the last
-	// successful establish; drives the §2.2 backoff delay.
-	attempt uint64
+	// failingSince is a FALLBACK episode start (ms since epoch, 0 = not
+	// failing) for the derived §2.2 pacing. The authoritative stamp is the
+	// status entity's failing_since, written by the demotion seam and read
+	// back from the tree — that is the copy that survives a restart, and the
+	// one retryState prefers.
+	//
+	// This exists because a peer that never connected has no demotion
+	// transition to stamp: a failed DIAL writes no status entity (only a
+	// transport error on an established connection does). Without a local
+	// stamp its pacing would restart from min_ms on every attempt. Whether
+	// a failed dial against a MAINTAINED peer should itself write a §3.13
+	// demotion is a real cross-impl question — see
+	// docs/validation/spec-issues/2026-07-16-failing-since-never-connected.md.
+	// Until it is ruled, this keeps the never-connected curve growing without
+	// inventing a write site.
+	failingSince uint64
 
 	// retryTimer is the pending backoff-advance timer, if any. Guarded by
 	// mu; release-peer stops it.
@@ -65,7 +79,7 @@ func (h *Handler) getOrCreateSession(peerID crypto.PeerID, remoteHash hash.Hash,
 		peerID:     peerID,
 		remoteHash: remoteHash,
 		sessionID:  sid,
-		chainID:    "network/maintain/" + sid,
+		chainID:    newChainID("network-maintain", sid),
 		params:     params,
 	}
 	h.sessions[peerID] = s
@@ -101,33 +115,58 @@ func newSessionID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// backoffDelay computes the §2.2 delay for the given consecutive-failure
-// attempt count (1-based) under the session's backoff config.
-func backoffDelay(cfg types.BackoffConfigData, attempt uint64) time.Duration {
-	minMs := cfg.EffectiveMinMs()
-	maxMs := cfg.EffectiveMaxMs()
-	if maxMs < minMs {
-		maxMs = minMs
+// newChainID builds a §3.11 chain id from a label and a discriminator.
+//
+// A chain_id MUST be a SINGLE PATH SEGMENT: it is a path segment in the §3.10.6
+// marker tree (.../lost/{chain_id}/{step_index}/{reason}/{marker}), so a value
+// containing "/" silently forks into extra levels and the nominal shape stops
+// being walkable at a fixed depth. Hence "network-maintain-{sid}", not the
+// "network/maintain/{sid}" this used to mint. Separators are normalised rather
+// than trusted, since the label and discriminator both come from callers.
+//
+// The value is otherwise OPAQUE — §3.11 gives chain_id no format, and nothing
+// parses one. The label is there for a human reading a marker path.
+func newChainID(label, discriminator string) string {
+	seg := label + "-" + discriminator
+	return strings.ReplaceAll(seg, "/", "-")
+}
+
+// newSubChainID mints a fresh §3.11 chain id for a sub-chain dispatched under
+// parent. The parent edge is carried by bounds.parent_chain_id, NOT by nesting
+// it into this string — that is exactly the mistake the single-segment rule
+// exists to prevent.
+func newSubChainID(label string) string {
+	return newChainID(label, newSessionID())
+}
+
+// retryState derives the §2.2 pacing for the session's current failure
+// episode as of nowMs, and reports the episode start it used.
+//
+// Nothing counts attempts. The episode start is the only state, and the
+// TREE's failing_since wins when present: it is durable, so a process that
+// restarts beside a long-dead peer re-derives a large attempt count and a
+// max-length wait instead of redialing in min_ms. sess.failingSince is only
+// the fallback for a peer that never connected (see the field's comment).
+//
+// A caller that has just observed a failure and finds no episode anywhere is
+// starting one — hence stamp, below.
+func (h *Handler) retryState(sess *session, nowMs uint64) (types.RetryState, uint64) {
+	failingSince := uint64(0)
+	if st, ok := h.readPeerStatus(sess); ok {
+		failingSince = st.FailingSince
 	}
-	var ms uint64
-	switch cfg.EffectiveStrategy() {
-	case "constant":
-		ms = minMs
-	case "linear":
-		ms = minMs * attempt
-	default: // "exponential"
-		ms = minMs
-		for i := uint64(1); i < attempt; i++ {
-			ms *= 2
-			if ms >= maxMs {
-				break
-			}
-		}
+	if failingSince == 0 {
+		sess.mu.Lock()
+		failingSince = sess.failingSince
+		sess.mu.Unlock()
 	}
-	if ms > maxMs {
-		ms = maxMs
+	if failingSince == 0 {
+		return types.RetryState{}, 0
 	}
-	return time.Duration(ms) * time.Millisecond
+	sess.mu.Lock()
+	cfg := sess.params.EffectiveBackoff()
+	sess.mu.Unlock()
+	return cfg.DeriveRetryState(failingSince, nowMs), failingSince
 }
 
 // Path scheme for the §4.1 graph. The two inbox residents are

@@ -113,7 +113,7 @@ func TestV120_SameContentReboundIsNoop(t *testing.T) {
 	ed, _ := ecf.Encode(types.ErrorData{Code: "unavailable", Message: "redelivered"})
 
 	for i := 0; i < 5; i++ {
-		h.bindLostErrorMarker(hctx, "entity://test/peer/sys", 503, ed, "unavailable", frozenTS, hashZero())
+		h.bindLostErrorMarker(hctx, dispatchChainID(hctx), "entity://test/peer/sys", 503, ed, "unavailable", frozenTS, hashZero())
 	}
 
 	prefix := "system/runtime/chain-errors/lost/chain-redeliver/req-redeliver/unavailable/"
@@ -139,7 +139,7 @@ func TestV120_DistinctCodesCoexistAsSiblings(t *testing.T) {
 	codes := []string{"internal", "unavailable", "not_found"}
 	for _, code := range codes {
 		ed, _ := ecf.Encode(types.ErrorData{Code: code})
-		h.bindLostErrorMarker(hctx, "entity://test/peer/sys", 500, ed, code, 1_700_000_000_000, hashZero())
+		h.bindLostErrorMarker(hctx, dispatchChainID(hctx), "entity://test/peer/sys", 500, ed, code, 1_700_000_000_000, hashZero())
 	}
 
 	for _, code := range codes {
@@ -168,7 +168,7 @@ func TestV120_PathTerminalIsV7Section35HexForm(t *testing.T) {
 	hctx.Bounds = &types.BoundsData{ChainID: "chain-enc"}
 
 	ed, _ := ecf.Encode(types.ErrorData{Code: "internal"})
-	h.bindLostErrorMarker(hctx, "entity://test/peer/sys", 500, ed, "internal", 1_700_000_000_000, hashZero())
+	h.bindLostErrorMarker(hctx, dispatchChainID(hctx), "entity://test/peer/sys", 500, ed, "internal", 1_700_000_000_000, hashZero())
 
 	prefix := "system/runtime/chain-errors/lost/chain-enc/req-enc/internal/"
 	entries := hctx.LocationIndex.List(prefix)

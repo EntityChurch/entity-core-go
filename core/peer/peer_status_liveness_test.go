@@ -541,3 +541,91 @@ func TestKeepaliveNoCadenceWrites(t *testing.T) {
 		t.Fatalf("status entity rewritten at keepalive cadence — §A4: transition writes only (baseline %s, now %s)", h0, h1)
 	}
 }
+
+// TestLivenessFailingSinceStampedOnceAndPreserved pins the `failing_since`
+// contract: it marks the START of a failure episode, so it is stamped at the
+// first demotion out of connected and carried forward by every later demotion
+// write in the same episode.
+//
+// The escalation (suspect → disconnected) is the case that matters. Every
+// demotion is a straight overwrite of the status entity, so a writer that
+// simply filled the field in from `now` would silently re-stamp it here — and
+// because the §2.2 pacing is DERIVED from failing_since, that would reset the
+// backoff curve to min_ms every time a failing peer failed a little harder. The
+// bug has no symptom at the write site; it only shows up as a peer that never
+// backs off. Hence the assertion is on the value, not just its presence.
+func TestLivenessFailingSinceStampedOnceAndPreserved(t *testing.T) {
+	p := startPeer(t)
+	remotePeerID := remoteFixture(t)
+	remoteHash, err := protocol.ResolveRemoteIdentityHash(remotePeerID, nil)
+	if err != nil {
+		t.Fatalf("resolve remote hash: %v", err)
+	}
+	readStatus := func() types.PeerStatusData {
+		t.Helper()
+		d, ok := protocol.ReadPeerStatus(p.Store(), p.LocationIndex(), string(p.PeerID()), remoteHash)
+		if !ok {
+			t.Fatalf("status entity missing")
+		}
+		return d
+	}
+
+	// A connected baseline: no episode is in progress.
+	conn := &fakeEndpoint{}
+	poolBind(p, remotePeerID, conn)
+	if _, err := protocol.WritePeerStatus(p.Store(), p.LocationIndex(),
+		string(p.PeerID()), remoteHash,
+		types.PeerStatusData{PeerID: string(remotePeerID), Status: types.PeerStatusConnected}); err != nil {
+		t.Fatalf("seed connected: %v", err)
+	}
+	if d := readStatus(); d.FailingSince != 0 {
+		t.Fatalf("connected baseline carries failing_since %d, want unset", d.FailingSince)
+	}
+
+	// First demotion opens the episode.
+	before := uint64(time.Now().UnixMilli())
+	p.demotePeerOnTransportError(remotePeerID, conn, fmt.Errorf("transport died"))
+	after := uint64(time.Now().UnixMilli())
+
+	suspect := readStatus()
+	if suspect.Status != types.PeerStatusSuspect {
+		t.Fatalf("status = %q, want %q", suspect.Status, types.PeerStatusSuspect)
+	}
+	if suspect.FailingSince < before || suspect.FailingSince > after {
+		t.Fatalf("failing_since %d not stamped within the demotion window [%d, %d]",
+			suspect.FailingSince, before, after)
+	}
+	episodeStart := suspect.FailingSince
+
+	// Escalate. Re-bind because the demotion evicted the failed endpoint, and
+	// let the clock advance so a re-stamp would be visible as a NEW value.
+	time.Sleep(5 * time.Millisecond)
+	conn2 := &fakeEndpoint{}
+	poolBind(p, remotePeerID, conn2)
+	if !p.demotePeerOnKeepaliveMiss(remotePeerID, conn2, fmt.Errorf("keepalive missed")) {
+		t.Fatalf("keepalive-miss demotion did not fire")
+	}
+
+	escalated := readStatus()
+	if escalated.Status != types.PeerStatusDisconnected {
+		t.Fatalf("status = %q, want %q", escalated.Status, types.PeerStatusDisconnected)
+	}
+	if escalated.Reason != types.PeerStatusReasonKeepaliveMiss {
+		t.Fatalf("reason = %q, want %q", escalated.Reason, types.PeerStatusReasonKeepaliveMiss)
+	}
+	if escalated.FailingSince != episodeStart {
+		t.Fatalf("escalation re-stamped failing_since: %d, want the episode start %d — "+
+			"the derived backoff curve would restart at min_ms",
+			escalated.FailingSince, episodeStart)
+	}
+
+	// Recovery ends the episode: the `connected` write omits the field.
+	if _, err := protocol.WritePeerStatus(p.Store(), p.LocationIndex(),
+		string(p.PeerID()), remoteHash,
+		types.PeerStatusData{PeerID: string(remotePeerID), Status: types.PeerStatusConnected}); err != nil {
+		t.Fatalf("re-establish connected: %v", err)
+	}
+	if d := readStatus(); d.FailingSince != 0 {
+		t.Fatalf("failing_since %d survived recovery, want cleared", d.FailingSince)
+	}
+}

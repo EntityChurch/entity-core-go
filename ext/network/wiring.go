@@ -26,7 +26,14 @@ import (
 //
 // extras ride the envelope's `included` map (deliver tokens + signatures).
 // Returns the decoded EXECUTE-RESPONSE status and raw result.
-func (h *Handler) selfExecute(ctx context.Context, uri, operation string, params entity.Entity, resource *types.ResourceTarget, extras ...entity.Entity) (uint, cbor.RawMessage, error) {
+// chainID, when non-empty, is carried as the EXECUTE's bounds.chain_id — the
+// §3.11 coordinate every chain-error marker downstream of this dispatch is
+// filed under. Pass the session's maintain chain for lifecycle dispatches: it
+// is what makes maintain-result's advertised chain_id answerable, since a
+// caller watching system/runtime/chain-errors/lost/{chain_id}/ only sees
+// anything if the dispatches actually ran under it. Empty for dispatches that
+// belong to no chain.
+func (h *Handler) selfExecute(ctx context.Context, uri, operation string, params entity.Entity, resource *types.ResourceTarget, chainID string, extras ...entity.Entity) (uint, cbor.RawMessage, error) {
 	p := h.boundPeer()
 	if p == nil {
 		return 0, nil, fmt.Errorf("network handler not bound to a peer")
@@ -36,8 +43,14 @@ func (h *Handler) selfExecute(ctx context.Context, uri, operation string, params
 		return 0, nil, err
 	}
 	requestID := fmt.Sprintf("network-%s-%d", operation, time.Now().UnixNano())
+	var async []*protocol.AsyncDelivery
+	if chainID != "" {
+		async = append(async, &protocol.AsyncDelivery{
+			Bounds: &types.BoundsData{ChainID: chainID},
+		})
+	}
 	env, err := protocol.CreateAuthenticatedExecute(
-		p.Keypair(), p.Identity(), capEnt, requestID, uri, operation, params, resource)
+		p.Keypair(), p.Identity(), capEnt, requestID, uri, operation, params, resource, async...)
 	if err != nil {
 		return 0, nil, fmt.Errorf("create %s execute: %w", operation, err)
 	}
@@ -178,7 +191,11 @@ func (h *Handler) subscribeLifecycle(ctx context.Context, remoteHash hash.Hash, 
 	// included) via Bytes(), same as PeerStatusPath.
 	statusPattern := types.TypePeerStatus + "/" + hex.EncodeToString(remoteHash.Bytes())
 	resource := &types.ResourceTarget{Targets: []string{statusPattern}}
-	status, result, err := h.selfExecute(ctx, "system/subscription", "subscribe", params, resource,
+	// No chain: this is imperative setup inside the maintain-peer request,
+	// not a chain dispatch — a failure surfaces synchronously to the caller
+	// rather than as a chain-error marker, so there is no coordinate to file
+	// it under and inventing one would be the very habit being fixed.
+	status, result, err := h.selfExecute(ctx, "system/subscription", "subscribe", params, resource, "",
 		tokenEnt, sigEnt, identity)
 	if err != nil {
 		return "", fmt.Errorf("lifecycle subscribe: %w", err)
@@ -207,7 +224,7 @@ func (h *Handler) unsubscribeLifecycle(ctx context.Context, subscriptionID strin
 	if err != nil {
 		return err
 	}
-	status, result, err := h.selfExecute(ctx, "system/subscription", "unsubscribe", params, nil)
+	status, result, err := h.selfExecute(ctx, "system/subscription", "unsubscribe", params, nil, "")
 	if err != nil {
 		return err
 	}

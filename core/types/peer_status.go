@@ -65,6 +65,16 @@ const (
 	PeerStatusReasonPeerIdle       = "peer-idle"
 	PeerStatusReasonPeerMigration  = "peer-migration"
 	PeerStatusReasonLocalRelease   = "local-release"
+	// PeerStatusReasonRetryExhausted — an OPTIONAL §2.2 retry bound
+	// (max_attempts / max_elapsed_ms) was reached and the relationship is
+	// abandoned. Terminal, like local-release: the reconnect loop is over and
+	// re-establishing needs a fresh maintain-peer.
+	//
+	// This is a `reason`, NOT a fourth status: the §3.13 enum is three-state
+	// (rung 1, ruling D), and "we stopped trying" is a statement about WHY the
+	// peer is disconnected, not a different way of being disconnected. Never
+	// reached under the default config, which is retry-forever.
+	PeerStatusReasonRetryExhausted = "retry-exhausted"
 )
 
 // PeerStatusData is the system/peer/status entity payload. The concrete shape
@@ -109,6 +119,24 @@ type PeerStatusData struct {
 	// system/connection/{peer_id} entity (ruling C: that entity is MUST at
 	// full NETWORK conformance, not in the §A3 floor).
 	Connection string `cbor:"connection,omitempty"`
+	// FailingSince is the OPTIONAL ms-since-epoch stamp of the transition out
+	// of `connected` that began the current failure episode — the single
+	// durable input the §2.2 retry pacing is derived from.
+	//
+	// Written ONCE, at the first demotion (connected → suspect, or straight to
+	// disconnected), and PRESERVED across every later demotion write in the
+	// same episode (suspect → disconnected must not re-stamp it — that would
+	// restart the backoff curve on escalation). The `connected` write omits it,
+	// which clears it: recovery ends the episode. Absent ⇒ not currently
+	// failing.
+	//
+	// It is deliberately the only retry state that exists: `attempt` and
+	// `next_attempt_at` are DERIVED from (failing_since, backoff cfg, now) —
+	// never stored, never written per attempt (§A4: the status entity is
+	// transition-written only). Because it is durable in the tree rather than
+	// an in-memory counter, a peer that restarts beside a long-dead remote
+	// resumes the curve where it left off instead of hammering from min_ms.
+	FailingSince uint64 `cbor:"failing_since,omitempty"`
 }
 
 // ToEntity creates a system/peer/status entity.

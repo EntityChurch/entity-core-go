@@ -2,7 +2,9 @@ package continuation
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
+	"strings"
 	"testing"
 
 	"go.entitychurch.org/entity-core-go/core/ecf"
@@ -519,12 +521,51 @@ func TestForwardDispatchHandlerNon2xxIsCompleted(t *testing.T) {
 			// reason "forward_dispatch_non2xx" is gone; distinct codes
 			// now coexist as sibling paths. Each occurrence lands at its
 			// own {marker_hash} terminal segment per v1.20.
-			prefix := "system/runtime/chain-errors/lost/req-1/req-1/handler_said_no/"
-			entries := hctx.LocationIndex.List(prefix)
-			if len(entries) != 1 {
-				t.Fatalf("handler %d: expected exactly 1 lost-error marker under %s, got %d", hstatus, prefix, len(entries))
+			//
+			// The advancing context here carries NO chain (nothing set
+			// hctx.Bounds), so the marker's chain_id is the one the advance
+			// GENERATED per spec step 6 — not the request id.
+			//
+			// This assertion used to read
+			// ".../lost/req-1/req-1/handler_said_no/", pinning chain_id ==
+			// step_index == the request id. That was the fallback ladder
+			// written down as expected behaviour: with no bounds to read, the
+			// marker binder invented a coordinate out of hctx.RequestID and
+			// the test agreed with it. chain_id == step_index is the exact
+			// signature that identified this defect in the first place, so it
+			// is now asserted against rather than for.
+			lost := hctx.LocationIndex.List("system/runtime/chain-errors/lost/")
+			var entries []struct {
+				path string
+				hash hash.Hash
 			}
-			mh := entries[0].Hash
+			for _, e := range lost {
+				if strings.HasSuffix(e.Path, "/handler_said_no/"+hex.EncodeToString(e.Hash.Bytes())) {
+					entries = append(entries, struct {
+						path string
+						hash hash.Hash
+					}{e.Path, e.Hash})
+				}
+			}
+			if len(entries) != 1 {
+				t.Fatalf("handler %d: expected exactly 1 lost-error marker with reason handler_said_no, got %d (paths: %v)",
+					hstatus, len(entries), lost)
+			}
+			// .../lost/{chain_id}/{step_index}/{reason}/{marker_hash}
+			segs := strings.Split(strings.TrimPrefix(entries[0].path, "/"), "/")
+			gotChain := segs[len(segs)-4]
+			gotStep := segs[len(segs)-3]
+			if gotStep != "req-1" {
+				t.Fatalf("handler %d: marker step_index=%q, want the request id req-1", hstatus, gotStep)
+			}
+			if gotChain == gotStep {
+				t.Fatalf("handler %d: marker chain_id == step_index == %q — the request id leaked into the chain coordinate (spec step 6 requires a generated chain_id when the context carries none)",
+					hstatus, gotChain)
+			}
+			if gotChain == "unknown" || gotChain == "" {
+				t.Fatalf("handler %d: marker chain_id=%q — a sentinel, not a chain", hstatus, gotChain)
+			}
+			mh := entries[0].hash
 			mEnt, ok := hctx.Store.Get(mh)
 			if !ok {
 				t.Fatalf("handler %d: marker entity missing from store", hstatus)

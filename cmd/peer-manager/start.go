@@ -44,7 +44,7 @@ func cmdStart(args []string) {
 	publishRoot := fs.Bool("publish-root", false, "PROPOSAL-PEER-MANIFEST §4: mint signed system/peer/published-root on every tree-root change + serve via http-poll. Pair with --http-poll-addr to expose the manifest on the wire. Honored by all three impls.")
 	serveClosureRoot := fs.Bool("serve-closure-root", false, "EXTENSION-NETWORK §6.5.6 Amendment 10: scope served set to the transitive trie-node closure reachable from system/peer/published-root. Pair with --publish-root so a consumer's signed-root hash-chain walk does not 404 on a CHAMP interior node. Mutually exclusive with --serve-namespace / --serve-scope-whole-store. Honored by Go + Python (Rust impl pending).")
 	publishDescriptors := fs.Bool("publish-descriptors", false, "DOMAIN-LOCAL-FILES v1.3 §10.5 V3: configure the --files root with publish_descriptors=true so file reads write `system/content/descriptor/{hash}` entities into the tree. Arms local_files.v3_descriptor_publish_exercised. Honored by Go; Rust + Python impl pending.")
-	keepalive := fs.String("keepalive", "", "EXTENSION-NETWORK §2.3 keepalive override as interval_ms,timeout_ms,max_missed (e.g. 1500,800,2) so the §5.4 escalation is observable in seconds — pair with validate-peer -keepalive-envelope-ms for the liveness harness. Go-only (forwarded as --keepalive-*-ms/--keepalive-max-missed); Rust + Python CLIs have no equivalent yet, so it warns and is dropped there.")
+	keepalive := fs.String("keepalive", "", "EXTENSION-NETWORK §2.3 keepalive override as interval_ms,timeout_ms,max_missed (e.g. 1500,800,2) so the §5.4 escalation is observable in seconds — pair with validate-peer -keepalive-envelope-ms for the liveness harness. A field may be empty to keep its spec default. Honored by all three impls: Go (-keepalive-*-ms), Python (--keepalive-*-ms, 0a0eb48), Rust (--keepalive-*-ms, 99ff398).")
 	fs.Parse(args)
 
 	if *name == "" {
@@ -109,32 +109,27 @@ func cmdStart(args []string) {
 	}
 
 	// Parse --keepalive up front so a malformed triple fails before any
-	// process is spawned. Only Go's entity-peer has the CLI surface today.
-	kaFlags, err := keepaliveArgs(*keepalive)
+	// process is spawned.
+	ka, err := parseKeepalive(*keepalive)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: --keepalive: %v\n", err)
 		os.Exit(1)
 	}
-	if len(kaFlags) > 0 && *peerType != "go" {
-		fmt.Fprintf(os.Stderr, "Note: --keepalive has no %s CLI equivalent yet; ignored for peer %q\n", *peerType, *name)
-		kaFlags = nil
-	}
-
 	switch *peerType {
 	case "go":
-		entry = startGoPeer(*name, *addr, *debug, *openAccess, *files, *history, *storage, *httpAddr, *httpPath, *wsAddr, *wsPath, *keyType, *hashType, registryPeerIDs, kaFlags, pollFlags, logFile, lf)
+		entry = startGoPeer(*name, *addr, *debug, *openAccess, *files, *history, *storage, *httpAddr, *httpPath, *wsAddr, *wsPath, *keyType, *hashType, registryPeerIDs, ka, pollFlags, logFile, lf)
 	case "rust":
 		// Rust 474bb11 (Chunk D), 58d9188 (Chunk E flags), 0616727 (v7.70 home-format).
 		// Rust ships --ws-listen for NETWORK §6.5.2b; cohort flag string is
 		// --ws-addr at the peer-manager boundary, translated below.
-		entry = startRustPeer(*name, *addr, *debug, *storage, *history, *files, *httpAddr, *httpPath, *wsAddr, *keyType, *hashType, pollFlags, logFile, lf)
+		entry = startRustPeer(*name, *addr, *debug, *storage, *history, *files, *httpAddr, *httpPath, *wsAddr, *keyType, *hashType, ka, pollFlags, logFile, lf)
 	case "python":
 		// Python aligned with Chunk D and 74b3335 (Chunk E flags); Python
 		// ships --key-type from f231406 and --hash-type from ff6d1e2 (v7.70).
 		if *wsAddr != "" {
 			fmt.Fprintf(os.Stderr, "Note: --ws-addr has no Python equivalent; ignored for Python peer %q\n", *name)
 		}
-		entry = startPythonPeer(*name, *addr, *debug, *openAccess, *history, *files, *httpAddr, *httpPath, *keyType, *hashType, pollFlags, logFile, lf)
+		entry = startPythonPeer(*name, *addr, *debug, *openAccess, *history, *files, *httpAddr, *httpPath, *keyType, *hashType, ka, pollFlags, logFile, lf)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown peer type: %s (supported: go, rust, python)\n", *peerType)
 		os.Exit(1)
@@ -184,35 +179,64 @@ func (f chunkEFlags) enabled() bool {
 	return f.pollAddr != "" || f.mountOnLive
 }
 
-// keepaliveArgs translates the --keepalive triple (interval_ms,timeout_ms,
-// max_missed; a field may be empty to keep its spec default) into the Go
-// entity-peer flags. Empty input → nil.
-func keepaliveArgs(spec string) ([]string, error) {
+// keepaliveSpec is a parsed --keepalive triple. An empty field means that
+// parameter keeps its §2.3 spec default; the impls agree on partial overrides.
+type keepaliveSpec struct {
+	intervalMS string
+	timeoutMS  string
+	maxMissed  string
+}
+
+// parseKeepalive parses the --keepalive triple (interval_ms,timeout_ms,
+// max_missed). Empty input → zero spec.
+func parseKeepalive(spec string) (keepaliveSpec, error) {
+	var ka keepaliveSpec
 	if spec == "" {
-		return nil, nil
+		return ka, nil
 	}
 	parts := strings.Split(spec, ",")
 	if len(parts) != 3 {
-		return nil, fmt.Errorf("want interval_ms,timeout_ms,max_missed (got %q)", spec)
+		return ka, fmt.Errorf("want interval_ms,timeout_ms,max_missed (got %q)", spec)
 	}
-	flagNames := []string{"-keepalive-interval-ms", "-keepalive-timeout-ms", "-keepalive-max-missed"}
-	var out []string
+	fields := []*string{&ka.intervalMS, &ka.timeoutMS, &ka.maxMissed}
+	names := []string{"interval_ms", "timeout_ms", "max_missed"}
 	for i, p := range parts {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
 		}
 		if _, err := strconv.ParseUint(p, 10, 64); err != nil {
-			return nil, fmt.Errorf("%s: %q is not a non-negative integer", flagNames[i], p)
+			return keepaliveSpec{}, fmt.Errorf("%s: %q is not a non-negative integer", names[i], p)
 		}
-		out = append(out, flagNames[i], p)
+		*fields[i] = p
 	}
-	return out, nil
+	return ka, nil
+}
+
+func (ka keepaliveSpec) empty() bool {
+	return ka.intervalMS == "" && ka.timeoutMS == "" && ka.maxMissed == ""
+}
+
+// args renders the override flags in the given dash dialect. The flag names are
+// identical across impls; only the dash count differs — Go's stdlib flag takes
+// "-keepalive-interval-ms", Python's argparse takes "--keepalive-interval-ms".
+func (ka keepaliveSpec) args(dash string) []string {
+	var out []string
+	for _, f := range []struct{ name, val string }{
+		{"keepalive-interval-ms", ka.intervalMS},
+		{"keepalive-timeout-ms", ka.timeoutMS},
+		{"keepalive-max-missed", ka.maxMissed},
+	} {
+		if f.val != "" {
+			out = append(out, dash+f.name, f.val)
+		}
+	}
+	return out
 }
 
 // --- Go peer ---
 
-func startGoPeer(name, addr string, debug, openAccess bool, files, history, storage, httpAddr, httpPath, wsAddr, wsPath, keyType, hashType, inboxRelayRegistry string, keepaliveFlags []string, poll chunkEFlags, logFile string, lf *os.File) *PeerEntry {
+func startGoPeer(name, addr string, debug, openAccess bool, files, history, storage, httpAddr, httpPath, wsAddr, wsPath, keyType, hashType, inboxRelayRegistry string, keepalive keepaliveSpec, poll chunkEFlags, logFile string, lf *os.File) *PeerEntry {
 	readyFile := filepath.Join(os.TempDir(), fmt.Sprintf("entity-peer-%s-%d.ready", name, time.Now().UnixNano()))
 
 	// Pass -name so the Go peer loads (or creates) its keypair at
@@ -290,7 +314,7 @@ func startGoPeer(name, addr string, debug, openAccess bool, files, history, stor
 	if inboxRelayRegistry != "" {
 		cmdArgs = append(cmdArgs, "-inbox-relay-registry", inboxRelayRegistry)
 	}
-	cmdArgs = append(cmdArgs, keepaliveFlags...)
+	cmdArgs = append(cmdArgs, keepalive.args("-")...)
 
 	peerBin := findGoBinary()
 
@@ -360,7 +384,7 @@ func findGoBinary() string {
 
 // --- Rust peer ---
 
-func startRustPeer(name, addr string, debug bool, storage, history, files, httpAddr, httpPath, wsAddr, keyType, hashType string, poll chunkEFlags, logFile string, lf *os.File) *PeerEntry {
+func startRustPeer(name, addr string, debug bool, storage, history, files, httpAddr, httpPath, wsAddr, keyType, hashType string, keepalive keepaliveSpec, poll chunkEFlags, logFile string, lf *os.File) *PeerEntry {
 	requirePodman()
 	rustDir := findRustDir()
 	rustImage := envOr("ENTITY_RUST_IMAGE", defaultRustImage)
@@ -460,6 +484,9 @@ func startRustPeer(name, addr string, debug bool, storage, history, files, httpA
 		// R5 (Rust 3e9c9fc): --publish-descriptors CLI flag landed.
 		cmdArgs = append(cmdArgs, "--publish-descriptors")
 	}
+	// §2.3 keepalive overrides (Rust 99ff398 — same flag names as Go and
+	// Python in clap's double-dash dialect; omitted fields keep spec defaults).
+	cmdArgs = append(cmdArgs, keepalive.args("--")...)
 
 	spec.args = cmdArgs
 	entry := runContainerPeer(spec)
@@ -537,7 +564,7 @@ func discoverPeerID(addr string) string {
 
 // --- Python peer ---
 
-func startPythonPeer(name, addr string, debug, openAccess bool, history, files, httpAddr, httpPath, keyType, hashType string, poll chunkEFlags, logFile string, lf *os.File) *PeerEntry {
+func startPythonPeer(name, addr string, debug, openAccess bool, history, files, httpAddr, httpPath, keyType, hashType string, keepalive keepaliveSpec, poll chunkEFlags, logFile string, lf *os.File) *PeerEntry {
 	// Identity provisioning. Python 91f8f77 ships the algorithm-tagged PEM
 	// loader, so the prior Ed448 skip can drop.
 	if err := ensureIdentity(name, keyType); err != nil {
@@ -635,6 +662,9 @@ func startPythonPeer(name, addr string, debug, openAccess bool, history, files, 
 		// config; CLI surface pending. Warn-and-drop until Python ships it.
 		fmt.Fprintf(os.Stderr, "Warning: --publish-descriptors ignored for type=python (CLI flag pending)\n")
 	}
+	// §2.3 keepalive overrides (Python 0a0eb48 — same flag names as the Go
+	// peer in argparse's double-dash dialect; omitted fields keep spec defaults).
+	cmdArgs = append(cmdArgs, keepalive.args("--")...)
 
 	return runContainerPeer(containerSpec{
 		name:       name,

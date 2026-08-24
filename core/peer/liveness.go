@@ -1,6 +1,8 @@
 package peer
 
 import (
+	"time"
+
 	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/protocol"
 	"go.entitychurch.org/entity-core-go/core/types"
@@ -100,17 +102,31 @@ func (p *Peer) writePeerDemotion(peerID crypto.PeerID, status, reason string, ca
 	if t, ok := p.lastPeerActivity(peerID); ok {
 		lastSeen = uint64(t.UnixMilli())
 	}
+	// `failing_since` stamps the START of the failure episode, so it is
+	// written once and carried forward: a suspect → disconnected escalation
+	// (or a redial that trips the transport seam again mid-episode) must not
+	// re-stamp it, or the derived §2.2 backoff curve restarts at min_ms every
+	// time the peer fails a little harder. Only the `connected` write clears
+	// it, by omission. This is the one field WritePeerStatus's callers must
+	// preserve — the same seam that already owns the §A1 no-clobber guard,
+	// for the same reason: only the caller knows the episode's history.
+	failingSince := uint64(time.Now().UnixMilli())
+	if prev, ok := protocol.ReadPeerStatus(p.Store(), p.LocationIndex(), string(p.PeerID()), remoteHash); ok &&
+		prev.FailingSince != 0 {
+		failingSince = prev.FailingSince
+	}
 	if _, werr := protocol.WritePeerStatus(
 		p.Store(),
 		p.LocationIndex(),
 		string(p.PeerID()),
 		remoteHash,
 		types.PeerStatusData{
-			PeerID:    string(peerID),
-			Status:    status,
-			Reason:    reason,
-			LastError: lastError,
-			LastSeen:  lastSeen,
+			PeerID:       string(peerID),
+			Status:       status,
+			Reason:       reason,
+			LastError:    lastError,
+			LastSeen:     lastSeen,
+			FailingSince: failingSince,
 		},
 	); werr != nil {
 		p.debugf("peer-status %s write for %s: %v", status, peerID, werr)

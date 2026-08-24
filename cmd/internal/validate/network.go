@@ -3,7 +3,9 @@ package validate
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
@@ -18,7 +20,7 @@ const catNetwork = "network"
 
 // runNetwork drives the rung-3 system/network handler (EXTENSION-NETWORK §4,
 // Amendment 12) against a LIVE target, reconciling the maintain-peer reconnect
-// lifecycle cross-peer instead of by build-shape comparison. Four probes,
+// lifecycle cross-peer instead of by build-shape comparison. Five probes,
 // in dependency order:
 //
 //	network_maintain_installs_graph — maintain-peer → §2.4 result + the three
@@ -28,9 +30,16 @@ const catNetwork = "network"
 //	    pending_count bare zero (no §8 outbox, Amendment 11).
 //	network_release_tears_down      — release-peer → §2.6 result lists the
 //	    continuation paths, they are gone, terminal disconnected write lands.
-//	network_reconnect_anchor        — the marker-proposal §4 vector, LIVE:
-//	    maintain → kill → target flips off connected + a lost marker
-//	    (reason connection_failed) lands → restart → status returns connected.
+//	network_retry_survives_outage   — the loop keeps retrying against a peer
+//	    that stays dead, counted from outside by dials. The anchor below cannot
+//	    ask this: it restarts the peer, so one retry satisfies it.
+//	network_reconnect_anchor        — the §4.1 failure path, LIVE: maintain →
+//	    kill → target flips off connected and stamps the failure episode
+//	    (§3.13 failing_since) → restart → status returns connected on its own,
+//	    episode cleared. This was the marker-proposal §4 vector (a lost marker
+//	    with reason connection_failed); that requirement is retired — the
+//	    on-disconnect continuation now carries on_error, so a failed reconnect
+//	    routes to the backoff seam instead of binding a marker per attempt.
 //
 // Like the §A3 liveness floor (liveness.go, whose killable-counterpart
 // mechanism this reuses), the handler's reactive half is only observable by
@@ -52,13 +61,15 @@ func runNetwork(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs int
 	r.Declare("network_maintain_installs_graph", "EXTENSION-NETWORK §4.1 maintain-peer + §2.4 result + the §4.1 reconnect continuation graph")
 	r.Declare("network_status_reports_peer", "EXTENSION-NETWORK §4.3 status / §2.7 (pending_count bare zero — Amendment 11)")
 	r.Declare("network_release_tears_down", "EXTENSION-NETWORK §4.2 release-peer / §2.6 + terminal §3.13 disconnected write")
-	r.Declare("network_reconnect_anchor", "EXTENSION-NETWORK §4.1 reconnect + PROPOSAL-CONTINUATION-LOST-ERROR-MARKER §4 (reason connection_failed)")
+	r.Declare("network_retry_survives_outage", "EXTENSION-NETWORK §4.1/§2.2: the reconnect retry loop survives a lasting outage (retry-forever is normative)")
+	r.Declare("network_reconnect_anchor", "EXTENSION-NETWORK §4.1 reconnect: autonomous re-establish + the §3.13 failure episode (failing_since stamped, then cleared)")
 
 	if client.Profile() == ProfileCore {
 		for _, name := range []string{
 			"network_maintain_installs_graph",
 			"network_status_reports_peer",
 			"network_release_tears_down",
+			"network_retry_survives_outage",
 			"network_reconnect_anchor",
 		} {
 			r.Run(name, func() CheckOutcome {
@@ -103,8 +114,16 @@ func runNetwork(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs int
 		if len(result.Subscriptions) != 2 {
 			return FailCheck(fmt.Sprintf("maintain-result lists %d subscriptions, want exactly 2 (the on-disconnect + on-reconnect lifecycle subs, §4.1)", len(result.Subscriptions)))
 		}
-		if !strings.HasPrefix(result.ChainID, "network/maintain/") {
-			return FailCheck(fmt.Sprintf("maintain-result chain_id %q lacks the network/maintain/ prefix (§4.1 graph chain)", result.ChainID))
+		// §3.11: a chain_id MUST be a single path segment, because it IS a
+		// segment of the §3.10.6 marker path. The value itself is opaque (§3.11
+		// gives it no format), so this asserts the SHAPE and nothing more — the
+		// old assertion demanded a literal "network/maintain/" prefix, which is
+		// precisely the multi-segment value the rule now forbids.
+		if result.ChainID == "" {
+			return FailCheck("maintain-result carries no chain_id (§2.4 / §4.1 graph chain)")
+		}
+		if strings.Contains(result.ChainID, "/") {
+			return FailCheck(fmt.Sprintf("maintain-result chain_id %q is not a single path segment (§3.11) — it would fork the §3.10.6 marker tree into extra levels", result.ChainID))
 		}
 
 		// The §4.1 graph: three continuations must be resident in the target's
@@ -200,6 +219,83 @@ func runNetwork(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs int
 		return PassCheck("release-peer tore down the graph: 3 paths reported in cleaned_up, all gone from the tree, terminal disconnected write landed")
 	})
 
+	// The retry loop must SURVIVE the outage, not merely start one.
+	//
+	// network_reconnect_anchor cannot ask this and never could: it restarts the
+	// counterpart promptly, so recovering needs exactly ONE retry to land. A
+	// loop that fires twice and dies passes it. That is not a hypothetical —
+	// Go's loop did exactly that (bisected to before 2026-07-16, found only by
+	// leaving a peer dead and counting), because §4.1's one-shot backoff
+	// continuation is re-installed by the very maintain-peer it dispatches, and
+	// the advance then consumes the remaining_executions it read before that
+	// re-install existed. The path ends up empty and the next advance reports
+	// {advanced:false} with status 200 — no error, no marker, no log. See
+	// docs/validation/spec-issues/2026-07-16-backoff-one-shot-clobber.md.
+	//
+	// Any impl following §4.1's one-shot literally is a candidate, so this asks
+	// the question of the wire rather than of the pseudocode.
+	//
+	// Measured from OUTSIDE by dial count: the counterpart is killed and its
+	// address taken over by a socket that counts connects. Nothing about the
+	// target's internals is assumed — every impl's retry ends in a dial.
+	r.Run("network_retry_survives_outage", func() CheckOutcome {
+		if keepaliveEnvelopeMs <= 0 {
+			return SkipCheck("pass -keepalive-envelope-ms matching the target's §2.3 envelope so the disconnect is observable in seconds — opt-in like the reconnect anchor")
+		}
+		cp, err := startNetworkCounterpart()
+		if err != nil {
+			return FailCheck("start retry-survival counterpart: " + err.Error())
+		}
+		defer cp.kill()
+
+		// Short backoff so several retries fit in a probe window:
+		// delays 500ms, 1s, 1s, … ⇒ the 4th retry is due ~3.5s after the
+		// failure. Under the §2.2 defaults it would be ~15s.
+		minMs, maxMs := uint64(500), uint64(1000)
+		if _, out := networkMaintainWithBackoff(ctx, client, cp,
+			&types.BackoffConfigData{MinMs: &minMs, MaxMs: &maxMs}); !out.pass {
+			return out.outcome
+		}
+		if _, lastState, found := pollPeerStatus(ctx, client, cp.hexID, 15*time.Second, func(d types.PeerStatusData) bool {
+			return d.Status == types.PeerStatusConnected
+		}); !found {
+			return FailCheck(fmt.Sprintf("retry-survival counterpart never reached connected (%s) — cannot arm the outage vector", lastState))
+		}
+
+		// Kill it and take the port, so every later dial is counted.
+		cp.kill()
+		dc, derr := startDialCounter(cp.addr)
+		if derr != nil {
+			return FailCheck(derr.Error())
+		}
+		defer dc.stop()
+
+		demoteDeadline := time.Duration(keepaliveEnvelopeMs)*time.Millisecond*3/2 + 10*time.Second
+		if _, lastState, found := pollPeerStatus(ctx, client, cp.hexID, demoteDeadline, func(d types.PeerStatusData) bool {
+			return d.Status != types.PeerStatusConnected
+		}); !found {
+			return FailCheck(fmt.Sprintf("target's status never left connected within %v (%s) — the disconnect was not detected, so no retry loop to survive", demoteDeadline, lastState))
+		}
+
+		// Poll to the threshold rather than sleeping a fixed window: a healthy
+		// loop reaches 4 dials ~3.5s after the failure and the probe ends there.
+		// Only a stalled one pays the full deadline.
+		const wantDials = 4
+		deadline := time.Now().Add(25 * time.Second)
+		for dc.count() < wantDials && time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return FailCheck("context canceled while counting reconnect dials")
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+		if n := dc.count(); n < wantDials {
+			return FailCheck(fmt.Sprintf("only %d reconnect dial(s) in %v against a peer that stayed dead, want >=%d at min_ms=500/max_ms=1000 — the retry loop stopped instead of retrying forever, so this peer would never recover a neighbour that came back later. A loop that dies after ~2 attempts is the §4.1 one-shot backoff clobber (docs/validation/spec-issues/2026-07-16-backoff-one-shot-clobber.md); the reconnect anchor cannot see it because re-establishing needs only one retry",
+				n, time.Since(deadline.Add(-25*time.Second)).Round(time.Millisecond), wantDials))
+		}
+		return PassCheck(fmt.Sprintf("retry loop survived the outage: %d reconnect dials against a peer that stayed dead (>=%d at min_ms=500/max_ms=1000) — retry-forever holds", dc.count(), wantDials))
+	})
+
 	r.Run("network_reconnect_anchor", func() CheckOutcome {
 		if out, ok := r.Require("network_maintain_installs_graph"); !ok {
 			return out
@@ -230,6 +326,8 @@ func runNetwork(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs int
 		// — carrying no on_error — binds the §3.10 lost marker.
 		cp.kill()
 
+		var deferredWarn string
+
 		demoteDeadline := time.Duration(keepaliveEnvelopeMs)*time.Millisecond*3/2 + 10*time.Second
 		if _, lastState, found := pollPeerStatus(ctx, client, cp.hexID, demoteDeadline, func(d types.PeerStatusData) bool {
 			return d.Status != types.PeerStatusConnected
@@ -237,16 +335,42 @@ func runNetwork(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs int
 			return FailCheck(fmt.Sprintf("target's status for the killed counterpart never left connected within %v (%s) — the disconnect was not detected, so the reconnect lifecycle never fired", demoteDeadline, lastState))
 		}
 
-		// The lost marker: reason connection_failed. Assert reason + coordinate
-		// STRUCTURE, NOT the literal chain_id/step_index — that is the §4
-		// convergence finding (Go/Rust key on delivery request ids, Python on
-		// the F1 fallback; the literal key is implementation-defined).
-		marker, mpath, mok := pollLostMarker(ctx, client, "connection_failed", demoteDeadline)
-		if !mok {
-			return FailCheck(fmt.Sprintf("no lost-error marker with reason connection_failed appeared under system/runtime/chain-errors/lost/ within %v — the §3.10 no-on_error observability record for the failed reconnect is missing (PROPOSAL-CONTINUATION-LOST-ERROR-MARKER §4)", demoteDeadline))
-		}
-		if marker.ChainID == "" || marker.StepIndex == "" {
-			return FailCheck(fmt.Sprintf("lost marker at %s carries reason connection_failed but an empty coordinate (chain_id=%q step_index=%q) — the §3.10.6 denormalized coordinate fields are required", mpath, marker.ChainID, marker.StepIndex))
+		// The failure record. This used to REQUIRE a lost-error marker with
+		// reason connection_failed, and that requirement is now retired: the
+		// on-disconnect continuation carries `on_error` routing to the
+		// managed-namespace backoff seam, so a failed reconnect ROUTES rather
+		// than binding a §3.10 no-on_error marker. A reconnect failing against
+		// an offline peer is the expected path through the §4.1 graph, and the
+		// marker recorded the lifecycle working as though it were breaking —
+		// one marker per retry, forever, for a peer that is merely away.
+		//
+		// PROPOSAL-CONTINUATION-LOST-ERROR-MARKER §4 named this path its
+		// "natural test subject", so retiring it here is deliberate and worth
+		// stating: the proposal's §4 "Key convergence" requirement (same
+		// scenario ⇒ same (chain_id, step_index, reason) on all three impls)
+		// loses its canonical vector. It needs a new one — a chain that fails
+		// with no on_error BY DESIGN, rather than one whose no-on_error was the
+		// defect. Routed, not silently dropped.
+		//
+		// What replaces it is the durable record the §2 ruling made canonical:
+		// the §3.13 status entity's `failing_since`, transition-written ONCE per
+		// failure episode. That is strictly better as an anchor — it is one
+		// record instead of one-per-attempt, and it is the field the §2.2 retry
+		// pacing is actually derived from, so asserting it tests the mechanism
+		// rather than a by-product of it.
+		//
+		// WARN, not FAIL, when absent: Go leads here and the sibling catch-up is
+		// drafted but unsent, so Rust/Python have no `failing_since` yet. A FAIL
+		// would gate the cohort on a routing that has not happened. This is NOT
+		// permissive-forever — it tightens to FAIL once the seats land §2.
+		failing, _, fok := pollPeerStatus(ctx, client, cp.hexID, demoteDeadline, func(d types.PeerStatusData) bool {
+			return d.FailingSince != 0
+		})
+		episodeRecorded := fok && failing.FailingSince != 0
+		if !episodeRecorded {
+			deferredWarn = fmt.Sprintf("target's §3.13 status for the killed peer carries no failing_since within %v — "+
+				"the failure episode has no durable record, so §2.2 retry pacing cannot be derived and cannot survive a restart "+
+				"(expected for a peer that has not yet landed the §2 ruling; Go-side catch-up pending)", demoteDeadline)
 		}
 
 		// 3. Restart the counterpart on the same addr+identity; the paced
@@ -256,12 +380,34 @@ func runNetwork(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs int
 			return FailCheck("restart counterpart on same addr: " + err.Error())
 		}
 		reconnectDeadline := time.Duration(keepaliveEnvelopeMs)*time.Millisecond + 60*time.Second
-		if _, lastState, found := pollPeerStatus(ctx, client, cp.hexID, reconnectDeadline, func(d types.PeerStatusData) bool {
+		recovered, lastState, found := pollPeerStatus(ctx, client, cp.hexID, reconnectDeadline, func(d types.PeerStatusData) bool {
 			return d.Status == types.PeerStatusConnected
-		}); !found {
+		})
+		if !found {
 			return FailCheck(fmt.Sprintf("target never re-established connected after the counterpart restarted on %s within %v (%s) — the §4.1 backoff reconnect did not recover the relationship autonomously", cp.addr, reconnectDeadline, lastState))
 		}
-		return PassCheck(fmt.Sprintf("reconnect anchor: kill → demoted off connected + lost marker (reason connection_failed, coordinate %s/%s) → restart → autonomous re-establish to connected", marker.ChainID, marker.StepIndex))
+		// Recovery ENDS the episode. A failing_since surviving a re-establish
+		// would have the next failure resume a stale curve — deriving a large
+		// attempt count and a max-length wait for a peer that just came back —
+		// so the clear is as load-bearing as the stamp.
+		if episodeRecorded && recovered.FailingSince != 0 {
+			return FailCheck(fmt.Sprintf("target re-established connected but its §3.13 status still carries failing_since=%d — the failure episode was never closed, so the next failure will resume a stale §2.2 backoff curve instead of starting a fresh one", recovered.FailingSince))
+		}
+
+		// The retired requirement, kept as its negative. Every reconnect that
+		// failed during the outage has now happened, so one pass is enough: if
+		// the failures were still being recorded as lost chain dispatches
+		// instead of routed to the backoff seam, a marker would be sitting here.
+		// Asserting the absence is what keeps on_error from silently rotting
+		// off the on-disconnect continuation — nothing else would notice.
+		if m, mp, found := findLostMarker(ctx, client, "connection_failed"); found {
+			return FailCheck(fmt.Sprintf("a lost-error marker with reason connection_failed is bound at %s (coordinate %s/%s) — the failed reconnect was recorded as a lost chain dispatch instead of routing through the on-disconnect continuation's on_error to the backoff seam, which binds one marker per retry for a peer that is merely away", mp, m.ChainID, m.StepIndex))
+		}
+
+		if deferredWarn != "" {
+			return WarnCheck("reconnect anchor: kill → demoted off connected → restart → autonomous re-establish to connected (the §4.1 contract holds, and the failed reconnect bound no lost marker), but " + deferredWarn)
+		}
+		return PassCheck(fmt.Sprintf("reconnect anchor: kill → demoted off connected (failure episode recorded, failing_since=%d) → restart → autonomous re-establish to connected, episode cleared; failed reconnect routed via on_error, no lost marker bound", failing.FailingSince))
 	})
 
 	return r.Results()
@@ -281,7 +427,17 @@ func netBad(o CheckOutcome) networkOutcome { return networkOutcome{outcome: o} }
 // networkMaintain EXECUTEs maintain-peer toward the counterpart and decodes the
 // §2.4 result. A 403 is the §3.2 admin-only contract → SkipCheck.
 func networkMaintain(ctx context.Context, client *PeerClient, cp *networkCounterpart) (types.MaintainResultData, networkOutcome) {
-	req := types.MaintainRequestData{PeerID: cp.peerID, Address: cp.addr}
+	return networkMaintainWithBackoff(ctx, client, cp, nil)
+}
+
+// networkMaintainWithBackoff is networkMaintain with an explicit §2.2 backoff.
+// The defaults (min 1s, max 60s) are right for real deployments and useless for
+// a probe that has to observe several retries: the fourth would land ~15s in
+// and the seventh past two minutes. A probe passing a short backoff is not
+// weakening the vector — the schedule's shape is what is under test, not its
+// wall-clock constants.
+func networkMaintainWithBackoff(ctx context.Context, client *PeerClient, cp *networkCounterpart, backoff *types.BackoffConfigData) (types.MaintainResultData, networkOutcome) {
+	req := types.MaintainRequestData{PeerID: cp.peerID, Address: cp.addr, Backoff: backoff}
 	params, err := req.ToEntity()
 	if err != nil {
 		return types.MaintainResultData{}, netBad(FailCheck("build maintain-request: " + err.Error()))
@@ -393,44 +549,55 @@ func getContinuation(ctx context.Context, client *PeerClient, b58Path, hexPath s
 	return types.ContinuationData{}, "", false
 }
 
-// pollLostMarker walks system/runtime/chain-errors/lost/ for a marker whose
-// reason equals want, retrying until the deadline (the marker lands only after
-// the reconnect dispatch fails, which trails the status demotion).
-func pollLostMarker(ctx context.Context, client *PeerClient, want string, within time.Duration) (types.ChainErrorLostData, string, bool) {
-	deadline := time.Now().Add(within)
-	for {
-		var paths []string
-		walkTreePaths(ctx, client, "system/runtime/chain-errors/lost/", 0, &paths)
-		for _, p := range paths {
-			ent, _, err := client.TreeGet(ctx, p)
-			if err != nil || ent.Type != types.TypeChainErrorLost {
-				continue
-			}
-			var d types.ChainErrorLostData
-			if derr := ecf.Decode(ent.Data, &d); derr != nil {
-				continue
-			}
-			if d.Reason == want {
-				return d, p, true
-			}
+// findLostMarker walks system/runtime/chain-errors/lost/ for a marker whose
+// reason equals want, in a single pass.
+//
+// Single-pass, where this used to poll to a deadline: its caller now asserts
+// ABSENCE, and polling for something that must not exist just burns the whole
+// timeout on every clean run. The call site is ordered so one pass is sound —
+// it looks only AFTER the outage has ended, by which point every reconnect
+// attempt that could have bound a marker has already been made and observed.
+func findLostMarker(ctx context.Context, client *PeerClient, want string) (types.ChainErrorLostData, string, bool) {
+	var paths []string
+	walkTreePaths(ctx, client, "system/runtime/chain-errors/lost/", 0, &paths)
+	for _, p := range paths {
+		ent, _, err := client.TreeGet(ctx, p)
+		if err != nil || ent.Type != types.TypeChainErrorLost {
+			continue
 		}
-		if time.Now().After(deadline) {
-			return types.ChainErrorLostData{}, "", false
+		var d types.ChainErrorLostData
+		if derr := ecf.Decode(ent.Data, &d); derr != nil {
+			continue
 		}
-		select {
-		case <-ctx.Done():
-			return types.ChainErrorLostData{}, "", false
-		case <-time.After(300 * time.Millisecond):
+		if d.Reason == want {
+			return d, p, true
 		}
 	}
+	return types.ChainErrorLostData{}, "", false
 }
 
 // walkTreePaths collects every descendant path under prefix (which must end in
-// "/") into out, bounded to a shallow depth — the lost-marker tree
-// (.../lost/{chain_id}/{step_index}/{reason}/{marker_hash}) is four levels
-// deep and small in a test run.
+// "/") into out, bounded to a depth that accommodates every cohort marker
+// layout. The nominal shape is .../lost/{chain_id}/{step_index}/{reason}/
+// {marker_hash} — four levels — but {chain_id} need not be a single segment on
+// every seat yet: Python (c4631c1) uses a path-shaped chain id
+// ("unknown/cont-forward-system/network/peers/{peer}/on-disconnect"), putting
+// its marker entity at depth 7. A cap of 6 silently truncated the walk one
+// level ABOVE Python's markers, so the category reported "no marker" for
+// markers that were present and conformant.
+//
+// The bound stays generous DELIBERATELY, and the reason has inverted. §3.11 now
+// requires chain_id to be a single path segment, so the nominal four levels are
+// true for Go and the cap could in principle come down — but the walk's only
+// caller now asserts a NEGATIVE ("no connection_failed marker was bound"), and
+// for a negative a too-shallow walk does not FAIL, it silently PASSES. It would
+// conclude "no marker" by failing to look far enough, which is precisely the
+// false signal that cost this cycle a bogus Python bug report. Restoring the
+// tight cap is safe only once every seat emits single-segment chain ids AND
+// nothing depends on the walk for an absence claim; until then, generous. The
+// lost tree is small in a test run.
 func walkTreePaths(ctx context.Context, client *PeerClient, prefix string, depth int, out *[]string) {
-	if depth > 6 {
+	if depth > 12 {
 		return
 	}
 	entries, _, err := client.TreeListing(ctx, prefix)
@@ -543,3 +710,44 @@ func (cp *networkCounterpart) managedPath(leaf string) string {
 func (cp *networkCounterpart) managedPathHex(leaf string) string {
 	return "system/network/peers/" + cp.hexID + "/" + leaf
 }
+
+// dialCounter takes over an address and counts inbound TCP connections,
+// closing each immediately.
+//
+// It exists to count a target's reconnect attempts FROM OUTSIDE, without
+// reading its internals or trusting what it records. Every impl's retry, by
+// whatever internal mechanism, ends in a dial to this address — so accepts are
+// the one signal that means the same thing on all three seats. (Counting the
+// target's own chain-error markers would work today, but only for the impls
+// that still bind one per retry — it measures the record, not the retry.)
+//
+// Accept-and-close, deliberately: the target completes a TCP connect, then its
+// handshake gets EOF, so EnsureConnected fails exactly as it would against a
+// dead peer. The connection refused it would otherwise get is the same failure
+// one layer down — and cannot be counted.
+type dialCounter struct {
+	ln net.Listener
+	n  atomic.Int64
+}
+
+func startDialCounter(addr string) (*dialCounter, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("take over counterpart addr %s to count reconnect dials: %w", addr, err)
+	}
+	d := &dialCounter{ln: ln}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			d.n.Add(1)
+			c.Close()
+		}
+	}()
+	return d, nil
+}
+
+func (d *dialCounter) count() int64 { return d.n.Load() }
+func (d *dialCounter) stop()        { d.ln.Close() }

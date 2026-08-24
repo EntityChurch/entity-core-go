@@ -62,6 +62,42 @@ func WritePeerStatus(
 	return h, nil
 }
 
+// ReadPeerStatus reads the §3.13 liveness entity a prior WritePeerStatus bound
+// for a remote peer, reporting whether one is present and decodable.
+//
+// This is a plain read of published operational state, not the read half of a
+// read-modify-write: WritePeerStatus stays a straight write (see above). Two
+// callers need it. The demotion seam reads the current episode's
+// `failing_since` so a suspect → disconnected escalation preserves it rather
+// than re-stamping. The retry pacing reads it to recover `failing_since` after
+// a restart — the tree, not an in-memory counter, is where that state lives.
+//
+// A miss (never written, evicted, or undecodable) is an ordinary "no episode
+// known", not an error: every caller here has a defined behaviour for it.
+func ReadPeerStatus(
+	cs store.ContentStore,
+	li store.LocationIndex,
+	localPeerID string,
+	remoteIdentityHash hash.Hash,
+) (types.PeerStatusData, bool) {
+	if remoteIdentityHash.IsZero() {
+		return types.PeerStatusData{}, false
+	}
+	h, ok := li.Get(types.PeerStatusPath(localPeerID, remoteIdentityHash))
+	if !ok {
+		return types.PeerStatusData{}, false
+	}
+	ent, ok := cs.Get(h)
+	if !ok {
+		return types.PeerStatusData{}, false
+	}
+	d, err := types.PeerStatusDataFromEntity(ent)
+	if err != nil {
+		return types.PeerStatusData{}, false
+	}
+	return d, true
+}
+
 // NOTE: there is deliberately no cadence-refresh read/modify helper here.
 // Per §A4 (rung-2 ruling 1) the status entity is TRANSITION-written only —
 // keepalive success updates impl-internal freshness, never the tree.

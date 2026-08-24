@@ -291,12 +291,50 @@ func TestExtractHandlerPath(t *testing.T) {
 		{"entity://" + testPeerID + "/local/files/readme.md", "local/files/readme.md"},
 		{"system/tree", "system/tree"},
 		{"local/files/readme.md", "local/files/readme.md"},
+
+		// The ABSOLUTE-path spelling. The contract has always named three
+		// cases (URI, absolute, peer-relative) and this table covered two —
+		// so the absolute case returned the path unchanged, peer_id still
+		// attached, for as long as it has existed. Callers qualify the result
+		// (store.QualifyPath prepends unconditionally), so the peer_id landed
+		// twice: "/{peer}//{peer}/rest". The empty segment panicked
+		// NamespacedIndex.canonicalize — and the path is reachable from the
+		// WIRE, since core/protocol resolveHandler feeds an inbound EXECUTE's
+		// `uri` straight through here. A remote peer could crash the peer
+		// serving it just by spelling the uri as a path instead of a URI.
+		{"/" + testPeerID + "/system/tree", "system/tree"},
+		{"/" + testPeerID + "/system/protocol/connect", "system/protocol/connect"},
+		{"/" + testPeerID + "/local/files/readme.md", "local/files/readme.md"},
+		{"/" + testPeerID, testPeerID},
+		{"entity://" + testPeerID, testPeerID},
 	}
 
 	for _, tt := range tests {
 		result := ExtractHandlerPath(tt.input)
 		if result != tt.expected {
 			t.Fatalf("ExtractHandlerPath(%q): expected %q, got %q", tt.input, tt.expected, result)
+		}
+	}
+}
+
+// A URI and the equivalent absolute path are two spellings of ONE address
+// (V7 §1.4), so they must reduce identically. Asserting the equivalence as a
+// property — rather than case by case — is what keeps the two branches from
+// drifting apart again.
+func TestExtractHandlerPathSpellingsAgree(t *testing.T) {
+	for _, rest := range []string{
+		"system/tree",
+		"system/protocol/connect",
+		"system/network/peers/abc/on-reconnect-backoff",
+		"a",
+	} {
+		fromURI := ExtractHandlerPath("entity://" + testPeerID + "/" + rest)
+		fromPath := ExtractHandlerPath("/" + testPeerID + "/" + rest)
+		if fromURI != fromPath {
+			t.Fatalf("spellings disagree for %q: uri form -> %q, path form -> %q", rest, fromURI, fromPath)
+		}
+		if fromURI != rest {
+			t.Fatalf("ExtractHandlerPath lost the handler path for %q: got %q", rest, fromURI)
 		}
 	}
 }

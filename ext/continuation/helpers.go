@@ -226,7 +226,7 @@ func normalizeToStringMap(v interface{}) (map[string]interface{}, bool) {
 // existing OriginalCode slot carries the diagnostic). OriginalStatus=0
 // to distinguish from a real failed-dispatch marker. Purely
 // observational — same contract as the other §3.4 reasons.
-func (h *Handler) bindMergeValueNotMapMarker(hctx *handler.HandlerContext, contTarget string, value cbor.RawMessage) {
+func (h *Handler) bindMergeValueNotMapMarker(hctx *handler.HandlerContext, chainID, contTarget string, value cbor.RawMessage) {
 	var decoded interface{}
 	typeName := "nil"
 	if len(value) > 0 {
@@ -239,7 +239,7 @@ func (h *Handler) bindMergeValueNotMapMarker(hctx *handler.HandlerContext, contT
 	// v1.20 §3.10.6 timestamp-capture: origination is the moment we
 	// observe the post-transform value isn't a map (i.e., right now).
 	originTS := uint64(time.Now().UnixMilli())
-	h.bindLostErrorMarker(hctx, contTarget, 0, nil, types.ChainErrorReasonMergeValueNotMap, originTS, hash.Hash{})
+	h.bindLostErrorMarker(hctx, chainID, contTarget, 0, nil, types.ChainErrorReasonMergeValueNotMap, originTS, hash.Hash{})
 	_ = typeName // captured via marker's reason; type is observable in debug logs below.
 	debugLog("merge_value_not_map: post-transform value type=%s (continuation target=%s)", typeName, contTarget)
 }

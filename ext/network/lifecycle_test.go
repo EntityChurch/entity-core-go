@@ -1,15 +1,23 @@
 package network
 
 // In-process two-peer vectors for the §4.1 maintain-peer reconnect
-// lifecycle (EXTENSION-NETWORK Amendment 12 rung 3). These double as the Go
-// shape for PROPOSAL-CONTINUATION-LOST-ERROR-MARKER-MUST §4's reconnect-
-// chain vectors — rung 3 is the proposal's named "natural test subject":
-// the reconnect-failure path MUST leave lost-error markers (no-on_error
-// forward non-2xx) bound under the continuation handler's own authority.
+// lifecycle (EXTENSION-NETWORK Amendment 12 rung 3).
+//
+// These used to double as the Go shape for PROPOSAL-CONTINUATION-LOST-ERROR-
+// MARKER-MUST §4's reconnect-chain vectors, on the reading that "the
+// reconnect-failure path MUST leave lost-error markers (no-on_error forward
+// non-2xx)". That is retired: the on-disconnect continuation now carries
+// on_error routing to the managed-namespace backoff seam, so a failed
+// reconnect ROUTES instead of binding a marker per attempt. The proposal's §4
+// needs a different natural subject — a chain that fails with no on_error by
+// design, rather than one whose missing on_error was the defect. See
+// docs/validation/spec-issues/2026-07-16-backoff-one-shot-clobber.md.
 
 import (
 	"context"
+	"log"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -79,6 +87,9 @@ func startLifecyclePeer(t *testing.T, kp crypto.Keypair, listenAddr string, kcfg
 	engineCtx, cancelEngine := context.WithCancel(context.Background())
 
 	networkH := NewHandler()
+	if os.Getenv("NETDEBUG") != "" {
+		networkH.SetDebugLog(log.New(os.Stderr, "[net] ", log.Ltime|log.Lmicroseconds))
+	}
 	rec := &opRecorder{}
 
 	opts := []peer.Option{
@@ -137,7 +148,7 @@ func execNetworkOp(t *testing.T, lp *lifecyclePeer, operation string, params ent
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	status, result, err := lp.h.selfExecute(ctx, HandlerPattern, operation, params,
-		&types.ResourceTarget{Targets: []string{HandlerPattern}})
+		&types.ResourceTarget{Targets: []string{HandlerPattern}}, "")
 	if err != nil {
 		t.Fatalf("%s dispatch: %v", operation, err)
 	}
@@ -236,8 +247,12 @@ func TestMaintainPeerEstablishesGraph(t *testing.T) {
 	if len(res.Subscriptions) != 2 {
 		t.Fatalf("expected 2 lifecycle subscriptions, got %v", res.Subscriptions)
 	}
-	if !strings.HasPrefix(res.ChainID, "network/maintain/") {
-		t.Fatalf("chain_id %q lacks the network/maintain/ scheme", res.ChainID)
+	// §3.11: a chain_id is a SINGLE PATH SEGMENT. This used to assert the
+	// opposite — a "network/maintain/" prefix — which is the multi-segment
+	// form that forks the §3.10.6 marker tree into extra levels. Inverted
+	// rather than deleted: the old scheme must stay gone.
+	if strings.Contains(res.ChainID, "/") {
+		t.Fatalf("chain_id %q is not a single path segment (§3.11)", res.ChainID)
 	}
 
 	// The graph is in the tree: two inbox residents + the managed-namespace
@@ -358,7 +373,7 @@ func TestRestoreSubscriptionsDropsForeignDeadToken(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	status, result, err := a.h.selfExecute(ctx, HandlerPattern, "restore-subscriptions", restoreParams,
-		&types.ResourceTarget{Targets: []string{HandlerPattern}})
+		&types.ResourceTarget{Targets: []string{HandlerPattern}}, "")
 	if err != nil {
 		t.Fatalf("restore-subscriptions dispatch: %v", err)
 	}
@@ -446,9 +461,46 @@ func TestReconnectLifecycle(t *testing.T) {
 	waitFor(t, 10*time.Second, "reconnect dispatch", func() bool {
 		return a.rec.count("reconnect") >= 1
 	})
-	waitFor(t, 10*time.Second, "lost-error marker from failed reconnect", func() bool {
-		return len(a.p.LocationIndex().List("system/runtime/chain-errors/lost/")) >= 1
-	})
+	// The reconnect failure must NOT leave a lost-error marker: the
+	// on-disconnect continuation carries on_error, so the failure ROUTES to
+	// the managed-namespace backoff seam instead of being recorded as a lost
+	// chain dispatch. A reconnect failing against an offline peer is the
+	// expected path through this graph — the marker recorded the lifecycle
+	// working as though it were breaking, and produced one marker per attempt.
+	//
+	// This assertion is inverted from what it used to be ("wait for a
+	// lost-error marker from the failed reconnect"): the marker WAS the
+	// contract, and is now the regression.
+	if markers := a.p.LocationIndex().List("system/runtime/chain-errors/lost/"); len(markers) > 0 {
+		var paths []string
+		for _, m := range markers {
+			paths = append(paths, m.Path)
+		}
+		t.Fatalf("failed reconnect bound %d lost-error marker(s) despite on_error routing to the backoff seam: %v",
+			len(markers), paths)
+	}
+
+	// Retry-forever (ruling §1): the loop must still be firing after several
+	// backoff periods. It is not enough that ONE retry happens — the loop used
+	// to die after ~2 attempts and the peer never came back, which no test
+	// caught because re-establishing only ever needs a single retry to land.
+	//
+	// The mechanism was the one-shot backoff continuation: maintain-peer
+	// re-installed it from INSIDE the advance's dispatch, and the advance then
+	// consumed the remaining_executions it had already read, deleting the
+	// re-install. The continuation is standing now, so assert both halves:
+	// the loop keeps dispatching, and the graph stays resident.
+	{
+		before := a.rec.count("maintain-peer")
+		time.Sleep(1500 * time.Millisecond) // ≥3 periods at max=400ms
+		after := a.rec.count("maintain-peer")
+		if got := after - before; got < 3 {
+			t.Fatalf("retry loop stalled: only %d maintain-peer retries in 1.5s at min=100ms/max=400ms — want >=3 (retry-forever is normative)", got)
+		}
+		if _, resident := a.p.LocationIndex().Get(backoffPath(bID)); !resident {
+			t.Fatalf("backoff continuation vanished from %s while the peer is still down — the retry loop has nothing left to advance", backoffPath(bID))
+		}
+	}
 
 	// Restart B: same keypair, same port — the retry loop must find it and
 	// re-establish without operator involvement.
@@ -474,16 +526,28 @@ func TestReconnectLifecycle(t *testing.T) {
 		t.Fatalf("expected the 2 lifecycle subscriptions to survive, found %d", subs)
 	}
 
-	// The backoff loop settled: attempt counter reset on success.
+	// The backoff loop settled: the failure episode is closed. There is no
+	// attempt counter to reset — pacing is derived from failing_since — so the
+	// assertion is that no episode remains, in either copy. The tree's stamp
+	// clears by omission on the `connected` write; the in-memory fallback is
+	// cleared explicitly. Both must go: a surviving stamp would have the next
+	// failure resume a stale curve instead of starting a fresh one.
 	sess := a.h.getSession(bID)
 	if sess == nil {
 		t.Fatal("session lost across the outage")
 	}
 	sess.mu.Lock()
-	attempt := sess.attempt
+	localFailingSince := sess.failingSince
 	sess.mu.Unlock()
-	if attempt != 0 {
-		t.Fatalf("attempt counter %d after successful re-establish, want 0", attempt)
+	if localFailingSince != 0 {
+		t.Fatalf("session failing_since %d after successful re-establish, want 0 (episode closed)", localFailingSince)
+	}
+	if st, ok := a.h.readPeerStatus(sess); ok && st.FailingSince != 0 {
+		t.Fatalf("tree failing_since %d after successful re-establish, want cleared (status %q)",
+			st.FailingSince, st.Status)
+	}
+	if st, _ := a.h.retryState(sess, uint64(time.Now().UnixMilli())); st != (types.RetryState{}) {
+		t.Fatalf("derived retry state %+v after successful re-establish, want the zero state", st)
 	}
 	// The retry re-entered maintain-peer at least once (the backoff
 	// continuation's re-EXECUTE).
@@ -569,7 +633,7 @@ func TestStatusOp(t *testing.T) {
 	emptyRaw, _ := ecf.Encode(map[string]interface{}{})
 	emptyParams, _ := entity.NewEntity("primitive/any", cbor.RawMessage(emptyRaw))
 	sstatus, sresult, err := a.h.selfExecute(ctx, HandlerPattern, "status", emptyParams,
-		&types.ResourceTarget{Targets: []string{HandlerPattern}})
+		&types.ResourceTarget{Targets: []string{HandlerPattern}}, "")
 	if err != nil {
 		t.Fatalf("status dispatch: %v", err)
 	}
@@ -600,5 +664,69 @@ func TestStatusOp(t *testing.T) {
 	}
 	if row.PendingCount != 0 {
 		t.Fatalf("per-peer pending_count = %d, want 0", row.PendingCount)
+	}
+}
+
+// TestReconnectRetryExhausted drives the OPTIONAL §2.2 give-up end to end: with
+// max_attempts set, a peer that stays dead is eventually abandoned, and the
+// §3.13 status says so.
+//
+// The vector table (core/types) already proves the derivation decides to give
+// up at the right moment; this proves the handler ACTS on it — stops retrying,
+// and records why. Terminal state is `disconnected` + reason `retry-exhausted`:
+// no fourth enum value, because giving up is why the peer is disconnected, not
+// a different way of being disconnected.
+func TestReconnectRetryExhausted(t *testing.T) {
+	kpA, _ := crypto.Generate()
+	kpB, _ := crypto.Generate()
+	fixedAddr := freeTCPAddr(t)
+
+	a := startLifecyclePeer(t, kpA, "127.0.0.1:0", shortKeepalive())
+	b := startLifecyclePeer(t, kpB, fixedAddr, nil)
+	bID := b.p.PeerID()
+
+	minMs, maxMs, maxAttempts := uint64(100), uint64(200), uint64(3)
+	status, _ := execNetworkOp(t, a, "maintain-peer", mustEntity(t, types.MaintainRequestData{
+		PeerID:  string(bID),
+		Address: fixedAddr,
+		Backoff: &types.BackoffConfigData{
+			MinMs:       &minMs,
+			MaxMs:       &maxMs,
+			MaxAttempts: &maxAttempts,
+		},
+	}))
+	if status != 200 {
+		t.Fatalf("maintain-peer returned %d", status)
+	}
+	waitFor(t, 3*time.Second, "connected baseline", func() bool {
+		s, ok := statusOf(t, a, bID)
+		return ok && s == types.PeerStatusConnected
+	})
+
+	// Kill B and leave it dead. elapsed_to = 100, 300, 500ms, so the third
+	// retry fires ~500ms after the demotion and the fourth never happens.
+	b.stop()
+	waitFor(t, 10*time.Second, "retry-exhausted terminal write", func() bool {
+		sess := a.h.getSession(bID)
+		if sess == nil {
+			return false
+		}
+		st, ok := a.h.readPeerStatus(sess)
+		return ok && st.Status == types.PeerStatusDisconnected &&
+			st.Reason == types.PeerStatusReasonRetryExhausted
+	})
+
+	sess := a.h.getSession(bID)
+	st, _ := a.h.readPeerStatus(sess)
+	// failing_since survives the give-up: the episode was abandoned, not
+	// resolved, and when it began is what an operator wants beside "we stopped".
+	if st.FailingSince == 0 {
+		t.Fatalf("retry-exhausted status dropped failing_since — the abandoned episode has no start time")
+	}
+	// And the loop is actually stopped, not merely labelled.
+	before := a.rec.count("maintain-peer")
+	time.Sleep(800 * time.Millisecond) // >= 4 periods at max=200ms
+	if after := a.rec.count("maintain-peer"); after != before {
+		t.Fatalf("retry loop still firing after retry-exhausted: %d more maintain-peer dispatches in 800ms — the give-up labelled the status but did not stop the loop", after-before)
 	}
 }

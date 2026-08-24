@@ -68,17 +68,31 @@ func PathToURI(path string) string {
 // ExtractHandlerPath extracts the handler-relative path from a URI or absolute path.
 // For entity URIs, strips scheme and peer_id. For absolute paths, strips /{peer_id}/.
 // For peer-relative paths, returns as-is.
+//
+// The absolute-path case is detected by the V7 §1.4 rule — HasPrefix("/") —
+// NOT by whether NormalizePath happened to rewrite the input. Both forms reduce
+// to "/{peer_id}/rest" and are stripped identically; only a peer-relative path
+// (no leading "/") passes through.
+//
+// This used to strip only the scheme form, so an absolute path came back with
+// its /{peer_id}/ still attached — contradicting the contract above. Callers
+// then qualified the result (store.QualifyPath concatenates unconditionally),
+// producing "/{peer}//{peer}/rest", and the empty segment panicked
+// NamespacedIndex.canonicalize. Reachable from the WIRE: an EXECUTE whose `uri`
+// is an absolute path rather than an entity:// URI — a legitimate spelling,
+// since paths are absolute — crashed the peer serving it. The panic's own
+// comment claims external input is validated before reaching it; this was the
+// hole in that claim.
 func ExtractHandlerPath(uri string) string {
 	normalized := NormalizePath(uri)
-	if normalized != uri {
-		// Was a full URI — normalized is now /peer_id/path.
-		// Strip leading / and peer_id segment.
-		rest := normalized[1:] // strip leading /
-		idx := strings.Index(rest, "/")
-		if idx < 0 {
-			return rest // just peer_id, no path
-		}
-		return rest[idx+1:]
+	if !strings.HasPrefix(normalized, "/") {
+		return normalized // peer-relative — nothing to strip
 	}
-	return normalized
+	// "/{peer_id}/rest" (from either spelling) → "rest".
+	rest := normalized[1:]
+	idx := strings.Index(rest, "/")
+	if idx < 0 {
+		return rest // just peer_id, no path
+	}
+	return rest[idx+1:]
 }

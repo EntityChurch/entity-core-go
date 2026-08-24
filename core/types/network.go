@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	"math"
 
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
@@ -324,6 +325,23 @@ type BackoffConfigData struct {
 	MaxMs *uint64 `cbor:"max_ms,omitempty"`
 	// Strategy is "exponential" (default), "linear", or "constant".
 	Strategy string `cbor:"strategy,omitempty"`
+	// MaxAttempts optionally bounds the retry loop by count: once this many
+	// retries have FIRED, the relationship is abandoned. Unset ⇒ no bound.
+	MaxAttempts *uint64 `cbor:"max_attempts,omitempty"`
+	// MaxElapsedMs optionally bounds the retry loop by wall-clock: once this
+	// long has passed since failing_since, the relationship is abandoned.
+	// Unset ⇒ no bound.
+	//
+	// Both bounds are OPTIONAL and default to UNSET, which is retry-forever —
+	// the normative behaviour, because a peer offline for a week and coming
+	// back is the P2P norm and "give up after N" imports a client-server
+	// assumption that does not hold here. They exist for callers who genuinely
+	// know a relationship is disposable; they are not a recommended default.
+	//
+	// Exhaustion is NOT a fourth status: it terminates at `disconnected` with
+	// reason `retry-exhausted` (the §3.13 enum is three-state, and `reason` is
+	// the field that says why).
+	MaxElapsedMs *uint64 `cbor:"max_elapsed_ms,omitempty"`
 }
 
 // EffectiveMinMs returns min_ms with the §2.2 default applied.
@@ -357,6 +375,180 @@ func (d BackoffConfigData) ToEntity() (entity.Entity, error) {
 		return entity.Entity{}, err
 	}
 	return entity.NewEntity(TypeNetworkBackoffConfig, cbor.RawMessage(raw))
+}
+
+// DelayMs returns the §2.2 delay before retry k, where k is 1-INDEXED: k=1 is
+// the first retry after the failure, and DelayMs(0) is 0 (no retry, no wait).
+//
+//	constant     min
+//	linear       min · k
+//	exponential  min · 2^(k-1)
+//
+// all clamped to max (and max is raised to min when a config inverts them, so
+// the returned delay is never below min). Arithmetic saturates rather than
+// wrapping: a config with an absurd min cannot make a huge k produce a tiny
+// delay.
+func (d BackoffConfigData) DelayMs(k uint64) uint64 {
+	if k == 0 {
+		return 0
+	}
+	minMs := d.EffectiveMinMs()
+	maxMs := d.EffectiveMaxMs()
+	if maxMs < minMs {
+		maxMs = minMs
+	}
+	var ms uint64
+	switch d.EffectiveStrategy() {
+	case "constant":
+		ms = minMs
+	case "linear":
+		ms = saturatingMulU64(minMs, k)
+	default: // "exponential"
+		ms = minMs
+		for i := uint64(1); i < k; i++ {
+			if ms >= maxMs {
+				break
+			}
+			ms = saturatingMulU64(ms, 2)
+		}
+	}
+	if ms > maxMs {
+		ms = maxMs
+	}
+	return ms
+}
+
+// RetryState is the §2.2 retry pacing for one failure episode, DERIVED from
+// (failing_since, backoff config, now) — never stored. See DeriveRetryState.
+type RetryState struct {
+	// Attempt is how many retries have already FIRED this episode: 0 in the
+	// interval between the failure and the first retry coming due.
+	Attempt uint64
+	// NextAttemptAt is when the next retry comes due, ms since epoch. Zero
+	// when Exhausted — there is no next attempt.
+	NextAttemptAt uint64
+	// Exhausted reports that an OPTIONAL §2.2 bound (max_attempts /
+	// max_elapsed_ms) has been reached and the relationship is abandoned.
+	// Always false under the default config, which is retry-forever.
+	//
+	// Derived like everything else here, so "have we given up?" is a question
+	// about elapsed time rather than a state someone has to remember to write.
+	Exhausted bool
+}
+
+// DeriveRetryState computes the retry pacing for the failure episode that began
+// at failingSince (ms since epoch), as of nowMs.
+//
+// This is the whole of the retry state machine, as one pure function. Nothing
+// counts attempts, and nothing is written per attempt (§A4): the k-th retry is
+// due at a fixed offset from failing_since, so "which retry are we on" is a
+// question about elapsed time, answerable from a stamp the tree already holds.
+// Two things fall out of that. Restart-hammering dies — a process that restarts
+// beside a peer dead for a month re-derives a large Attempt and a max-length
+// wait, where an in-memory counter would reset to 0 and redial in min_ms. And
+// pacing converges: two peers reading the same failing_since agree on the
+// schedule without exchanging retry state.
+//
+// The schedule, with elapsed = nowMs - failingSince:
+//
+//	elapsed_to(0) = 0
+//	elapsed_to(k) = elapsed_to(k-1) + DelayMs(k)
+//	Attempt       = max{ k : elapsed_to(k) <= elapsed }
+//	NextAttemptAt = failingSince + elapsed_to(Attempt+1)
+//
+// The boundary is INCLUSIVE: at exactly elapsed_to(k) the k-th retry has fired.
+//
+// Worked example — the §2.2 defaults (exponential, min 1s, max 60s). Delays run
+// 1s, 2s, 4s, 8s…; elapsed_to runs 1s, 3s, 7s, 15s…. At elapsed = 5s: two
+// retries have fired (elapsed_to(2) = 3s <= 5s, elapsed_to(3) = 7s > 5s), so
+// Attempt = 2 and the third comes due at failingSince + 7s.
+//
+// No jitter in v1 — the schedule is a deterministic function of its inputs,
+// which is what makes it testable as a vector table and comparable across
+// impls. Jitter, if it lands, is a later opt-in that perturbs the output here.
+//
+// failingSince == 0 means no episode (the `connected` write clears the stamp),
+// and returns the zero RetryState. A degenerate config whose delay works out to
+// 0 also returns Attempt 0 with NextAttemptAt == failingSince — always due,
+// never counted — rather than looping forever counting instantaneous retries.
+func (d BackoffConfigData) DeriveRetryState(failingSince, nowMs uint64) RetryState {
+	if failingSince == 0 {
+		return RetryState{}
+	}
+	var elapsed uint64
+	if nowMs > failingSince {
+		elapsed = nowMs - failingSince
+	}
+	st := d.derivePacing(failingSince, elapsed)
+
+	// The OPTIONAL §2.2 bounds. Unset ⇒ retry-forever, so the default config
+	// never takes this branch.
+	if d.MaxAttempts != nil && st.Attempt >= *d.MaxAttempts {
+		return RetryState{Attempt: st.Attempt, Exhausted: true}
+	}
+	if d.MaxElapsedMs != nil && elapsed >= *d.MaxElapsedMs {
+		return RetryState{Attempt: st.Attempt, Exhausted: true}
+	}
+	return st
+}
+
+// derivePacing walks the schedule; see DeriveRetryState for the semantics.
+func (d BackoffConfigData) derivePacing(failingSince, elapsed uint64) RetryState {
+
+	// Walk the schedule. The delay sequence is non-decreasing and every
+	// strategy plateaus (constant from k=1; linear and exponential once they
+	// clamp at max), so as soon as two consecutive delays match, the rest of
+	// the schedule is arithmetic and the tail closes in one step. Without that,
+	// a peer dead for a month at a 60s cap would cost ~43k iterations here.
+	var (
+		attempt   uint64 // retries fired so far
+		cum       uint64 // elapsed_to(attempt)
+		prevDelay uint64
+	)
+	for k := uint64(1); ; k++ {
+		delay := d.DelayMs(k)
+		if delay == 0 {
+			return RetryState{Attempt: attempt, NextAttemptAt: failingSince + cum}
+		}
+		if k > 1 && delay == prevDelay {
+			// Plateaued: every remaining retry costs exactly `delay`, and
+			// cum <= elapsed still holds (we would have returned otherwise).
+			extra := (elapsed - cum) / delay
+			attempt += extra
+			cum = saturatingAddU64(cum, saturatingMulU64(extra, delay))
+			return RetryState{
+				Attempt:       attempt,
+				NextAttemptAt: saturatingAddU64(failingSince, saturatingAddU64(cum, delay)),
+			}
+		}
+		next := saturatingAddU64(cum, delay)
+		if next > elapsed {
+			return RetryState{
+				Attempt:       attempt,
+				NextAttemptAt: saturatingAddU64(failingSince, next),
+			}
+		}
+		cum = next
+		attempt = k
+		prevDelay = delay
+	}
+}
+
+func saturatingMulU64(a, b uint64) uint64 {
+	if a == 0 || b == 0 {
+		return 0
+	}
+	if a > math.MaxUint64/b {
+		return math.MaxUint64
+	}
+	return a * b
+}
+
+func saturatingAddU64(a, b uint64) uint64 {
+	if a > math.MaxUint64-b {
+		return math.MaxUint64
+	}
+	return a + b
 }
 
 // PingData is the system/network/ping payload (§5.2) — the params entity of

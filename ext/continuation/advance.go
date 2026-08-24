@@ -2,6 +2,7 @@ package continuation
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -16,8 +17,6 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 )
-
-
 
 // --- advance operation (spec §3.3–3.5) ---
 
@@ -98,6 +97,12 @@ func (h *Handler) advanceAtPath(ctx context.Context, hctx *handler.HandlerContex
 
 // advanceForward implements the forward advancement algorithm (spec §3.4).
 func (h *Handler) advanceForward(ctx context.Context, hctx *handler.HandlerContext, path string, cont types.ContinuationData, result cbor.RawMessage, status uint) (*handler.Response, error) {
+	// Spec step 6: one chain id for this advance — inherited from the
+	// advancing context, or generated when the trigger carried no chain.
+	// Resolved once here so the dispatch below and any marker bound for it
+	// share the same coordinate.
+	chainID := dispatchChainID(hctx)
+
 	// Error path: if delivery status >= 400 and on_error is set.
 	if status >= 400 && cont.OnError != nil {
 		// Mirror the wire-entry async delivery pattern (core/protocol/dispatch.go:844):
@@ -109,7 +114,7 @@ func (h *Handler) advanceForward(ctx context.Context, hctx *handler.HandlerConte
 			Operation:          cont.OnError.Operation,
 			Resource:           onErrorResource,
 			DispatchCapability: cont.DispatchCapability,
-		}, result)
+		}, result, chainID)
 		// A malformed on_error continuation (e.g. no dispatch_capability) is a
 		// genuine misconfiguration with an observable surface — surface 400.
 		if configErr, ok := dispatchErr.(*errInvalidContinuation); ok {
@@ -127,7 +132,7 @@ func (h *Handler) advanceForward(ctx context.Context, hctx *handler.HandlerConte
 			// Origination here is the moment we observe the on_error
 			// dispatch failed.
 			originTS := uint64(time.Now().UnixMilli())
-			h.bindLostErrorMarker(hctx, cont.OnError.URI, status, result, types.ChainErrorReasonOnErrorDispatchFailed, originTS, hash.Hash{})
+			h.bindLostErrorMarker(hctx, chainID, cont.OnError.URI, status, result, types.ChainErrorReasonOnErrorDispatchFailed, originTS, hash.Hash{})
 		}
 		// Only handle remaining_executions after the error-path dispatch
 		// (best-effort — the error was routed or recorded as lost).
@@ -135,7 +140,7 @@ func (h *Handler) advanceForward(ctx context.Context, hctx *handler.HandlerConte
 		return advancementOK()
 	}
 
-	dispatchResp, err := h.executeDispatch(ctx, hctx, cont, result)
+	dispatchResp, err := h.executeDispatch(ctx, hctx, cont, result, chainID)
 	// Configuration errors propagate as 400. Do NOT decrement on failure —
 	// the fire didn't complete.
 	if configErr, ok := err.(*errInvalidContinuation); ok {
@@ -172,7 +177,7 @@ func (h *Handler) advanceForward(ctx context.Context, hctx *handler.HandlerConte
 		// body's RejectedMarkerHash field. Zero hash when absent
 		// (omitzero on serialization).
 		mirror := extractRejectedMarkerFromResult(dispatchResultRaw)
-		h.bindLostErrorMarker(hctx, cont.Target, uint(dispatchResp.Status), dispatchResultRaw, reason, originTS, mirror)
+		h.bindLostErrorMarker(hctx, chainID, cont.Target, uint(dispatchResp.Status), dispatchResultRaw, reason, originTS, mirror)
 	}
 	// Only handle remaining_executions after successful dispatch.
 	h.handleRemainingExecutions(hctx, path, cont.RemainingExecutions)
@@ -234,11 +239,18 @@ func extractRejectedMarkerFromResult(origResult cbor.RawMessage) hash.Hash {
 // the marker can never affect control flow (adds visibility, not
 // delivery; MUST NOT trigger advancement/retry/any reactive behavior).
 // Go uses the original request ID as the {step_index} segment per v1.14.
-func (h *Handler) bindLostErrorMarker(hctx *handler.HandlerContext, failedURI string, origStatus uint, origResult cbor.RawMessage, reason string, originTimestampMs uint64, mirrorReceiverMarker hash.Hash) {
-	chainID := ""
-	if hctx.Bounds != nil {
-		chainID = hctx.Bounds.ChainID
-	}
+func (h *Handler) bindLostErrorMarker(hctx *handler.HandlerContext, chainID, failedURI string, origStatus uint, origResult cbor.RawMessage, reason string, originTimestampMs uint64, mirrorReceiverMarker hash.Hash) {
+	// chainID is the chain the failing dispatch actually carried, resolved once
+	// per advance by dispatchChainID (spec step 6: inherit or generate). It is
+	// passed in rather than re-derived so the marker cannot be filed under a
+	// different coordinate than the dispatch ran with.
+	//
+	// The rungs below are a backstop for a caller that reached here without a
+	// chain — no longer possible on the advance paths, since step 6 guarantees
+	// one. They are deliberately NOT removed: a coordinate invented from a
+	// request id is exactly how this defect stayed invisible across three
+	// impls for a cycle, so if one ever fires again it should be findable.
+	// Removing them would treat the symptom; the fix was upstream, at the seed.
 	if chainID == "" {
 		chainID = hctx.RequestID
 	}
@@ -319,7 +331,70 @@ func (e *errInvalidContinuation) Error() string { return e.msg }
 
 // executeDispatch applies transform, assembles params, and dispatches (spec §3.5).
 // Returns errInvalidContinuation for configuration errors in the continuation itself.
-func (h *Handler) executeDispatch(ctx context.Context, hctx *handler.HandlerContext, cont types.ContinuationData, rawResult cbor.RawMessage) (*handler.Response, error) {
+// dispatchChainID resolves the chain id for one advance, per the spec's
+// advance step 6: `context.chain_id or generate_id()`.
+//
+// Inherit when the advancing context carries a chain — the continuation is a
+// step IN that chain and must stay under its coordinate. Generate otherwise:
+// an advance triggered by something outside any chain (a subscription delivery
+// off a background write, the network handler's retry timer, an operator put)
+// still IS a chain, it is simply a root one, and it needs an identity before it
+// can dispatch or be recorded against.
+//
+// Called ONCE per advance so the dispatch and every marker bound for it agree
+// on the coordinate; a second call would mint a second id and file the marker
+// under a chain that never ran.
+func dispatchChainID(hctx *handler.HandlerContext) string {
+	if hctx != nil && hctx.Bounds != nil && hctx.Bounds.ChainID != "" {
+		return hctx.Bounds.ChainID
+	}
+	return generateChainID()
+}
+
+// generateChainID mints a fresh §3.11 chain id.
+//
+// A chain_id MUST be a SINGLE PATH SEGMENT — it is a segment of the §3.10.6
+// marker path, so any "/" would fork the marker tree into extra levels. It is
+// otherwise opaque: §3.11 declares no format and nothing parses one.
+func generateChainID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("chain-%d", time.Now().UnixNano())
+	}
+	return "chain-" + hex.EncodeToString(b[:])
+}
+
+// dispatchBounds builds the bounds for a continuation's dispatched EXECUTE:
+// the parent's, with ttl decremented, carrying chainID.
+//
+// The ttl/budget handling mirrors the dispatcher's own default path exactly
+// (core/protocol/local.go decrementBounds), because passing explicit bounds
+// opts OUT of that path — the only intended difference is that chain_id is
+// now always populated. A parentless advance yields bounds that carry the
+// chain id alone, which is the honest shape for a root chain: no inherited
+// ttl to decrement, but a real coordinate.
+//
+// Note the spec's step 6 also shows ttl/budget being reset to peer defaults
+// on each dispatch. Go decrements instead, which is the stricter reading and
+// is what every existing bounds test pins; that difference is orthogonal to
+// the chain id and is left alone here rather than smuggled in.
+func dispatchBounds(parent *types.BoundsData, chainID string) (*types.BoundsData, error) {
+	var child types.BoundsData
+	if parent != nil {
+		child = *parent
+		if child.TTL != nil {
+			if *child.TTL == 0 {
+				return nil, fmt.Errorf("TTL exhausted")
+			}
+			newTTL := *child.TTL - 1
+			child.TTL = &newTTL
+		}
+	}
+	child.ChainID = chainID
+	return &child, nil
+}
+
+func (h *Handler) executeDispatch(ctx context.Context, hctx *handler.HandlerContext, cont types.ContinuationData, rawResult cbor.RawMessage, chainID string) (*handler.Response, error) {
 	// Step 1: Transform (extract + select).
 	value := rawResult
 	if cont.ResultTransform != nil {
@@ -341,7 +416,7 @@ func (h *Handler) executeDispatch(ctx context.Context, hctx *handler.HandlerCont
 			// Dispatch proceeds best-effort with static-only params; the
 			// marker is purely informational (no reactive behavior, same
 			// contract as the other §3.4 reasons).
-			h.bindMergeValueNotMapMarker(hctx, cont.Target, value)
+			h.bindMergeValueNotMapMarker(hctx, chainID, cont.Target, value)
 		}
 		finalParams = merged
 	} else {
@@ -372,6 +447,30 @@ func (h *Handler) executeDispatch(ctx context.Context, hctx *handler.HandlerCont
 
 	// Build execute options.
 	var opts []handler.ExecuteOption
+
+	// Spec step 6: dispatch with bounds carrying the chain id —
+	//
+	//	dispatch(execute, bounds: {..., chain_id: context.chain_id or generate_id()})
+	//
+	// The `or generate_id()` half is the one that matters and the one Go did
+	// not have: this dispatch previously carried NO bounds at all, so a
+	// continuation whose trigger had no chain context (a subscription
+	// delivery off a background tree write, a timer, an operator put)
+	// dispatched with chain_id absent, and every downstream chain-error marker
+	// had to invent a coordinate. Generating here is what makes the marker's
+	// chain_id a real chain rather than a stringified request id.
+	//
+	// Additive: it fills a field that was empty and preserves the ttl/budget
+	// decrement the default dispatch path applies. Note that it also brings
+	// cap-rejected continuation dispatches into the §3.10.3 `rejected` marker
+	// scope (which fires only for chain dispatches) — previously they fell
+	// outside it for want of a chain id, which was the same defect wearing a
+	// different hat.
+	childBounds, boundsErr := dispatchBounds(hctx.Bounds, chainID)
+	if boundsErr != nil {
+		return handler.NewErrorResponse(429, "bounds_exceeded", boundsErr.Error())
+	}
+	opts = append(opts, handler.WithBounds(childBounds))
 
 	if resource != nil {
 		opts = append(opts, handler.WithResource(resource))
@@ -569,7 +668,7 @@ func (h *Handler) advanceJoinSlot(ctx context.Context, hctx *handler.HandlerCont
 			DispatchCapability:  join.DispatchCapability,
 		}
 
-		_, dispatchErr := h.executeDispatch(ctx, hctx, contData, cbor.RawMessage(receivedRaw))
+		_, dispatchErr := h.executeDispatch(ctx, hctx, contData, cbor.RawMessage(receivedRaw), dispatchChainID(hctx))
 
 		// Lifecycle.
 		if join.RemainingExecutions != nil {
