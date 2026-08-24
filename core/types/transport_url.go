@@ -117,23 +117,44 @@ func (ep TransportEndpoint) Validate() error {
 	return nil
 }
 
-// EffectiveContentURLPrefix returns the content-URL prefix a consumer
-// SHOULD use given a TransportEndpoint, applying the EXTENSION-NETWORK
-// §6.4 default-resolution rule (D-14): when content_url_prefix is absent,
-// derive it as `{tree_url_prefix}/content` (single-peer single-host
-// default). Split/dedup hosts (audit S4/S5) MUST emit content_url_prefix
-// explicitly; this default applies only to the absent case.
+// EffectiveContentURLPrefix returns the content-URL prefix a consumer uses
+// given a TransportEndpoint. `content_url_prefix` is REQUIRED; there is NO
+// derivation default. Returns the empty string when it is absent, which
+// every caller treats as a malformed endpoint.
 //
-// Returns the empty string if both prefixes are absent — callers should
-// treat that as a malformed endpoint.
+// CORRECTED 2026-08-13 — this function DERIVED `{tree_url_prefix}/content`
+// when `content_url_prefix` was absent, citing "the EXTENSION-NETWORK §6.4
+// default-resolution rule (D-14)". **No such rule exists in the landed
+// corpus**, and the shape's own ruling says the opposite in as many words:
+//
+//	EXTENSION-SUBSTITUTE §2.2 — "`content_url_prefix` is REQUIRED — pinned
+//	ruling. The two-prefix model exists precisely so content can be dedup'd
+//	cross-peer to a different host/prefix than the tree. A derivation
+//	default … silently defeats that case, so there is no default — the
+//	publisher MUST state it. **An impl that treats it as
+//	optional-with-derivation is non-conformant.**"
+//
+// EXTENSION-NETWORK §6.5.3 (Amendment 5) carries the same shape and the
+// same silence: three INDEPENDENTLY-configured prefixes that "MAY be
+// entirely separate origins," with no default stated anywhere.
+//
+// The citation was to a pre-consolidation audit item (the D-numbering), and
+// consolidation ruled the other way (Q2). So the comment stayed true-looking
+// while the rule beneath it inverted — and nothing caught it for the same
+// reason nothing caught anything else in this extension: it had zero
+// behavioural checks in any of the three impls. **Found by writing the first
+// one, and found pointing the wrong way**: the new check asserted the
+// derivation as required and FAILed core-py for refusing, which is the exact
+// inversion the 2026-08-07 precedent warns about (42 failures routed at
+// siblings, 39 were ours). core-py was right.
+//
+// The silent-failure mode this restores protection against is deployment
+// scenario S4: a publisher serving tree from one host and dedup'd content
+// from a shared bucket, whose consumer quietly fetches from
+// `{tree}/content` — an origin that may not exist, or worse, may exist and
+// serve someone else's bytes.
 func EffectiveContentURLPrefix(ep TransportEndpoint) string {
-	if ep.ContentURLPrefix != "" {
-		return ep.ContentURLPrefix
-	}
-	if ep.TreeURLPrefix == "" {
-		return ""
-	}
-	return strings.TrimRight(ep.TreeURLPrefix, "/") + "/content"
+	return ep.ContentURLPrefix
 }
 
 // BuildContentURL constructs the full URL a consumer GETs to fetch the

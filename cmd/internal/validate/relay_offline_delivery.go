@@ -75,7 +75,7 @@ func runRelayOfflineDelivery(ctx context.Context, clients []*PeerClient) []Check
 	r.Declare("od4_inner_bytes_byte_identical_to_direct",
 		"RELAY §3.1.1 byte-identity-to-direct: inner envelope bytes fetched from B's Mode-S store are byte-for-byte EQUAL to what A built (no decode-then-re-encode in the fallback storage path — the §9 opaque-inner discipline holds across :forward and :put storage paths)")
 	r.Declare("od5_receive_side_no_system_content_dependency",
-		"RULING-RELAY-RECEIVE-SIDE-FETCH-SURFACE §6.4 conformance gate: the full poll → fetch → decode → verify flow (od3+od4) completed using only system/tree (no system/content:get invocations). A receiver with tree+relay but WITHOUT system/content can consume Mode-S traffic.")
+		"EXTENSION-RELAY §4.2 conformance gate: the full poll → fetch → decode → verify flow (od3+od4) completed using only system/tree (no system/content:get invocations). A receiver with tree+relay but WITHOUT system/content can consume Mode-S traffic.")
 
 	if len(clients) < 3 {
 		for _, n := range []string{
@@ -269,7 +269,7 @@ func runRelayOfflineDelivery(ctx context.Context, clients []*PeerClient) []Check
 		entryHash := pr.Entries[0]
 
 		// 2) Two-hop fetch #1: tree:get on the store-entry's namespace-scoped
-		//    relay path per RULING-RELAY-RECEIVE-SIDE-FETCH-SURFACE.
+		//    relay path per EXTENSION-RELAY §4.2.
 		//    The namespace-scoped tree-read cap governs this read; no
 		//    system/content extension required on the receiver.
 		entryPath := types.RelayStorePath(storedAtNS, entryHash)

@@ -50,7 +50,7 @@ func runContinuationBounds(ctx context.Context, client *PeerClient) []CheckResul
 	r := NewCheckRunner(catContinuationBounds)
 
 	r.Declare("cb1_fresh_triggers_root_fresh",
-		"CONTINUATION §3.9 / PROPOSAL-BOUNDS §5 — a standing continuation advanced by K>max SEPARATE external triggers never accumulates depth (retry-forever stays unbounded)")
+		"CONTINUATION §3.9 / PROPOSAL-CONTINUATION-BOUNDS-PROPAGATION §5 — a standing continuation advanced by K>max SEPARATE external triggers never accumulates depth (retry-forever stays unbounded)")
 	r.Declare("cb2_self_referential_chain_brakes",
 		"CONTINUATION §3.9 — a self-referential advancement chain terminates at the ceiling (429 bounds_exceeded or suspend), never runs away")
 	r.Declare("cb3_keeps_serving_after_brake",

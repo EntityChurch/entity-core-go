@@ -65,14 +65,26 @@ import (
 func runRoute(ctx context.Context, clients []*PeerClient) []CheckResult {
 	r := NewCheckRunner(catRoute)
 
-	r.Declare("route1_setup", "publish D's TCP profile on B so the deliver-action check has a reachable terminal hop")
+	// CITATIONS CORRECTED 2026-08-13. Six of these eight named their VECTOR
+	// ID (ROUTE-EXACT-1, ROUTE-DEFAULT-1, …) but never the document carrying
+	// it, and one cited "PROPOSAL §3" — the pre-consolidation name. The
+	// vectors are real and live in EXTENSION-ROUTE §7.2; the matching
+	// semantics they assert are §3. Same shape as the SIGNALING block: the
+	// checks ran and passed throughout, and the register could attribute
+	// none of them, so ROUTE read as an uncovered extension.
+	//
+	// route1_setup is harness scaffolding, not a spec vector, and now says
+	// so — an unattributable check that IS attributable to nothing is
+	// different from one whose citation is merely missing, and the register
+	// should be able to tell them apart.
+	r.Declare("route1_setup", "harness setup (not a spec vector) — publish D's TCP profile on B so the deliver-action check has a reachable terminal hop")
 	r.Declare("route2_absent_table_no_route", "EXTENSION-ROUTE §7 ROUTE-ABSENT-TABLE-1 + ROUTE-NOROUTE-1: with no system/route entries (and no source route + no next_hop), :forward MUST 502 no_route (v1 default resolver is direct-or-no_route)")
-	r.Declare("route3_exact_forward", "ROUTE-EXACT-1: a system/route with exact Match + action=forward + Via picks Via as next-hop; forward-result.next_hop = the Via")
-	r.Declare("route4_metric_tiebreak", "ROUTE-METRIC-TIEBREAK-1: two exact routes for the same dest with different metrics; the lower-Metric route wins")
-	r.Declare("route5_expired_skipped", "ROUTE-EXPIRED-SKIP-1: a route whose ExpiresAt is past at match-time MUST be skipped; with no other matching route → no_route/502")
-	r.Declare("route6_default_route", "ROUTE-DEFAULT-1: `*` default-route Match resolves when no exact-match route exists")
-	r.Declare("route7_exact_beats_default", "PROPOSAL §3 longest-match-wins: an exact Match outranks `*` even when `*` has a competing route in the table")
-	r.Declare("route8_deliver_action", "ROUTE-DELIVER-1: action=deliver → terminal hop at this relay (next == destination); B's dispatcher delivers inner to D end-to-end")
+	r.Declare("route3_exact_forward", "EXTENSION-ROUTE §3/§7.2 ROUTE-EXACT-1: a system/route with exact Match + action=forward + Via picks Via as next-hop; forward-result.next_hop = the Via")
+	r.Declare("route4_metric_tiebreak", "EXTENSION-ROUTE §3/§7.2 ROUTE-METRIC-TIEBREAK-1: two exact routes for the same dest with different metrics; the lower-Metric route wins")
+	r.Declare("route5_expired_skipped", "EXTENSION-ROUTE §3/§7.2 ROUTE-EXPIRED-SKIP-1: a route whose ExpiresAt is past at match-time MUST be skipped; with no other matching route → no_route/502")
+	r.Declare("route6_default_route", "EXTENSION-ROUTE §3/§7.2 ROUTE-DEFAULT-1: `*` default-route Match resolves when no exact-match route exists")
+	r.Declare("route7_exact_beats_default", "EXTENSION-ROUTE §3 longest-match-wins: an exact Match outranks `*` even when `*` has a competing route in the table")
+	r.Declare("route8_deliver_action", "EXTENSION-ROUTE §3/§7.2 ROUTE-DELIVER-1: action=deliver → terminal hop at this relay (next == destination); B's dispatcher delivers inner to D end-to-end")
 
 	if len(clients) < 3 {
 		for _, n := range []string{

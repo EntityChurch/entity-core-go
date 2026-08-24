@@ -58,7 +58,25 @@ const (
 	// deliberately absent from RequestBindingSeedGrants().
 	OpSetIssuerPolicy = "set-issuer-policy"
 	OpGetIssuerPolicy = "get-issuer-policy"
+
+	// §6a.9.3, RULED 2026-08-13. The operator's decision on a manual-mode
+	// queued request. Both gated by types.CapRegistryIssueBinding — the
+	// capability §6a.9.1 already defines for the internal sign-and-publish
+	// act. NO NEW CAPABILITY: "approving a queued request *is* issuing a
+	// binding." Deliberately absent from RequestBindingSeedGrants().
+	OpApproveRequest = "approve-request"
+	OpDenyRequest    = "deny-request"
 )
+
+// DefaultPendingRetentionMillis is the default §6a.9.3 retention window for
+// DECIDED pending heads (approved / denied). Seven days: long enough that a
+// requester which lost its 202 can still learn the outcome across a weekend,
+// short enough that the queue stays an operator's inbox rather than a log.
+//
+// A `pending_review` head is NEVER GC-eligible under any window — it is live
+// queue state, and expiring it would silently drop a request an operator has
+// not yet seen.
+const DefaultPendingRetentionMillis uint64 = 7 * 24 * 60 * 60 * 1000
 
 // DefaultReplayWindowMillis is the default issued_at window inside which the
 // Issuer remembers nonces for replay defense. Ten minutes is the cohort-
@@ -78,6 +96,13 @@ func WithIssuerClock(c func() uint64) IssuerOption {
 // Issuer enforces nonce uniqueness per target_peer_id.
 func WithReplayWindow(ms uint64) IssuerOption {
 	return func(i *Issuer) { i.replayWindow = ms }
+}
+
+// WithPendingRetention overrides the §6a.9.3 retention window (ms) after
+// which a DECIDED pending head becomes GC-eligible. Zero keeps decided heads
+// forever. Never affects `pending_review` heads.
+func WithPendingRetention(ms uint64) IssuerOption {
+	return func(i *Issuer) { i.pendingRetention = ms }
 }
 
 // WithSeedPolicy carries an out-of-band-configured policy (a CLI flag, an
@@ -122,6 +147,10 @@ type Issuer struct {
 	clock        func() uint64
 	replayWindow uint64
 
+	// pendingRetention is the §6a.9.3 [SHOULD] retention window for decided
+	// pending heads, ms. Zero disables GC entirely (keep forever).
+	pendingRetention uint64
+
 	// seedPolicy is the out-of-band-armed policy awaiting a store to be
 	// written into (§6a.9.2 store-first). It is NEVER read on the request
 	// path — see SeedPolicy and loadPolicy.
@@ -144,9 +173,10 @@ func NewIssuer(kp crypto.Keypair, opts ...IssuerOption) (*Issuer, error) {
 // reaches Handle (typically right after peer.Build).
 func NewIssuerForSetup(opts ...IssuerOption) *Issuer {
 	i := &Issuer{
-		seenNonces:   make(map[string]uint64),
-		clock:        defaultClock,
-		replayWindow: DefaultReplayWindowMillis,
+		seenNonces:       make(map[string]uint64),
+		clock:            defaultClock,
+		replayWindow:     DefaultReplayWindowMillis,
+		pendingRetention: DefaultPendingRetentionMillis,
 	}
 	for _, opt := range opts {
 		opt(i)
@@ -201,6 +231,20 @@ func (i *Issuer) Manifest() types.HandlerManifestData {
 			OpGetIssuerPolicy: {
 				OutputType: types.TypeRegistryIssuerPolicy,
 			},
+			// §6a.9.3 — the operator's decision ops. Their OUTPUT type is
+			// pinned by the ruling's table (register-result on both); their
+			// INPUT type is not named anywhere in the section, so none is
+			// declared here. That matches py (`manifest.py` declares only
+			// `output_type` for approve-request) and is deliberate: declaring
+			// a name the spec does not carry would make the manifest assert a
+			// contract no peer is bound by. Routed as an ambiguity —
+			// spec-issues/2026-08-13-d-*.
+			OpApproveRequest: {
+				OutputType: types.TypeRegistryRegisterResult,
+			},
+			OpDenyRequest: {
+				OutputType: types.TypeRegistryRegisterResult,
+			},
 		},
 		InternalScope: []types.GrantEntry{
 			{
@@ -209,6 +253,7 @@ func (i *Issuer) Manifest() types.HandlerManifestData {
 				Operations: types.CapabilityScope{Include: []string{
 					OpRegisterRequest, OpRevokeRequest, OpRenewRequest,
 					OpSetIssuerPolicy, OpGetIssuerPolicy,
+					OpApproveRequest, OpDenyRequest,
 				}},
 			},
 		},
@@ -279,6 +324,10 @@ func (i *Issuer) Handle(ctx context.Context, req *handler.Request) (*handler.Res
 		return i.handleSetIssuerPolicy(ctx, req)
 	case OpGetIssuerPolicy:
 		return i.handleGetIssuerPolicy(ctx, req)
+	case OpApproveRequest:
+		return i.handleDecision(ctx, req, true)
+	case OpDenyRequest:
+		return i.handleDecision(ctx, req, false)
 	default:
 		return handler.NewErrorResponse(400, "unknown_operation",
 			IssuerHandlerPattern+" does not support operation: "+req.Operation)
@@ -355,8 +404,20 @@ func (i *Issuer) handleRegisterRequest(_ context.Context, req *handler.Request) 
 			fmt.Sprintf("name %q is already bound in this registry", normalized))
 	}
 
-	// Manual mode: queue (we accept but do not sign). Operator runs the
-	// curated CLI to issue the binding after out-of-band review.
+	// TTL resolution happens BEFORE the manual-mode branch on purpose. The
+	// queued head records the terms the operator is being asked to approve,
+	// so an approval weeks later issues those terms — not whatever the policy
+	// default happens to be at approval time. Resolving it only on the
+	// open/allowlist path would make an approved binding's TTL depend on when
+	// the operator got round to it.
+	ttl := body.RequestedTTL
+	if ttl == nil && policy.DefaultTTL != nil {
+		v := *policy.DefaultTTL
+		ttl = &v
+	}
+
+	// Manual mode: queue (we accept but do not sign). The operator decides
+	// via approve-request / deny-request (§6a.9.3).
 	if policy.Mode == types.IssuerPolicyModeManual {
 		i.rememberNonce(body.TargetPeerID, body.Nonce, body.IssuedAt)
 		// The queued answer rides in the RESULT, not in an error code.
@@ -378,11 +439,9 @@ func (i *Issuer) handleRegisterRequest(_ context.Context, req *handler.Request) 
 		// compute is not a handle, and nothing is fetchable at it. The
 		// request hash is a value the requester derived before it dispatched.
 		//
-		// The entity type and path are PROVISIONAL and flagged as such at
-		// their definition: §6a.9.3's approval protocol is specified nowhere,
-		// which is exactly why step 5 could say "queue" and stop. This is the
-		// minimum that makes the ruled handle resolve.
-		pendingHash, err := i.queueForReview(hctx, req.Params.ContentHash, normalized, body.TargetPeerID)
+		// The entity type and path were PROVISIONAL until 2026-08-13 — §6a.9.3
+		// now rules both, along with the by-request pointer and supersession.
+		pendingHash, err := i.queueForReview(hctx, normalized, body.TargetPeerID, body.Transports, ttl)
 		if err != nil {
 			return handler.NewErrorResponse(500, "internal_error", "queue for review: "+err.Error())
 		}
@@ -394,11 +453,6 @@ func (i *Issuer) handleRegisterRequest(_ context.Context, req *handler.Request) 
 	}
 
 	// Open / allowlist (passed admission) → sign + publish.
-	ttl := body.RequestedTTL
-	if ttl == nil && policy.DefaultTTL != nil {
-		v := *policy.DefaultTTL
-		ttl = &v
-	}
 	bindingHash, err := i.issueBinding(hctx, normalized, body.TargetPeerID, body.Transports, ttl)
 	if err != nil {
 		return handler.NewErrorResponse(500, "internal_error", "issue binding: "+err.Error())
@@ -412,7 +466,7 @@ func (i *Issuer) handleRegisterRequest(_ context.Context, req *handler.Request) 
 	bh := bindingHash
 	return handler.NewResponse(200, types.TypeRegistryRegisterResult,
 		types.RegistryRegisterResultData{
-			Status:      types.RegisterStatusRegistered,
+			Status:      types.RegisterStatusBound,
 			BindingHash: &bh,
 		})
 }
@@ -736,29 +790,266 @@ func (i *Issuer) SeedPolicy(cs store.ContentStore, li store.LocationIndex) error
 // what the curated `registry-issue-binding` CLI does — but in-process and
 // gated by the §6a.9 admission decision above. Writes three artifacts:
 // binding body, signature, by-name pointer.
-// queueForReview stores a pending-registration entity for a manual-mode
-// request and publishes it, returning the hash that goes back as
-// `pending_hash`. The handle has to resolve to something an operator or the
-// requester can fetch — that is the whole reason arch ruled against naming
-// the request itself.
-func (i *Issuer) queueForReview(hctx *handler.HandlerContext, requestHash hash.Hash, normalizedName, targetPeerID string) (hash.Hash, error) {
-	pendingEnt, err := types.PendingRegistrationData{
-		Request:      requestHash,
+// queueForReview stores a §6a.9.3 pending-binding for a manual-mode request
+// and publishes it, returning the hash that goes back as `pending_hash`. The
+// handle has to resolve to something an operator or the requester can fetch —
+// that is the whole reason arch ruled against naming the request itself.
+//
+// Writes TWO artifacts, following §6.3's body/pointer split rather than
+// inventing a second pattern: the immutable content-addressed body, and the
+// mutable by-request pointer a requester polls once it no longer holds the
+// 202 response.
+//
+// SUPERSESSION [MUST]: one pending head per (target_peer_id, name). A request
+// that queues while a head already exists for the pair replaces it whole —
+// the pointer repoints and the 202 carries the NEW pending_hash. Retries
+// carry a fresh nonce by construction, so each is a distinct request; without
+// this rule an operator's queue fills with duplicates of a single intent.
+// Replace-whole, never merge, same reason as §6a.9.2's policy write.
+//
+// The superseded BODY is deliberately left in the store: it is content-
+// addressed and immutable, and dropping it would destroy the audit trail the
+// retention rule below is written to preserve. Only the pointer moves.
+func (i *Issuer) queueForReview(hctx *handler.HandlerContext, normalizedName, targetPeerID string, transports []hash.Hash, ttl *uint64) (hash.Hash, error) {
+	pendingEnt, err := types.PendingBindingData{
 		Name:         normalizedName,
 		TargetPeerID: targetPeerID,
-		ReceivedAt:   i.clock(),
-		Status:       types.RegisterStatusPendingReview,
+		Transports:   transports,
+		RequestedTTL: ttl,
+		QueuedAt:     i.clock(),
+		Status:       types.PendingStatusPendingReview,
 	}.ToEntity()
 	if err != nil {
-		return hash.Hash{}, fmt.Errorf("encode pending registration: %w", err)
+		return hash.Hash{}, fmt.Errorf("encode pending binding: %w", err)
 	}
-	if _, err := hctx.Store.Put(pendingEnt); err != nil {
-		return hash.Hash{}, fmt.Errorf("store pending registration: %w", err)
+	if err := i.publishPending(hctx, pendingEnt, targetPeerID, normalizedName, "peer-issued-queue"); err != nil {
+		return hash.Hash{}, err
 	}
-	if _, err := hctx.TreeSet(types.PendingRegistrationPath(pendingEnt.ContentHash), pendingEnt.ContentHash, "peer-issued-queue"); err != nil {
-		return hash.Hash{}, fmt.Errorf("publish pending registration: %w", err)
-	}
+	i.gcDecidedPending(hctx)
 	return pendingEnt.ContentHash, nil
+}
+
+// publishPending writes a pending-binding body at its content-addressed path
+// and repoints the by-request pointer at it. Single site so the two paths
+// cannot drift apart — a body whose pointer names a different head is exactly
+// the "handle that resolves to nothing" §6a.9.3 exists to eliminate.
+func (i *Issuer) publishPending(hctx *handler.HandlerContext, pendingEnt entity.Entity, targetPeerID, normalizedName, op string) error {
+	if _, err := hctx.Store.Put(pendingEnt); err != nil {
+		return fmt.Errorf("store pending binding: %w", err)
+	}
+	if _, err := hctx.TreeSet(types.PendingBindingPath(pendingEnt.ContentHash), pendingEnt.ContentHash, op); err != nil {
+		return fmt.Errorf("publish pending binding body: %w", err)
+	}
+	if _, err := hctx.TreeSet(types.PendingBindingByRequestPath(targetPeerID, normalizedName), pendingEnt.ContentHash, op); err != nil {
+		return fmt.Errorf("publish by-request pointer: %w", err)
+	}
+	return nil
+}
+
+// loadPending fetches a pending-binding by the hash a caller handed us and
+// confirms it is the CURRENT HEAD for its (target_peer_id, name) pair.
+//
+// Two checks, and each closes a distinct hole:
+//
+//   - The body is read through its published POINTER, not straight out of the
+//     content store. A content store may hold entities this registry never
+//     published (an ingested envelope, a body copied from another peer's
+//     tree); deciding off raw store contents would let a caller approve
+//     something this registry never queued. The published pointer is the
+//     registry's own assertion that it minted this head.
+//
+//   - The by-request pointer must still name this exact hash. **A SUPERSEDED
+//     head is not decidable**, and this is the hole the first draft of this
+//     handler had: supersession repoints the by-request pointer but
+//     deliberately leaves the old body in place for audit, so an old
+//     `pending_review` body stays fetchable forever. Without this check,
+//     approving a superseded hash would mint a binding on terms the
+//     operator's queue no longer shows, and leave the pointer naming a
+//     different head than the one that was decided — an inconsistency no
+//     later read could untangle. §6a.9.3's "one pending head per pair" is a
+//     rule about what is DECIDABLE, not only about what is listed.
+//
+// Both failures answer `404 not_found`. §6a.9.3 pins a code for "names no
+// stored pending-binding" and none for "names a superseded one"; reusing the
+// pinned code with a message that names supersession is preferable to
+// inventing a cohort-divergent one. Routed — spec-issues/2026-08-13-d-*.
+func loadPending(hctx *handler.HandlerContext, h hash.Hash) (types.PendingBindingData, bool, bool) {
+	stored, ok := hctx.LocationIndex.Get(types.PendingBindingPath(h))
+	if !ok || stored != h {
+		return types.PendingBindingData{}, false, false
+	}
+	ent, ok := hctx.Store.Get(h)
+	if !ok || ent.Type != types.TypeRegistryPendingBinding {
+		return types.PendingBindingData{}, false, false
+	}
+	d, err := types.PendingBindingDataFromEntity(ent)
+	if err != nil {
+		return types.PendingBindingData{}, false, false
+	}
+	head, ok := hctx.LocationIndex.Get(types.PendingBindingByRequestPath(d.TargetPeerID, d.Name))
+	if !ok || head != h {
+		return d, false, true // found, but superseded (or GC'd)
+	}
+	return d, true, true
+}
+
+// gcDecidedPending applies §6a.9.3's retention [SHOULD]: a DECIDED head
+// becomes GC-eligible once the configured window has elapsed since it was
+// queued. A `pending_review` head is never eligible — it is live queue state,
+// and expiring it would silently drop a request no operator has seen, which
+// is the deliver-or-signal violation deny-is-not-a-delete already forbids.
+//
+// Only the by-request POINTER is removed. The body stays content-addressed
+// and auditable, exactly as the ruling specifies ("the body stays
+// content-addressed and auditable independently of the pointer").
+//
+// Opportunistic rather than timer-driven: it runs on the queue path, so the
+// sweep is bounded by the traffic that creates the entries it collects, and a
+// registry with no traffic has no queue to leak. No goroutine, no clock
+// dependency beyond the one the Issuer already carries.
+func (i *Issuer) gcDecidedPending(hctx *handler.HandlerContext) {
+	i.mu.Lock()
+	window := i.pendingRetention
+	i.mu.Unlock()
+	if window == 0 {
+		return
+	}
+	now := i.clock()
+	for _, e := range hctx.LocationIndex.List(types.PendingBindingByRequestPrefix) {
+		ent, ok := hctx.Store.Get(e.Hash)
+		if !ok || ent.Type != types.TypeRegistryPendingBinding {
+			continue
+		}
+		d, err := types.PendingBindingDataFromEntity(ent)
+		if err != nil || !d.Decided() {
+			continue
+		}
+		if now < d.QueuedAt || now-d.QueuedAt < window {
+			continue
+		}
+		hctx.TreeRemove(e.Path, "peer-issued-pending-gc")
+	}
+}
+
+// --- approve-request / deny-request (§6a.9.3) -----------------------------
+
+// handleDecision implements both operator decisions. They share every step
+// but the terminal one, and splitting them into two handlers duplicated the
+// 404 / already-decided / repoint logic — which is where a divergence between
+// approve and deny would hide.
+//
+// Gating: both ops carry types.CapRegistryIssueBinding via
+// IssueBindingSeedGrants. No NEW capability — §6a.9.3 is explicit that
+// "approving a queued request *is* issuing a binding," and minting a second
+// capability for the same act would let an operator hold one without the
+// other, which the ruling deliberately forecloses.
+func (i *Issuer) handleDecision(_ context.Context, req *handler.Request, approve bool) (*handler.Response, error) {
+	op := OpDenyRequest
+	if approve {
+		op = OpApproveRequest
+	}
+	hctx := req.Context
+	if hctx == nil || hctx.Store == nil || hctx.LocationIndex == nil {
+		return handler.NewErrorResponse(500, "internal_error",
+			op+" requires a store-backed handler context")
+	}
+
+	// Decoded by SHAPE, not by asserting req.Params.Type: §6a.9.3 names no
+	// input entity type for either op, and py declares none either. Asserting
+	// a type we invented would refuse a conformant peer.
+	body, err := types.RegistryDecisionRequestDataFromEntity(req.Params)
+	if err != nil {
+		return handler.NewErrorResponse(400, "invalid_params",
+			"decode "+op+" params: "+err.Error())
+	}
+	if body.PendingHash == (hash.Hash{}) {
+		return handler.NewErrorResponse(400, "invalid_params",
+			op+" requires a pending_hash")
+	}
+
+	pending, isHead, found := loadPending(hctx, body.PendingHash)
+	switch {
+	case !found:
+		return handler.NewErrorResponse(404, types.RegistryErrNotFound,
+			"no pending-binding is published at "+types.PendingBindingPath(body.PendingHash))
+	case !isHead:
+		return handler.NewErrorResponse(404, types.RegistryErrNotFound,
+			fmt.Sprintf("pending-binding %s is no longer the head for (%s, %q) — a later "+
+				"register-request superseded it (§6a.9.3, one head per pair), or its retention "+
+				"window elapsed; the body remains for audit but is not decidable",
+				types.PeerIdentityHashHex(body.PendingHash), pending.TargetPeerID, pending.Name))
+	}
+
+	// A second decision on either outcome. Checked BEFORE name_taken so a
+	// replayed approve of an already-approved request reports what actually
+	// happened (already decided) rather than blaming the name it itself bound.
+	if pending.Decided() {
+		return handler.NewErrorResponse(409, types.RegistryErrAlreadyDecided,
+			fmt.Sprintf("pending request is already %q — approve and deny are not "+
+				"idempotent-by-replay (§6a.9.3)", pending.Status))
+	}
+
+	decided := pending
+	if approve {
+		// [MUST] the queue is NOT a reservation. A registry that issued
+		// anyway would silently overwrite a live binding somebody else holds.
+		if _, exists := hctx.LocationIndex.Get(types.PeerIssuedByNamePath(pending.Name)); exists {
+			return handler.NewErrorResponse(409, types.RegistryErrNameTaken,
+				fmt.Sprintf("name %q was bound by someone else between queue and approval", pending.Name))
+		}
+		bindingHash, err := i.issueBinding(hctx, pending.Name, pending.TargetPeerID,
+			pending.Transports, pending.RequestedTTL)
+		if err != nil {
+			return handler.NewErrorResponse(500, "internal_error", "issue binding: "+err.Error())
+		}
+		bh := bindingHash
+		decided.Status = types.PendingStatusApproved
+		decided.BindingHash = &bh
+	} else {
+		decided.Status = types.PendingStatusDenied
+		decided.Reason = body.Reason
+	}
+
+	// Write the new head and repoint. §6a.9.3 [MUST]: deny is NOT a delete —
+	// a denied request leaves a reachable `denied` head, because a requester
+	// polling a vanished pointer cannot distinguish *denied* from *never
+	// received*, and that is a silent drop the substrate floor forbids.
+	//
+	// py's approve path removes the entry on issue (`registry.py:1325`,
+	// py `d6cfbda`); the ruling names that as the one place its shape is NOT
+	// ratified. Recorded here so the same shortcut is not re-derived.
+	decidedEnt, err := decided.ToEntity()
+	if err != nil {
+		return handler.NewErrorResponse(500, "internal_error", "encode decided pending: "+err.Error())
+	}
+	if err := i.publishPending(hctx, decidedEnt, pending.TargetPeerID, pending.Name, "peer-issued-"+op); err != nil {
+		return handler.NewErrorResponse(500, "internal_error", err.Error())
+	}
+
+	result := types.RegistryRegisterResultData{Status: types.RegisterStatusDenied}
+	if approve {
+		result = types.RegistryRegisterResultData{
+			Status:      types.RegisterStatusBound,
+			BindingHash: decided.BindingHash,
+		}
+	}
+	return handler.NewResponse(200, types.TypeRegistryRegisterResult, result)
+}
+
+// IssueBindingSeedGrants returns the GrantEntry slice authorizing the two
+// §6a.9.3 operator-decision ops, gated by types.CapRegistryIssueBinding.
+//
+// Deliberately NOT part of RequestBindingSeedGrants: a publisher that can
+// call register-request must not be able to approve its own queued request,
+// which would turn `manual` mode into `open` with extra steps.
+func IssueBindingSeedGrants() []types.GrantEntry {
+	return []types.GrantEntry{
+		{
+			Handlers:   types.CapabilityScope{Include: []string{IssuerHandlerPattern}},
+			Resources:  types.CapabilityScope{Include: []string{IssuerHandlerPattern + "/*"}},
+			Operations: types.CapabilityScope{Include: []string{OpApproveRequest, OpDenyRequest}},
+		},
+	}
 }
 
 func (i *Issuer) issueBinding(hctx *handler.HandlerContext, normalizedName, targetPeerID string, transports []hash.Hash, ttl *uint64) (hash.Hash, error) {

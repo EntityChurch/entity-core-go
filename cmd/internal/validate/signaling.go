@@ -42,12 +42,26 @@ const catSignaling = "signaling"
 // follow-up over the -peers convergence path.
 func runSignaling(ctx context.Context, clientA *PeerClient, addr string) []CheckResult {
 	r := NewCheckRunner(catSignaling)
-	r.Declare("signaling_authority", "brief §5.1/§7 — advertise + caller grant covers system/signaling")
-	r.Declare("signaling_limits_shape", "§4.5 — advertise-result carries the committed limits shape (ttl_seconds/max_blob_bytes/max_bucket_blobs)")
-	r.Declare("signaling_meet_tag", "brief §4.1/§4.5 — two peers derive a `tag` key and meet")
-	r.Declare("signaling_meet_secret", "brief §4.1/§4.5 — two peers derive a `secret` key and meet")
-	r.Declare("signaling_meet_lobby", "brief §4.1/§4.5 — two peers derive a `lobby` key and meet")
-	r.Declare("signaling_meet_pair", "brief §4.1/§4.5 — two peers derive a `pair` key and meet")
+	// CITATIONS CORRECTED 2026-08-13. Five of these six cited "brief §N" —
+	// a word that names no document, from when EXTENSION-SIGNALING was a
+	// design brief rather than a landed spec. The checks ran and passed the
+	// whole time; the conformance register simply could not attribute them
+	// to anything, so the extension read as uncovered in the inventory while
+	// being fully exercised. Naming the document is the entire fix.
+	//
+	// `signaling_authority` also moved SECTION, not just document: it cited
+	// §5.1, and EXTENSION-SIGNALING §5 is Bucket Semantics with no
+	// subsections. The capability-gated wrapped surface — what this check
+	// actually asserts — is §8.1 Admission (and §2.2 names "the capability
+	// model (§8)" for the wrapped surface). A citation that resolves to a
+	// document but lands on the wrong section is the harder version of this
+	// defect, because it looks resolved.
+	r.Declare("signaling_authority", "EXTENSION-SIGNALING §8.1/§7 — the wrapped surface is capability-gated: advertise + caller grant covers system/signaling")
+	r.Declare("signaling_limits_shape", "EXTENSION-SIGNALING §4.5 — advertise-result carries the committed limits shape (ttl_seconds/max_blob_bytes/max_bucket_blobs)")
+	r.Declare("signaling_meet_tag", "EXTENSION-SIGNALING §4.1/§4.5 — two peers derive a `tag` key and meet")
+	r.Declare("signaling_meet_secret", "EXTENSION-SIGNALING §4.1/§4.5 — two peers derive a `secret` key and meet")
+	r.Declare("signaling_meet_lobby", "EXTENSION-SIGNALING §4.1/§4.5 — two peers derive a `lobby` key and meet")
+	r.Declare("signaling_meet_pair", "EXTENSION-SIGNALING §4.1/§4.5 — two peers derive a `pair` key and meet")
 
 	// Peer B: a second, distinct identity connected to the same node. (A is the
 	// harness's primary client, already connected.) A fresh keypair — NOT A's —

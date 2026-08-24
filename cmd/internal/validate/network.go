@@ -346,8 +346,6 @@ func runNetwork(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs int
 		// — carrying no on_error — binds the §3.10 lost marker.
 		cp.kill()
 
-		var deferredWarn string
-
 		demoteDeadline := time.Duration(keepaliveEnvelopeMs)*time.Millisecond*3/2 + 10*time.Second
 		if _, lastState, found := pollPeerStatus(ctx, client, cp.hexID, demoteDeadline, func(d types.PeerStatusData) bool {
 			return d.Status != types.PeerStatusConnected
@@ -379,18 +377,37 @@ func runNetwork(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs int
 		// pacing is actually derived from, so asserting it tests the mechanism
 		// rather than a by-product of it.
 		//
-		// WARN, not FAIL, when absent: Go leads here and the sibling catch-up is
-		// drafted but unsent, so Rust/Python have no `failing_since` yet. A FAIL
-		// would gate the cohort on a routing that has not happened. This is NOT
-		// permissive-forever — it tightens to FAIL once the seats land §2.
+		// FAIL when absent — TIGHTENED 2026-08-13, on the condition this comment
+		// itself set.
+		//
+		// It read: "Go leads here and the sibling catch-up is drafted but unsent,
+		// so Rust/Python have no `failing_since` yet … it tightens to FAIL once
+		// the seats land §2." Both seats have landed it, and the claim was stale
+		// rather than merely cautious — it survived because a WARN is invisible
+		// in a green run, so nothing ever forced a re-measure.
+		//
+		// Measured 3-of-3 on the wire, not read from a report:
+		//   go      validate-complete.sh, both home formats
+		//   rust    1152d35 — network_reconnect_anchor PASS, 5/5 0 skips
+		//   python  ad0ef98 — network_reconnect_anchor PASS, 5/5 0 skips
+		// (`-keepalive-envelope-ms 2000` against a peer started
+		//  `--keepalive 1000,500,2`; source: rust core/peer/src/peer_status.rs:135,
+		//  py packages/entity-core/.../peer/remote.go:489 stamping the episode.)
+		//
+		// The sibling measurement was itself unavailable until today: the
+		// envelope precondition rejected a correctly-configured harness at the
+		// boundary, so this check skipped against every peer from a direct
+		// `validate-peer` run and the staleness could not be seen. See
+		// RequireKeepaliveEnvelope.
 		failing, _, fok := pollPeerStatus(ctx, client, cp.hexID, demoteDeadline, func(d types.PeerStatusData) bool {
 			return d.FailingSince != 0
 		})
 		episodeRecorded := fok && failing.FailingSince != 0
 		if !episodeRecorded {
-			deferredWarn = fmt.Sprintf("target's §3.13 status for the killed peer carries no failing_since within %v — "+
-				"the failure episode has no durable record, so §2.2 retry pacing cannot be derived and cannot survive a restart "+
-				"(expected for a peer that has not yet landed the §2 ruling; Go-side catch-up pending)", demoteDeadline)
+			return FailCheck(fmt.Sprintf("target's §3.13 status for the killed peer carries no failing_since within %v — "+
+				"the failure episode has no durable record, so §2.2 retry pacing cannot be derived and cannot survive a restart. "+
+				"All three impls stamp it as of 2026-08-13 (go, rust 1152d35, python ad0ef98, each measured on the wire), "+
+				"so this is a regression rather than a not-yet-landed surface", demoteDeadline))
 		}
 
 		// 3. Restart the counterpart on the same addr+identity; the paced
@@ -424,9 +441,6 @@ func runNetwork(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs int
 			return FailCheck(fmt.Sprintf("a lost-error marker with reason connection_failed is bound at %s (coordinate %s/%s) — the failed reconnect was recorded as a lost chain dispatch instead of routing through the on-disconnect continuation's on_error to the backoff seam, which binds one marker per retry for a peer that is merely away", mp, m.ChainID, m.StepIndex))
 		}
 
-		if deferredWarn != "" {
-			return WarnCheck("reconnect anchor: kill → demoted off connected → restart → autonomous re-establish to connected (the §4.1 contract holds, and the failed reconnect bound no lost marker), but " + deferredWarn)
-		}
 		return PassCheck(fmt.Sprintf("reconnect anchor: kill → demoted off connected (failure episode recorded, failing_since=%d) → restart → autonomous re-establish to connected, episode cleared; failed reconnect routed via on_error, no lost marker bound", failing.FailingSince))
 	})
 

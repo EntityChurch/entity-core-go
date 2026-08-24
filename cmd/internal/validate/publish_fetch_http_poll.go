@@ -84,7 +84,7 @@ type publishFetchEntry struct {
 func runPublishFetchHTTPPoll(ctx context.Context) []CheckResult {
 	r := NewCheckRunner(catPublishFetchHTTPPoll)
 
-	r.Declare("v1_publish_manifest_served", "PROPOSAL-PEER-MANIFEST-STATIC-HANDSHAKE §4 + NETWORK §6.5.3.1 — publisher mints a system/peer/published-root and PollHandler MANIFEST_GET serves it (Tier-1 end-to-end first step)")
+	r.Declare("v1_publish_manifest_served", "NETWORK §6.5.3.1 — publisher mints a system/peer/published-root and PollHandler MANIFEST_GET serves it (Tier-1 end-to-end first step)")
 	r.Declare("v2_manifest_signature_verified", "V7 §5.2 / PEER-MANIFEST §4 — Outbound with pinned identity walks the invariant-pointer signature carriage and reaches Verified=true")
 	r.Declare("v3_tree_leaf_pointer_resolves", "NETWORK §6.5.3.1 Amendment 6 — TREE_GET for each authored peer-relative path returns the bound system/hash pointer at that leaf")
 	r.Declare("v4_content_fetch_hash_verified", "NETWORK §6.5.3.1 — CONTENT_GET /content/{hex(H)} returns byte-equal entity that re-hashes to the requested hash (Mechanism A trust gate fires positively)")

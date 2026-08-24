@@ -1347,15 +1347,27 @@ func wirePeerIssuedRegistries(spec string, allowHTTP bool, registryH *registry.H
 			return fmt.Errorf("peer %q: build identity entity: %w", pidStr, err)
 		}
 
-		// httplive.Outbound dial profile — minimal TransportEndpoint with
-		// the TreeURLPrefix. ContentURLPrefix defaults to `<tree>/content`
-		// at the call site (EffectiveContentURLPrefix).
+		// httplive.Outbound dial profile. ContentURLPrefix is set EXPLICITLY
+		// — it used to be left empty and derived as `<tree>/content` by
+		// EffectiveContentURLPrefix, which was the one call site in this repo
+		// relying on that derivation.
+		//
+		// The derivation was removed 2026-08-13: EXTENSION-SUBSTITUTE §2.2
+		// pins `content_url_prefix` as REQUIRED with no default and calls an
+		// impl that derives it "non-conformant." The value below is the same
+		// URL the derivation produced, so behaviour against a fixture
+		// registry is unchanged — the difference is that the commitment is
+		// now STATED by the thing that knows it (this flag builds the profile
+		// for a registry we were handed a single prefix for) instead of
+		// guessed by the consumer, which is exactly the distinction §2.2 is
+		// protecting for the split-host deployment case.
 		profile := types.HTTPPollProfileData{
 			PeerID:        pidStr,
 			TransportType: "http-poll",
 			Endpoint: types.TransportEndpoint{
-				TreeURLPrefix: urlPrefix,
-				ContentLayout: types.ContentLayoutFlat,
+				TreeURLPrefix:    urlPrefix,
+				ContentURLPrefix: strings.TrimRight(urlPrefix, "/") + "/content",
+				ContentLayout:    types.ContentLayoutFlat,
 			},
 			SupportedOps: []string{types.OpTreeGet, types.OpContentGet},
 		}

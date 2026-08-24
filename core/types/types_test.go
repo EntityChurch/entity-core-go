@@ -503,7 +503,11 @@ func TestRegistryCoreTypes(t *testing.T) {
 	// release-result, status, peer-summary, close-request) → 207.
 	// EXTENSION-NETWORK Amendment 13 §6.7 reachability facts add the three
 	// (observe-address-result, check-reachability-result, candidate) → 210.
-	if len(defs) != 211 {
+	// EXTENSION-REGISTRY v1.3 §6a.9.3 adds system/registry/pending-binding
+	// → 211. (Only the one: the section's approve-request / deny-request
+	// input types are not named by the spec, so go does not publish a
+	// definition for them — see RegisterCoreTypes.)
+	if len(defs) != 212 {
 		names := make([]string, len(defs))
 		for i, d := range defs {
 			names[i] = d.Name
@@ -578,8 +582,11 @@ func TestReflectedTypesMatchSpec(t *testing.T) {
 	// EXTENSION-NETWORK Amendment 12 rung 3 adds the §2 handler-operation
 	// seven (maintain-request, maintain-result, release-request,
 	// release-result, status, peer-summary, close-request) → 212 total.
+	// EXTENSION-NETWORK Amendment 13 §6.7 reachability facts add three → 215.
+	// EXTENSION-REGISTRY v1.3 §6a.9.3 adds system/registry/pending-binding
+	// → 216 total.
 	all := r.All()
-	if len(all) != 216 {
+	if len(all) != 217 {
 		names := make([]string, len(all))
 		for i, d := range all {
 			names[i] = d.Name

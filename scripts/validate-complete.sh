@@ -182,25 +182,41 @@ fi
 # class as the SHA-384 gate nobody read (G-9) and the core profile nothing ran
 # (G-2). If it is not in the gate, it is not a check.
 #
-# TWO CHECKS, AND THEY ASSERT DIFFERENT THINGS. Running only the first is what
-# let the corpus drift:
-#   v767-corpus-verify  — the artifact is the one we expect (pinned sha, decodes,
-#                         every crypto vector re-derives).
-#   v767-corpus-build -check — the artifact is what the SOURCE produces, and the
-#                         two copies agree. Writes nothing.
+# TWO ASSERTIONS, AND THEY ARE DIFFERENT. Running only the first is what let the
+# corpus drift:
+#   artifact-is-expected     — the committed .cbor matches its pinned sha256.
+#   source-produces-artifact — re-encoding the committed .diag reproduces it.
 # The F16 correction landed in the .cbor and never in the .diag; both files
 # stayed internally plausible and the corpus verified 52/0 against itself for
-# two months. Only the second check can see that.
-echo "==> PASS 0 — v767 conformance corpus (static; no peer)"
+# two months. Only the second assertion can see that.
+#
+# Both now live in ONE contract (`cmd/internal/corpus`) applied to EVERY
+# registered corpus, rather than in one corpus's builder. See CONFORMANCE-
+# STANDARD.md §2.
+echo "==> PASS 0 — the conformance corpora (static; no peer)"
 RC0=0
 if [ -d "../entity-core-protocol/specs/test-vectors/v767" ]; then
     set +e
-    go run ./cmd/v767-corpus-verify
+    # ONE CONTRACT, EVERY CORPUS. `corpus-check` holds each registered corpus to
+    # the same three assertions — artifact-is-expected (pinned sha),
+    # source-produces-artifact (re-encode), and copies-agree. Registry:
+    # cmd/internal/corpus.
+    #
+    # This replaced a per-corpus process. crypto-agility had both gates while
+    # ecf-conformance — 71 vectors against 13, and the more widely vendored —
+    # had NEITHER: its only test read the .cbor and never the .diag, so the
+    # exact drift that hid for two months on the first corpus was structurally
+    # undetectable on the second. Adding a corpus is now a registry entry, not
+    # a third process.
+    go run ./cmd/corpus-check
     RC0=$?
     if [ "$RC0" -eq 0 ]; then
-        echo
-        echo "    source-produces-artifact:"
-        go run ./cmd/v767-corpus-build -check
+        echo "    crypto-agility depth (re-derives every crypto vector):"
+        # Layered ON TOP of the contract, not instead of it: this one decodes
+        # the agility corpus and re-derives all 13 vectors' hashes, signatures
+        # and key material. Corpus-specific by nature — the contract is the
+        # floor every corpus meets, this is the depth one corpus has.
+        go run ./cmd/v767-corpus-verify
         RC0=$?
     fi
     set -e
@@ -209,6 +225,36 @@ else
     echo "    This is the spec repo's artifact; without it there is nothing to verify."
     echo "    Clone the sibling to run this pass. Not an allowlisted skip: it is an"
     echo "    absent input, and it is reported rather than silently passed."
+fi
+echo
+
+# PASS 0b — the conformance register, also static, also before any peer.
+#
+# The corpus checks assert that the VECTORS are what they claim. This asserts
+# that the CHECKS are: every check declares a spec citation, and this resolves
+# each one against the live spec trees. A citation to a section that does not
+# exist is a check whose grounds cannot be read — the oracle still runs it, the
+# peer still passes or fails it, and nobody can say against what.
+#
+# It is a RATCHET, not a pass/fail on the whole register: a large minority of
+# citations do not resolve today (proposals, guides, sections with no document
+# named), and those are pinned in the committed baseline. What fails the gate is
+# a NEW one — a citation that stops resolving because the spec moved under it,
+# which is precisely the drift no amount of review catches.
+#
+# Runs against the sibling spec trees, read-only. Skipped, loudly, without them.
+echo "==> PASS 0b — conformance register (static; no peer)"
+RC0B=0
+if [ -d "../entity-core-protocol/specs" ] && [ -d "../entity-system-architecture/specs" ]; then
+    set +e
+    go run ./cmd/conformance-register -check
+    RC0B=$?
+    set -e
+else
+    echo "    SKIPPED — a sibling spec tree is not present."
+    echo "    The register resolves citations against ../entity-core-protocol and"
+    echo "    ../entity-system-architecture. Without them every citation would read as"
+    echo "    unresolved, which is a missing checkout reported as a thousand findings."
 fi
 echo
 
@@ -302,7 +348,21 @@ T4_UNSATISFIABLE="serving_mode.content_get_out_of_scope_404,serving_mode.content
 # categories, which read that same surface. Keeping them on separate peers
 # keeps one pass from resolving the other's leftovers — the same reason the
 # peer-issued fixture is pinned with `-wire` rather than the cohort bundle.
-PASS3_ONLY="registry_issuer"
+#
+# `substitute` joins it for a DIFFERENT and sharper reason: pass 1's target is
+# started with `--peer-issued-registry <pid>@http://127.0.0.1:…`, and
+# peer-manager turns an http:// pin into `-substitute-allow-http` — a flag
+# entity-peer itself documents as "insecure; testing only". So pass 1's peer
+# deliberately accepts plaintext substitute fetches, and TV-CDN-TLS-1
+# (`https_required_at_consume`) correctly FAILS it.
+#
+# That is not a false positive and the check is not softened for it. **A peer
+# running --substitute-allow-http is not TLS-conformant, and ours was — we
+# simply had no check that could say so until 2026-08-13.** The right home is a
+# peer that is not deliberately insecure, and pass 3's registry target is
+# started without the flag. Scoring it there measures the real posture instead
+# of scoring the fixture's.
+PASS3_ONLY="registry_issuer,substitute"
 
 echo "==> PASS 1/2 — every surface, closure-of-signed-root scope"
 set +e
@@ -417,13 +477,23 @@ go run ./cmd/validate-peer \
     "${HASH_ARGS_VALIDATE[@]}" \
     -category registry_issuer
 RC3=$?
+# EXTENSION-SUBSTITUTE §7 — the http convention, on the same peer for the
+# reason recorded at PASS3_ONLY: this target is not started with
+# --substitute-allow-http, so the TLS refusal means what it says. `-category`
+# takes one name, hence the second invocation rather than a list.
+go run ./cmd/validate-peer \
+    -addr "$REG_ADDR" \
+    "${HASH_ARGS_VALIDATE[@]}" \
+    -category substitute
+RC3S=$?
+if [ "$RC3" -eq 0 ]; then RC3=$RC3S; fi
 set -e
 if [ "${KEEP:-0}" != "1" ]; then
     go run ./cmd/peer-manager stop "$REG_TARGET" >/dev/null 2>&1 || true
 fi
 
 echo
-echo "PASS 0 exit $RC0 (v767 corpus, static) · PASS 1 exit $RC1 (all surfaces, closure scope) · PASS 1b exit $RC1B (core profile, same target) · PASS 2 exit $RC2 (serving_mode, namespace scope) · PASS 3 exit $RC3 (registry_issuer, registry posture)"
+echo "PASS 0 exit $RC0 (conformance corpora, static) · PASS 0b exit $RC0B (conformance register, static) · PASS 1 exit $RC1 (all surfaces, closure scope) · PASS 1b exit $RC1B (core profile, same target) · PASS 2 exit $RC2 (serving_mode, namespace scope) · PASS 3 exit $RC3 (registry_issuer, registry posture)"
 echo "Zero failures AND zero skips is the bar for passes 1, 2 and 3 — read each COVERAGE"
 echo "block for anything that did not run, and close it rather than allowlisting it."
 echo
@@ -432,5 +502,5 @@ echo "matters: they are PROFILE-KEYED skips — the extension surface that sits 
 echo "v7.72 §9.0 core tier by definition, exempted in HasFailures via isProfileKeyedSkip,"
 echo "NOT by an -allow-skip allowlist. A skip there that is not profile-keyed still fails"
 echo "the pass. Read 1b's exit code, not its skip count."
-[ "$RC0" -eq 0 ] && [ "$RC1" -eq 0 ] && [ "$RC1B" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 0 ] || exit 1
+[ "$RC0" -eq 0 ] && [ "$RC0B" -eq 0 ] && [ "$RC1" -eq 0 ] && [ "$RC1B" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 0 ] || exit 1
 exit 0

@@ -146,10 +146,13 @@ func runCompute(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("v310_f5_eval_capability_without_resource", "COMPUTE §4.1 F5")
 	r.Declare("v310_f5_install_capability_without_resource", "COMPUTE §3.3 F5")
 
-	// PROPOSAL-COHERENT-CAPABILITY-AUTHORITY §10 conformance vectors.
-	r.Declare("cp1_install_static_literal_adversary_rejected", "COHERENT-CAP §6.1")
-	r.Declare("cp1_install_static_literal_self_issued_accepted", "COHERENT-CAP §6.1")
-	r.Declare("cp1_install_dynamic_capability_deferred", "COHERENT-CAP §6.1")
+	// CP1 — re-cited 2026-08-13 to the LANDED sections (arch
+	// ROUTING-2026-08-13-f §2, read at arch `7a71dea`). These named
+	// PROPOSAL-COHERENT-CAPABILITY-AUTHORITY, now in the legacy tree's
+	// `proposals/implemented/`; the fold is in EXTENSION-COMPUTE today.
+	r.Declare("cp1_install_static_literal_adversary_rejected", "EXTENSION-COMPUTE §3.3 (install-audit) — 403 embedded_cap_unauthorized")
+	r.Declare("cp1_install_static_literal_self_issued_accepted", "EXTENSION-COMPUTE §3.3 (install-audit) + §11.1 MUST")
+	r.Declare("cp1_install_dynamic_capability_deferred", "EXTENSION-COMPUTE §3.3 — dynamic-capability deferral")
 
 	// v3.14 standard-IR floor (PROPOSAL-COMPUTE-STANDARD-IR-FLOOR).
 	// N.1: compute/index, compute/length (§2.2).
@@ -1958,10 +1961,26 @@ func runCompute(ctx context.Context, client *PeerClient) []CheckResult {
 	})
 
 	// CP1 positive control: install of a compute/apply whose static-literal
-	// capability is rooted in the installer (granter chain contains the
-	// EXECUTE author) → 200. Pairs with the adversary test above: without this
-	// a peer that 4xx's all static-literal caps would still pass the adversary
-	// case, masking over-rejection of legitimate chains.
+	// capability has the installer IN the granter chain → 200. Pairs with the
+	// adversary test above: without this a peer that 4xx's all static-literal
+	// caps would still pass the adversary case, masking over-rejection of
+	// legitimate chains.
+	//
+	// AND IT IS THE DISCRIMINATING CASE, which this comment used to describe
+	// backwards. It read "rooted in the installer" — the chain-*root* reading
+	// V7 §5.5 does not require and arch retired from EXTENSION-SUBSCRIPTION
+	// §1.1/§11.1 and EXTENSION-COMPUTE at `7a71dea`. What
+	// CreateDispatchCapability actually mints is parented at the CONNECTION
+	// cap, whose granter is the REMOTE peer (client.go: capEntity comes from
+	// the authenticate response's grant token). So the chain roots at the
+	// remote peer and the installer is the leaf granter — in-chain, NOT the
+	// root.
+	//
+	// That means this check already asserts the corrected rule: a peer
+	// implementing the superseded chain-root reading rejects this cap and goes
+	// red here. The code was right and only the sentence was wrong — the same
+	// prose-vs-pseudocode split arch just fixed in the two specs, reproduced in
+	// our own comment.
 	r.Run("cp1_install_static_literal_self_issued_accepted", func() CheckOutcome {
 		if out, ok := r.Require("handler_op_install"); !ok {
 			return out
@@ -2010,7 +2029,7 @@ func runCompute(ctx context.Context, client *PeerClient) []CheckResult {
 		}
 		respData, _ := types.ExecuteResponseDataFromEntity(env.Root)
 		if respData.Status >= 200 && respData.Status < 300 {
-			return PassCheck("install accepted with self-issued static-literal capability (CP1 chain-root pass)")
+			return PassCheck("install accepted with static-literal capability whose chain has the installer in-chain as leaf granter, rooted at the remote peer's connection cap (CP1 in-chain pass, V7 §5.5)")
 		}
 		if code, codeErr := decodeResultErrorCode(respData); codeErr == nil && code == "embedded_cap_unauthorized" {
 			return FailCheck(fmt.Sprintf("CP1 over-rejection: self-issued static-literal cap surfaced embedded_cap_unauthorized at status=%d — peer is rejecting valid chains, not just adversarial ones", respData.Status))

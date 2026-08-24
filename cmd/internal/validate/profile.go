@@ -2,7 +2,7 @@ package validate
 
 // Conformance profile (V7 v7.72 §9.0).
 //
-// `core` runs the 14-category core-profile category set; extension-only
+// `core` runs the 16-category core-profile category set; extension-only
 // categories skip with diagnostic. The two profiles are publication
 // contracts: `core` scores against the 53-type floor (§9.5), the
 // CORE-TREE-* vector set (§9.5a), and the core handler set; `full`

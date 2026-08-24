@@ -24,30 +24,91 @@ const (
 	TypeRegistryRegisterRequest = "system/registry/register-request"
 	TypeRegistryRegisterResult  = "system/registry/register-result"
 
-	// TypeRegistryPendingRegistration is the entity `pending_hash` names.
+	// TypeRegistryPendingBinding is the entity `pending_hash` names —
+	// RULED 2026-08-13, EXTENSION-REGISTRY v1.3 §6a.9.3 (arch `f162953`).
 	//
-	// PROVISIONAL, and said so at the point of invention. Arch ruled
-	// 2026-08-12 (d) that pending_hash MUST name "the stored pending entity,
-	// not the request" — because a handle the client can already compute is
-	// not a handle, and nothing is fetchable at the request's own hash. What
-	// arch did NOT specify, and named as owed in the same ruling, is
-	// §6a.9.3's approval protocol: there is no spec text for what a queued
-	// request looks like at rest, what an operator does to it, or how the
-	// requester polls. This type is the minimum that makes the ruled handle
-	// real, and it is expected to be replaced — not extended — when §6a.9.3
-	// lands.
-	TypeRegistryPendingRegistration = "system/registry/pending-registration"
-	TypeRegistryIssuerPolicy        = "system/registry/issuer-policy"
-	TypeRegistryRevokeRequest       = "system/registry/revoke-request"
-	TypeRegistryRenewRequest        = "system/registry/renew-request"
+	// This replaces `system/registry/pending-registration`, which this file
+	// invented on 2026-08-12 and flagged PROVISIONAL at the point of
+	// invention. The history is worth keeping because it is the cleanest
+	// example in this repo of a spec defect the cohort could not resolve by
+	// building harder: the 08-12 ruling made `pending_hash` a MUST and
+	// pointed it at an entity whose schema was a reserved heading, so all
+	// three seats were simultaneously correct and mutually incompatible —
+	// rust withheld the value (you cannot hash an unspecified shape), py
+	// invented `system/registry/register-pending` plus an approve op, go
+	// invented this type, and go's own oracle FAILed rust for the omission.
+	// Arch's rule out of it: a MUST may not name a referent the corpus does
+	// not define; if the referent waits, the MUST waits with it.
+	//
+	// Clean break, no alias for the old name (pre-1.0, AGENTS.md "no
+	// backward-compat shims"). py `d6cfbda` still ships `register-pending`
+	// and says in-source that "this type renames with it" — expected, and
+	// tracked as a cohort delta rather than a py defect.
+	TypeRegistryPendingBinding = "system/registry/pending-binding"
+	TypeRegistryIssuerPolicy   = "system/registry/issuer-policy"
+	TypeRegistryRevokeRequest  = "system/registry/revoke-request"
+	TypeRegistryRenewRequest   = "system/registry/renew-request"
+
+	// §6a.9.3 operator-decision inputs. The section's table gives their input
+	// as a bare `{pending_hash}` / `{pending_hash, reason?}` shape and names
+	// no entity type — py declares no `input_type` for `approve-request`
+	// either (`manifest.py`, py `d6cfbda`). These names are ours, and the
+	// handler decodes by SHAPE rather than asserting the type, so a peer
+	// sending a differently-typed params entity still interoperates. Routed
+	// as a spec ambiguity: §6a.9 already recorded that an operation whose
+	// declared surface omits a branch is "an interop bug already in flight,"
+	// and an unnamed input type is the same hole one field up.
+	TypeRegistryApproveRequest = "system/registry/approve-request"
+	TypeRegistryDenyRequest    = "system/registry/deny-request"
+)
+
+// Pending-binding decision states per §6a.9.3.
+//
+// `denied` is a STATE, not a deletion: "a denied request MUST leave a
+// `status: "denied"` head reachable through the by-request pointer; the
+// registry MUST NOT simply remove the entry." A requester polling a vanished
+// pointer cannot tell *denied* from *never received*, which is a silent drop.
+const (
+	PendingStatusPendingReview = "pending_review"
+	PendingStatusApproved      = "approved"
+	PendingStatusDenied        = "denied"
 )
 
 // RegisterResult status values — the field that discriminates the outcomes
-// §6a.9 pins for register-request. `registered` is the signed-and-published
-// answer (200); `pending_review` is manual mode's queued answer (202).
+// §6a.9 pins for register-request. `bound` is the signed-and-published answer
+// (200); `pending_review` is manual mode's queued answer (202).
+//
+// CORRECTED 2026-08-13: this was `registered`, and §6a.9 pins **`bound`**
+// (EXTENSION-REGISTRY, the ruled signature at arch `81e73ae`:
+// `return 200 register-result { status: "bound", binding_hash }`).
+//
+// It was a live cross-peer MUST divergence on the discriminator field itself,
+// and the comment above it claimed to implement §6a.9 the whole time. **Nothing
+// caught it because nothing asserted it** — no check in `registry_issuer`
+// looked at the 200's `status` value at all, so the wrong string passed every
+// gate in every run. Found by `entity-core-rust` while applying the same
+// ruling, not by us.
+//
+// That is exactly the class our own conformance-register census is for, one
+// level down: the citation resolved, the surface was green, and the assertion
+// simply did not exist. `registry_issuer.register_result_status_bound` now
+// asserts it (added in the same change), so the value cannot drift again
+// unobserved.
+//
+// `denied` is the THIRD value, added 2026-08-13 by §6a.9.3's operations
+// table (`deny-request` → `register-result {status: "denied"}`). Note that
+// §6a.9's declaration of this type still reads `status: "bound" |
+// "pending_review"` — two values — so v1.3 introduced a branch its own
+// declared return type does not enumerate. That is precisely the defect
+// §6a.9 recorded about ITSELF one screen up ("an operation whose declared
+// return type does not enumerate every branch of its own pseudocode is an
+// interop bug already in flight"), recurring one subsection later. We
+// implement the ruled value and route the declaration gap —
+// docs/validation/spec-issues/2026-08-13-d-*.
 const (
-	RegisterStatusRegistered    = "registered"
+	RegisterStatusBound         = "bound"
 	RegisterStatusPendingReview = "pending_review"
+	RegisterStatusDenied        = "denied"
 )
 
 // RegistryRegisterResultData is register-request's OWN result — one entity type for
@@ -153,53 +214,178 @@ const (
 	RegistryErrSignatureInvalid = "signature_invalid" // 401
 	RegistryErrUnsupportedMode  = "unsupported_mode"  // 400
 	RegistryErrNotFound         = "not_found"         // 404
+
+	// RegistryErrAlreadyDecided — §6a.9.3, 409. A second approve/deny on a
+	// pending head that already carries a decision. Approve and deny are not
+	// idempotent-by-replay: re-approving would mint a SECOND binding for one
+	// request, so the safe-looking "just return the first outcome again"
+	// reading is the unsafe one.
+	RegistryErrAlreadyDecided = "already_decided" // 409
 )
 
-// PendingRegistrationData is a register-request held for operator review.
+// PendingBindingData is a register-request held for operator review, per
+// §6a.9.3's schema. Adopted verbatim from py's worked shape, which arch
+// ratified rather than replaced — the field set below is field-for-field
+// what `registry.py:1188` writes (py `d6cfbda`), plus the two decision-
+// carrying optionals the ruling adds.
 //
-// It carries the request BY HASH rather than inlining it: the request entity
-// is already stored and already signed at its invariant pointer, and copying
-// its fields would create a second place for them to be wrong.
-type PendingRegistrationData struct {
-	// Request is the content_hash of the register-request entity.
-	Request hash.Hash `cbor:"request"`
+// The prior go shape carried the request BY HASH (`request`, `received_at`)
+// and denormalized only name + target. That is NOT what the ruling adopted:
+// a pending head must be self-sufficient for the operator's decision, so the
+// terms being approved — transports and requested_ttl — are inlined rather
+// than reachable only through a second fetch of the request entity.
+type PendingBindingData struct {
+	// Name is NFC-normalized and name-path-safe per §6.3.
+	Name string `cbor:"name"`
 
-	// Name and TargetPeerID are denormalized so an operator listing the queue
-	// can read it without fetching every request.
-	Name         string `cbor:"name"`
+	// TargetPeerID is the Base58 peer-id (V7 §1.5) the name would resolve to.
 	TargetPeerID string `cbor:"target_peer_id"`
 
-	// ReceivedAt is when the registry queued it (ms since epoch).
-	ReceivedAt uint64 `cbor:"received_at"`
+	// Transports are the endpoint refs the binding would carry (same bare-
+	// hash-ref convention as BindingData.Transports).
+	Transports []hash.Hash `cbor:"transports,omitempty"`
 
-	// Status is `pending_review` — the only value §6a.9 defines for a queued
-	// request. Present so the entity is self-describing when fetched.
+	// RequestedTTL is the publisher-suggested TTL in ms, already clamped to
+	// the policy default when the request omitted one — so an approval that
+	// happens weeks later issues the terms the operator reviewed, not the
+	// terms the policy holds at approval time.
+	RequestedTTL *uint64 `cbor:"requested_ttl,omitempty"`
+
+	// QueuedAt is when the registry queued it (ms since epoch).
+	//
+	// This is a LOCAL wall-clock reading and it is deliberately part of the
+	// hashed body. §6a.9.3 rules explicitly that pending_hash "is registry-
+	// local and MUST NOT be gated on cross-peer reproducibility": no second
+	// registry stores a pending, §8 aggregators republish bindings and not
+	// pendings, and the only obligation is that the hash resolves at the
+	// registry that minted it. Stated here because every OTHER content-hash
+	// ruling in the corpus runs the opposite way (EXTENSION-COMPUTE §2.4
+	// materialized errors must agree byte-for-byte), so an implementer
+	// generalizing from those would strip this field chasing a determinism
+	// this surface does not require.
+	QueuedAt uint64 `cbor:"queued_at"`
+
+	// Status is one of the three PendingStatus* values.
 	Status string `cbor:"status"`
+
+	// BindingHash is REQUIRED on `approved`, absent otherwise — the binding
+	// the approval issued.
+	BindingHash *hash.Hash `cbor:"binding_hash,omitempty"`
+
+	// Reason is OPTIONAL on `denied`. Operator-supplied and NEVER parsed:
+	// no conformance check may assert on it (§6a.9's "error strings are
+	// free; codes are the contract" applied to the decision surface).
+	Reason *string `cbor:"reason,omitempty"`
 }
 
-// ToEntity encodes the pending registration.
-func (d PendingRegistrationData) ToEntity() (entity.Entity, error) {
+// ToEntity encodes the pending binding.
+func (d PendingBindingData) ToEntity() (entity.Entity, error) {
 	raw, err := ecf.Encode(d)
 	if err != nil {
 		return entity.Entity{}, err
 	}
-	return entity.NewEntity(TypeRegistryPendingRegistration, cbor.RawMessage(raw))
+	return entity.NewEntity(TypeRegistryPendingBinding, cbor.RawMessage(raw))
 }
 
-// PendingRegistrationDataFromEntity decodes a pending registration.
-func PendingRegistrationDataFromEntity(e entity.Entity) (PendingRegistrationData, error) {
-	var d PendingRegistrationData
+// PendingBindingDataFromEntity decodes a pending binding.
+func PendingBindingDataFromEntity(e entity.Entity) (PendingBindingData, error) {
+	var d PendingBindingData
 	if err := ecf.Decode(e.Data, &d); err != nil {
-		return PendingRegistrationData{}, err
+		return PendingBindingData{}, err
 	}
 	return d, nil
 }
 
-// PendingRegistrationPath is where a queued request is published so the
-// handle in `pending_hash` resolves to something. Provisional with the type
-// above — §6a.9.3 owns this once it exists.
-func PendingRegistrationPath(h hash.Hash) string {
-	return "system/registry/pending/" + PeerIdentityHashHex(h)
+// Decided reports whether this head already carries an operator decision.
+// §6a.9.3: a second decision on either outcome returns 409 already_decided,
+// because approve and deny are not idempotent-by-replay and re-approving
+// would mint a second binding for one request.
+func (d PendingBindingData) Decided() bool {
+	return d.Status == PendingStatusApproved || d.Status == PendingStatusDenied
+}
+
+// PendingBindingPath is the immutable content-addressed body path per
+// §6a.9.3:
+//
+//	system/registry/pending/{pending_hash}
+//
+// Same 66-char hex form (format byte included) as BindingStoragePath —
+// §3's universal `binding/{binding_hash}` rule, which this mirrors.
+func PendingBindingPath(h hash.Hash) string {
+	return PendingBindingPrefix + PeerIdentityHashHex(h)
+}
+
+// PendingBindingPrefix is the body prefix.
+const PendingBindingPrefix = "system/registry/pending/"
+
+// PendingBindingByRequestPath is the mutable pointer to the CURRENT HEAD for
+// one (target_peer_id, name) pair per §6a.9.3:
+//
+//	system/registry/pending/by-request/{target_peer_id}/{name}
+//
+// **The segment order is normative and it is not the obvious one.** A
+// target_peer_id is a single Base58 segment; a `name` is name-path-safe but
+// NOT guaranteed single-segment (§6.3 pathes names directly, and
+// `binding/local-name/{name}` already relies on that). Putting the
+// variable-depth value LAST is what keeps the prefix parseable and keeps
+// `pending/by-request/{peer}/` enumerable at a fixed depth. The same defect
+// was corrected in EXTENSION-NETWORK §4.1 the same day; do not "tidy" this
+// into name-first.
+//
+// `name` MUST already be NFC-normalized — the path embeds it verbatim.
+func PendingBindingByRequestPath(targetPeerID, normalizedName string) string {
+	return PendingBindingByRequestPrefix + targetPeerID + "/" + normalizedName
+}
+
+// PendingBindingByRequestPrefix is what an operator walks to enumerate the
+// review queue. §6a.9.3 defines NO `list-pending` operation on purpose: a
+// tree walk over this prefix already answers it, and adding an op for a list
+// a tree walk answers is the live-registry cost the coral-reef posture (§7.4)
+// exists to avoid.
+const PendingBindingByRequestPrefix = "system/registry/pending/by-request/"
+
+// PendingBindingByPeerPrefix returns the enumerable per-peer prefix — the
+// thing the segment order above buys.
+func PendingBindingByPeerPrefix(targetPeerID string) string {
+	return PendingBindingByRequestPrefix + targetPeerID + "/"
+}
+
+// RegistryDecisionRequestData is the input shape shared by `approve-request`
+// and `deny-request` per §6a.9.3's operations table. `reason` is meaningful
+// only on deny.
+//
+// Decoded by shape, not by entity type — see TypeRegistryApproveRequest.
+type RegistryDecisionRequestData struct {
+	PendingHash hash.Hash `cbor:"pending_hash"`
+	Reason      *string   `cbor:"reason,omitempty"`
+}
+
+// ToApproveEntity / ToDenyEntity are separate constructors on purpose. An
+// earlier draft picked the type from `Reason != nil`, which silently
+// mistypes a deny that carries no reason — and `reason` is OPTIONAL on deny,
+// so that is the ordinary case, not the edge one.
+func (d RegistryDecisionRequestData) ToApproveEntity() (entity.Entity, error) {
+	return d.toEntity(TypeRegistryApproveRequest)
+}
+
+func (d RegistryDecisionRequestData) ToDenyEntity() (entity.Entity, error) {
+	return d.toEntity(TypeRegistryDenyRequest)
+}
+
+func (d RegistryDecisionRequestData) toEntity(t string) (entity.Entity, error) {
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(t, cbor.RawMessage(raw))
+}
+
+func RegistryDecisionRequestDataFromEntity(e entity.Entity) (RegistryDecisionRequestData, error) {
+	var d RegistryDecisionRequestData
+	if err := ecf.Decode(e.Data, &d); err != nil {
+		return RegistryDecisionRequestData{}, err
+	}
+	return d, nil
 }
 
 // IssuerPolicyStoragePath is the canonical path for the singleton

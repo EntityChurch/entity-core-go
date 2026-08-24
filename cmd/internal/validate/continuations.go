@@ -475,11 +475,19 @@ func runContinuations(ctx context.Context, client *PeerClient) []CheckResult {
 	// Step 12: W9 — dispatch_capability enforcement
 	r.Declare("w9_rejected", "W9 §3.5")
 
-	// PROPOSAL-COHERENT-CAPABILITY-AUTHORITY §10 conformance vectors.
-	r.Declare("r1_install_writer_self_issued_accepted", "COHERENT-CAP §10")
-	r.Declare("r1_install_adversary_rejected", "COHERENT-CAP §10")
-	r.Declare("r1_install_join_adversary_rejected", "COHERENT-CAP §10")
-	r.Declare("r1_install_chain_unreachable", "COHERENT-CAP §2")
+	// R1 — re-cited 2026-08-13 to the LANDED sections (arch
+	// ROUTING-2026-08-13-f §2, read at arch `7a71dea`).
+	//
+	// These cited PROPOSAL-COHERENT-CAPABILITY-AUTHORITY, whose fold landed
+	// long ago; the proposal itself now sits in the legacy tree's
+	// `proposals/implemented/`, so the citations resolved nowhere from here and
+	// read as ghosts. Worse, three of them named the proposal's **§10 — "Test
+	// vectors / cross-impl agreement"**, which was never normative: they cited
+	// a vector list as though it were the rule.
+	r.Declare("r1_install_writer_self_issued_accepted", "EXTENSION-CONTINUATION §3.1a + §3.2")
+	r.Declare("r1_install_adversary_rejected", "EXTENSION-CONTINUATION §3.1a + §3.2")
+	r.Declare("r1_install_join_adversary_rejected", "EXTENSION-CONTINUATION §3.1a + §3.2 (join variant, §2.3)")
+	r.Declare("r1_install_chain_unreachable", "ENTITY-CORE-PROTOCOL §5.5 — collect_authority_chain → 404 chain_unreachable")
 
 	// --- Pre-step: Ensure the client's capability entity is stored on the remote
 	// peer's content store. Continuations reference it via dispatch_capability

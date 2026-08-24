@@ -35,7 +35,7 @@ func runContinuationBoundsCrossPeer(ctx context.Context, clients []*PeerClient) 
 	r.Declare("cbx_setup_mutual_transport",
 		"cross-peer reachability — publish each peer's TCP profile in the other so A↔B can dispatch")
 	r.Declare("cbx_crosspeer_chain_bounds_globally",
-		"CONTINUATION §3.9 / PROPOSAL-BOUNDS anchor 1 — a synchronous cross-peer advancement ping-pong terminates at the GLOBAL depth count (chain_depth inherited across the wire), not per-peer")
+		"CONTINUATION §3.9 / PROPOSAL-CONTINUATION-BOUNDS-PROPAGATION anchor 1 — a synchronous cross-peer advancement ping-pong terminates at the GLOBAL depth count (chain_depth inherited across the wire), not per-peer")
 
 	if len(clients) < 2 {
 		fail := FailCheck(fmt.Sprintf("cross-peer chain-depth gate requires 2 peers (got %d)", len(clients)))

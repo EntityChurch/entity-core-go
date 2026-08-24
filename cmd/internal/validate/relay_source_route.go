@@ -63,11 +63,21 @@ func runRelaySourceRoute(ctx context.Context, clients []*PeerClient) []CheckResu
 	r := NewCheckRunner(catRelaySourceRoute)
 
 	r.Declare("srcr1_four_peer_setup", "publish C's TCP transport profile on B and D's profile on C so B can dial C and C can dial D for a 3-hop A→B→C→D source-routed path")
-	r.Declare("srcr2_3hop_a_to_d", "PROPOSAL §4 SRCROUTE-3HOP-1: A → B(route=[C,D]) → C(route=[D]) → D; payload lands at D's tree via genuine intermediate hop at C")
-	r.Declare("srcr3_terminal_equiv", "PROPOSAL §4 SRCROUTE-TERMINAL-EQUIV-1: route=[D] (single-element) at B behaves identically to next_hop=D (the degenerate single-hop source route)")
-	r.Declare("srcr4_ttl_exhaust", "PROPOSAL §4 SRCROUTE-TTL-EXHAUST-1: a receiver getting forward-request with ttl_hops=0 MUST reject ttl_exhausted/400; no partial or silent delivery (§4.3 fail-closed)")
-	r.Declare("srcr5_intermediate_unreachable_fallback", "PROPOSAL §4 SRCROUTE-UNREACHABLE-FALLBACK-1: route=[unreachable-peer, D]; first-hop relay cannot reach the routed intermediate → §6.2.1 Mode-S fallback queues at namespace=D, not a silent drop")
-	r.Declare("srcr6_no_route_no_next", "PROPOSAL §4 RESOLVER-DEFAULT-1: forward-request with neither route nor next_hop and no resolver wired → no_route/502 (v1 default resolver)")
+	// Re-cited 2026-08-13 to the LANDED sections (arch ROUTING-2026-08-13-f
+	// §3, read at arch `7a71dea`).
+	//
+	// These cited "PROPOSAL §4", and a held note recorded that
+	// "EXTENSION-RELAY has no matching §4" — true, and beside the point. The
+	// proposal's §4 is its **"Conformance vectors (cohort)"** list, not a rule;
+	// its §5 was "Spec edits if ratified", and those edits landed at v1.1.
+	// EXTENSION-RELAY is v1.2 today and source-routing is normative in §3.1.1.
+	// The vector IDs are kept — they are the cohort's shared names for these
+	// cases — but the citation now points at the rule.
+	r.Declare("srcr2_3hop_a_to_d", "EXTENSION-RELAY §3.1.1 (per-hop determination) + §3.1 (route wire field) [SRCROUTE-3HOP-1]: A → B(route=[C,D]) → C(route=[D]) → D; payload lands at D's tree via genuine intermediate hop at C")
+	r.Declare("srcr3_terminal_equiv", "EXTENSION-RELAY §3.1.1 — intermediate vs terminal hop [SRCROUTE-TERMINAL-EQUIV-1]: route=[D] (single-element) at B behaves identically to next_hop=D (the degenerate single-hop source route)")
+	r.Declare("srcr4_ttl_exhaust", "EXTENSION-RELAY §3.1.1 + §4.3 error taxonomy [SRCROUTE-TTL-EXHAUST-1]: a receiver getting forward-request with ttl_hops=0 MUST reject ttl_exhausted/400; no partial or silent delivery (fail-closed)")
+	r.Declare("srcr5_intermediate_unreachable_fallback", "EXTENSION-RELAY §3.1.1 precedence (source route > route table > direct) + §4.3 [SRCROUTE-UNREACHABLE-FALLBACK-1]: route=[unreachable-peer, D]; first-hop relay cannot reach the routed intermediate → §6.2.1 Mode-S fallback queues at namespace=D, not a silent drop")
+	r.Declare("srcr6_no_route_no_next", "EXTENSION-RELAY §4.3 — 502 no_route, \"no source route, no next_hop, and no route-table match\" [RESOLVER-DEFAULT-1]")
 
 	if len(clients) < 3 {
 		for _, n := range []string{

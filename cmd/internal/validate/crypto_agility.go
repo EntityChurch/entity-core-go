@@ -85,13 +85,13 @@ func runCryptoAgility(ctx context.Context, client *PeerClient) []CheckResult {
 	r := NewCheckRunner(catCryptoAgility)
 
 	r.DeclareSelf("key_type_ed448_1",
-		"v7.67 §3 (KEY-TYPE-ED448-1: system/peer({public_key, key_type=\"ed448\"}) constructs canonical-form (0x02, 0x01) peer_id; content_hash byte-equal cross-impl; sign/verify round-trip on fixed 57-byte Ed448 seed)")
+		"V7 §1.5 (KEY-TYPE-ED448-1: system/peer({public_key, key_type=\"ed448\"}) constructs canonical-form (0x02, 0x01) peer_id; content_hash byte-equal cross-impl; sign/verify round-trip on fixed 57-byte Ed448 seed)")
 	r.DeclareSelf("hash_format_sha_384_1",
-		"v7.67 §4 + §4.5a item 1a (HASH-FORMAT-SHA-384-1: content_hash under content_hash_format=0x01 on an ordinary CONTENT entity — algorithm byte, 48-byte digest, 49-byte wire, dispatch, FromBytes round-trip, manual SHA-384, NewEntityFormat agreement — AND the negative half: authoring system/peer under 0x01 is refused, its floor form still authors at 0x00)")
+		"V7 §1.2 + §4.5a item 1a (HASH-FORMAT-SHA-384-1: content_hash under content_hash_format=0x01 on an ordinary CONTENT entity — algorithm byte, 48-byte digest, 49-byte wire, dispatch, FromBytes round-trip, manual SHA-384, NewEntityFormat agreement — AND the negative half: authoring system/peer under 0x01 is refused, its floor form still authors at 0x00)")
 	r.DeclareSelf("varint_multibyte_1",
-		"v7.67 §5.4 normative (VARINT-MULTIBYTE-1: impl decodes a system/hash with multi-byte LEB128 format-code 0x80 0x01 and rejects with unsupported_content_hash_format since 0x80 (=128) is not allocated)")
+		"V7 §1.2 + §7.3 (VARINT-MULTIBYTE-1: impl decodes a system/hash with multi-byte LEB128 format-code 0x80 0x01 and rejects with unsupported_content_hash_format since 0x80 (=128) is not allocated)")
 	r.DeclareSelf("varint_reserved_ff_1",
-		"v7.67 §5.4 normative (VARINT-RESERVED-FF-1: impl rejects construction of system/peer with key_type integer value 255 (varint 0xFF 0x01); impl rejects system/hash with format-code integer value 255)")
+		"V7 §1.2 + §1.5 (VARINT-RESERVED-FF-1: impl rejects construction of system/peer with key_type integer value 255 (varint 0xFF 0x01); impl rejects system/hash with format-code integer value 255)")
 
 	r.Run("key_type_ed448_1", func() CheckOutcome {
 		kp := crypto.Ed448FromSeed(ed448FixtureSeed)

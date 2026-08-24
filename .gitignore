@@ -12,6 +12,8 @@
 /bench-localfiles
 /compare-types
 /compute-corpus
+/conformance-register
+/corpus-check
 /dump-messages
 /dump-types
 /encryption-vectors

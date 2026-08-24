@@ -135,27 +135,49 @@ func TestEffectiveContentURLPrefix_ExplicitWins(t *testing.T) {
 	}
 }
 
-func TestEffectiveContentURLPrefix_DefaultsFromTree(t *testing.T) {
-	// §6.4 D-14: when content_url_prefix is absent, derive
-	// {tree_url_prefix}/content.
-	ep := TransportEndpoint{
-		TreeURLPrefix: "https://cdn.example.com/peers/abc",
-	}
-	got := EffectiveContentURLPrefix(ep)
-	want := "https://cdn.example.com/peers/abc/content"
-	if got != want {
-		t.Errorf("default derivation:\n  got  %s\n  want %s", got, want)
+// TestEffectiveContentURLPrefix_NeverDerivesFromTree is the INVARIANT that
+// replaced two tests asserting the opposite (`_DefaultsFromTree` and
+// `_TrimsTrailingSlash`, both removed 2026-08-13).
+//
+// They pinned a derivation — `{tree_url_prefix}/content` when
+// `content_url_prefix` is absent — citing "EXTENSION-NETWORK §6.4 D-14",
+// a rule that exists nowhere in the landed corpus. EXTENSION-SUBSTITUTE
+// §2.2 rules the opposite explicitly: "there is no default — the publisher
+// MUST state it. An impl that treats it as optional-with-derivation is
+// non-conformant."
+//
+// Converted rather than deleted, per this repo's no-backward-compat-shims
+// rule: a removed convention becomes a negative assertion, so re-introducing
+// the derivation fails loudly instead of silently restoring it.
+//
+// What it protects: deployment scenario S4 — tree on one host, dedup'd
+// content on a shared bucket. A consumer that derives fetches from an origin
+// the publisher never committed to, which either 404s or, worse, exists and
+// serves a different peer's bytes.
+func TestEffectiveContentURLPrefix_NeverDerivesFromTree(t *testing.T) {
+	for _, tree := range []string{
+		"https://cdn.example.com/peers/abc",
+		"https://cdn.example.com/peers/abc/", // the trailing-slash case
+	} {
+		ep := TransportEndpoint{TreeURLPrefix: tree}
+		if got := EffectiveContentURLPrefix(ep); got != "" {
+			t.Errorf("derived %q from tree_url_prefix %q — content_url_prefix is REQUIRED with no "+
+				"default (EXTENSION-SUBSTITUTE §2.2, pinned ruling)", got, tree)
+		}
 	}
 }
 
-func TestEffectiveContentURLPrefix_TrimsTrailingSlash(t *testing.T) {
+// An explicit content_url_prefix is returned verbatim even when a tree
+// prefix is also present — the two are independent publisher commitments
+// (NETWORK §6.5.3 Amendment 5: they "MAY be entirely separate origins").
+func TestEffectiveContentURLPrefix_ExplicitWinsAndIsVerbatim(t *testing.T) {
 	ep := TransportEndpoint{
-		TreeURLPrefix: "https://cdn.example.com/peers/abc/",
+		TreeURLPrefix:    "https://cdn.example.com/peers/abc",
+		ContentURLPrefix: "https://shared.example.com/content",
 	}
-	got := EffectiveContentURLPrefix(ep)
-	want := "https://cdn.example.com/peers/abc/content"
-	if got != want {
-		t.Errorf("trailing-slash trim:\n  got  %s\n  want %s", got, want)
+	if got := EffectiveContentURLPrefix(ep); got != ep.ContentURLPrefix {
+		t.Errorf("content prefix: got %q want %q (the S4 dedup case — the two prefixes are independent)",
+			got, ep.ContentURLPrefix)
 	}
 }
 

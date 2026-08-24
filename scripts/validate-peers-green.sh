@@ -34,7 +34,15 @@
 #   --http-poll-addr        unblocks serving_mode.* + transport_family WARN
 #   --files <writable>      unblocks local_files.* (5 WARNs + 1 SKIP each)
 #   --publish-descriptors   unblocks local_files.v3_descriptor_publish_exercised
-#                           (Go + Rust; Python CLI rollout pending)
+#                           All three. The "(Go + Rust; Python CLI rollout
+#                           pending)" note here outlived the gap it described —
+#                           python reported it against us 2026-08-13, and with
+#                           the gate removed their V3 PASSes.
+#   --peer-issued-registry  arms the six REG-PEERISSUED-* vectors against the
+#                           target, paired with -peer-issued-bundle on the
+#                           validator. Previously never wired HERE, so the
+#                           category was excluded and those six vectors were
+#                           measured against Go alone.
 #
 # Usage:
 #   ./scripts/validate-peers-green.sh                 # validate go + rust + python
@@ -106,9 +114,23 @@ start_target() {
     local files_dir="$TMPROOT/$logical"
     mkdir -p "$files_dir"
 
-    local extra_args=()
-    if [[ "$peer_type" == "go" || "$peer_type" == "rust" ]]; then
-        extra_args+=(--publish-descriptors)
+    # --publish-descriptors arms local_files.v3_descriptor_publish_exercised.
+    #
+    # UNGATED 2026-08-13. This read `go || rust`, which held python's V3 check
+    # at WARN — unexercised — for as long as the gate outlived python's
+    # support for the flag. peer-manager forwards it to all three
+    # (startGoPeer / startRustPeer / startPythonPeer each append it), so the
+    # gate was in this script alone, and python reported it against us.
+    #
+    # The shape is the one worth naming: a per-type exclusion is a build-state
+    # claim about a sibling, and it decays silently. When it goes stale the
+    # check does not fail — it WARNs, which reads as green, so nothing forces
+    # a re-measure. Same class as the `failing_since` WARN.
+    local extra_args=(--publish-descriptors)
+    # PI_ARGS_PEER is set before any target starts; empty if the fixture
+    # bundle failed, in which case the vectors SKIP loudly rather than fail.
+    if [[ ${#PI_ARGS_PEER[@]} -gt 0 ]]; then
+        extra_args+=("${PI_ARGS_PEER[@]}")
     fi
 
     echo "--- Starting main peer $logical ($peer_type, namespace scope) ---"
@@ -182,17 +204,23 @@ validate_target_main() {
         -poll-url "$poll_url"
         -timeout "${VALIDATOR_TIMEOUT:-300s}"
     )
+    # The fixture bundle is served to the target for the duration of the run;
+    # without it the six REG-PEERISSUED-* vectors have no registry to resolve.
+    if [[ ${#PI_ARGS_VALIDATE[@]} -gt 0 ]]; then
+        args+=("${PI_ARGS_VALIDATE[@]}")
+    fi
     if [[ -n "${CATEGORY:-}" ]]; then
         args+=(-category "$CATEGORY")
     else
         # published_root → routes to the closure peer (see validate_target_closure).
-        # peer_issued → opt-in extension category; vectors SKIP without a fixture
-        # (target started with --peer-issued-registry pinning a registry the
-        # validator can drive). Excluded from the default orchestrator run, same
-        # pattern as convergent_mirror (multi-peer-only). When the cohort wires
-        # the Keystone fixture per HANDOFF-PEER-ISSUED-REGISTRY-BACKEND-IMPL §7,
-        # this exclusion drops.
-        args+=(-exclude published_root,peer_issued)
+        #
+        # peer_issued is NO LONGER EXCLUDED (2026-08-13). The exclusion was
+        # correct when written — the vectors SKIP without a fixture — but it
+        # described a harness gap and then outlived it silently: the fixture
+        # is now wired above for every target, so excluding the category
+        # measures nothing rather than skipping loudly. Python reported that
+        # the six vectors were armed for go only; this is that fix.
+        args+=(-exclude published_root)
     fi
     [[ "${FAILURES_ONLY:-}" == "1" ]] && args+=(-failures-only)
     [[ "${JSON:-}" == "1" ]] && args+=(-json)
@@ -260,6 +288,37 @@ done
 
 TMPROOT=$(mktemp -d -t green-files.XXXXXX)
 echo "--files writable root: $TMPROOT"
+echo
+
+# Peer-issued fixture registry — arms the six REG-PEERISSUED-* vectors.
+#
+# WIRED HERE 2026-08-13, and the gap is worth naming: `validate-complete.sh`
+# has armed this for go, rust AND python since it was written, but that script
+# targets ONE peer (ours). This orchestrator is the one that runs the cohort,
+# and it never armed it and excluded the category outright — so the six vectors
+# have only ever been measured against Go. Reported by python.
+#
+# peer-manager forwards --peer-issued-registry to all three
+# (startGoPeer / startRustPeer / startPythonPeer), so nothing but this wiring
+# was missing.
+PI_DIR="$TMPROOT/peer-issued"
+PI_PORT=$(free_port)
+PI_ARGS_PEER=()
+PI_ARGS_VALIDATE=()
+echo "==> peer-issued fixture registry bundle"
+if go run ./cmd/peerissued-fixtures -wire -out "$PI_DIR" >/dev/null 2>&1; then
+    PI_PID=$(cat "$PI_DIR/registry/peer_id.txt")
+    echo "    registry $PI_PID → http://127.0.0.1:${PI_PORT}"
+    PI_ARGS_PEER=(--peer-issued-registry "${PI_PID}@http://127.0.0.1:${PI_PORT}")
+    PI_ARGS_VALIDATE=(-peer-issued-bundle "$PI_DIR" -peer-issued-addr "127.0.0.1:${PI_PORT}")
+else
+    # Loud, and NOT silently downgraded to an exclusion: a fixture that fails
+    # to build is a broken harness, and the six vectors skipping without a
+    # reason is how this surface went unmeasured for a cohort in the first
+    # place.
+    echo "    WARNING: fixture bundle failed to build — the six REG-PEERISSUED-*"
+    echo "    vectors will SKIP. This is a harness failure, not a peer result."
+fi
 echo
 
 start_reference

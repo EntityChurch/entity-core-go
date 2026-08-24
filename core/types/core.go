@@ -222,6 +222,18 @@ func RegisterCoreTypes(r *TypeRegistry) {
 	r.ReflectType(TypeRegistryRevokeRequest, reflect.TypeOf(RegistryRevokeRequestData{}))
 	r.ReflectType(TypeRegistryRenewRequest, reflect.TypeOf(RegistryRenewRequestData{}))
 
+	// EXTENSION-REGISTRY §6a.9.3 — the manual-approval path (RULED 2026-08-13).
+	//
+	// ONE type, not three. `pending-binding`'s schema is pinned by the ruling,
+	// so its definition is the spec's and every impl will carry it. The
+	// approve-request / deny-request INPUT types are ours — §6a.9.3 names no
+	// entity type for either op (py declares none either) — and registering
+	// an invented name here would publish a type definition no sibling has,
+	// manufacturing a cross-impl type-census divergence out of a spec gap.
+	// The constants exist for our own wire + manifest; the census stays what
+	// the spec pins. Routed — spec-issues/2026-08-13-d-*.
+	r.ReflectType(TypeRegistryPendingBinding, reflect.TypeOf(PendingBindingData{}))
+
 	// EXTENSION-REGISTRY §6a.7 — the signed binding-manifest.
 	r.ReflectType(TypeRegistryBindingManifest, reflect.TypeOf(RegistryBindingManifestData{}))
 
@@ -237,6 +249,7 @@ func RegisterCoreTypes(r *TypeRegistry) {
 	// discipline — it reflects to primitive/string and must be pinned.
 	r.OverrideField(TypeRegistryBindingManifest, "registry_id", FieldSpec{TypeRef: "system/peer-id"})
 	r.OverrideField(TypeRegistryRegisterRequest, "target_peer_id", FieldSpec{TypeRef: "system/peer-id"})
+	r.OverrideField(TypeRegistryPendingBinding, "target_peer_id", FieldSpec{TypeRef: "system/peer-id"})
 	// §6a.9.1 issuer-policy `allowlist` is a list of target_peer_ids per the
 	// spec data block, not bare strings. Matches Rust + Python.
 	r.OverrideField(TypeRegistryIssuerPolicy, "allowlist",

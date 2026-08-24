@@ -93,8 +93,17 @@ func runSubscriptions(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("qualified_uri_token", "SUBSCRIPTION §4")
 	r.Declare("qualified_uri_subscribe", "SUBSCRIPTION §4")
 
-	// PROPOSAL-COHERENT-CAPABILITY-AUTHORITY §10 conformance vectors.
-	r.Declare("sb1_subscribe_adversary_rejected", "COHERENT-CAP §5.1")
+	// SB1 — re-cited 2026-08-13 to the LANDED sections (arch
+	// ROUTING-2026-08-13-f §2, read at arch `7a71dea`). Was
+	// PROPOSAL-COHERENT-CAPABILITY-AUTHORITY §5.1, now in the legacy tree's
+	// `proposals/implemented/`.
+	//
+	// §11.1 is cited at v3.18 or later ONLY. At v3.17 and earlier its prose
+	// summarised the check as "chain root against author" — the reading V7
+	// §5.5 does not require and arch corrected at `7a71dea`. The pseudocode at
+	// §3.1 step 2a ("appears as granter anywhere in the chain") was always
+	// right and is the operative citation.
+	r.Declare("sb1_subscribe_adversary_rejected", "EXTENSION-SUBSCRIPTION §3.1 step 2a + §1.1 + §11.1 (v3.18+)")
 
 	// EXTENSION-SUBSCRIPTION v3.14 include_payload diagnostic checks.
 	// These pinpoint feature presence/absence as Rust + Python land

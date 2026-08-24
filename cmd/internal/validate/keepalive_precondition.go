@@ -99,11 +99,34 @@ func RequireKeepaliveEnvelope(cp *networkCounterpart, envelopeMs int) *CheckOutc
 		time.Sleep(50 * time.Millisecond)
 	}
 
+	// RE-COUNT AFTER THE LOOP, and it is not belt-and-braces — without it this
+	// guard rejects a correctly-configured harness at the boundary.
+	//
+	// The loop polls every 50ms and exits on the deadline, so a ping landing
+	// between the final poll and the deadline is never observed by the loop but
+	// IS in the count afterwards. At the exact configuration the message asks
+	// for — interval 1000ms inside a 2000ms envelope, where precisely two pings
+	// are due — that window is hit routinely: measured against live rust and
+	// python peers 2026-08-13, both reported `got=2 … at least 2 were due` and
+	// skipped, a message that contradicts itself in the same sentence.
+	//
+	// The effect was that `network_reconnect_anchor` could not be driven against
+	// ANY peer from a direct `validate-peer -addr` run: it skipped whatever the
+	// operator did, and the skip blamed their configuration. A precondition that
+	// cannot be satisfied is indistinguishable from an unimplemented surface,
+	// which is the misattribution this whole file exists to prevent — one level
+	// up, and pointed at the operator instead of the peer.
+	if got := cp.pings.countSince(start); got >= wantPings {
+		return nil
+	}
+
 	got := cp.pings.countSince(start)
 	out := SkipCheck(fmt.Sprintf(
 		"HARNESS MISCONFIGURED — peer verdict withheld. The target sent %d §5.4 keepalive ping(s) to the probe's counterpart in %dms; -keepalive-envelope-ms=%d claims at least %d were due. "+
 			"The target is not configured with the envelope this run asserts, so it CANNOT notice a dead counterpart inside the probe window — a FAIL here would be this harness's bug reported as the peer's. "+
-			"Restart the target with a matching short envelope: go run ./cmd/peer-manager start --name p1 --type go|rust|python --debug --keepalive 2000,1000,2",
-		got, envelopeMs, envelopeMs, wantPings))
+			"Restart the target with an envelope that fits at least %d pings — the interval MUST be at most -keepalive-envelope-ms/%d: "+
+			"go run ./cmd/peer-manager start --name p1 --type go|rust|python --debug --keepalive 1000,500,2, and pass -keepalive-envelope-ms 2000. "+
+			"(The advice here used to read `--keepalive 2000,1000,2` alongside a 2000ms envelope, which is interval=2000 — one ping per envelope, so following it exactly could never satisfy this guard.)",
+		got, envelopeMs, envelopeMs, wantPings, wantPings, wantPings))
 	return &out
 }

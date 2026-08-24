@@ -74,6 +74,7 @@ func AllCategories() []string {
 		catSession,
 		catSignaling,
 		catSubscriptions,
+		catSubstitute,
 		catTransportFamily,
 		catTreeOps,
 		catType,

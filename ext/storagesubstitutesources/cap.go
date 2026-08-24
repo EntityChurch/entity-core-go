@@ -66,7 +66,22 @@ func (e *ConsultGateDenied) Error() string {
 //
 // Constraint narrowing: when the grant carries a `source_peer_id`
 // constraint, the claimed source MUST equal it byte-for-byte.
+// consultGateDisabled removes the fail-closed gate below. Test-only: it is
+// unexported, defaults false, and is set solely by the mutation arm of
+// TestConsultFailClosedMutationHasTeeth. Production behaviour is
+// byte-identical to the gate being unconditional.
+//
+// It exists because the §3 chain is NOT wire-drivable in any of the three
+// impls (see cmd/internal/validate/substitute.go), so the fail-closed rule is
+// satisfied in-process and declared as an exclusion — and per
+// GUIDE-CONFORMANCE §5.2b.1 an exclusion is only honest if the substitute test
+// is shown capable of failing. A mutation nobody runs is a claim.
+var consultGateDisabled bool
+
 func (o *Orchestrator) checkConsultGrant(hctx *handler.HandlerContext, claimedSourcePeerID hash.Hash) error {
+	if consultGateDisabled {
+		return nil
+	}
 	if hctx.CallerCapability.ContentHash.IsZero() {
 		return &ConsultGateDenied{Reason: "no caller capability (fail closed)"}
 	}

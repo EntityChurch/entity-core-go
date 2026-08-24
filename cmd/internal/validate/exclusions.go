@@ -88,5 +88,38 @@ func DeclaredExclusions() []DeclaredExclusion {
 				"live idle counterpart stays BOUND, so a proxy exercises a timer-driven escalation and " +
 				"never the scope-pin defect, reading as coverage while missing the case.",
 		},
+		{
+			VectorID: "TV-SS-CORE-1..7 / TV-SS-COMP-1..4 / TV-SS-BARE-1..2 / TV-SS-DISP-1..3",
+			SpecRef:  "EXTENSION-SUBSTITUTE §9 — the §3 chain-consultation vectors (chain order; hash-mismatch discard+advance; unsigned-entry reject; cap-denied abort; exhausted→404+meta; expires_at; supersedes; the CONTENT pending/miss composition; bare-hash no-consult; convention dispatch)",
+			Why: "The §3 chain fires only for a caller that supplies `claimed_source_peer_id`, which the " +
+				"storage-substitute cross-impl Ruling 4 makes LOCAL DISPATCHER CONTEXT and explicitly NOT a " +
+				"wire field on `system/content:get-request`. No production path populates it in ANY of the " +
+				"three implementations, read live 2026-08-13: rust `1152d35` binds `let claimed_source: " +
+				"Option<Hash> = None;` at the miss-hook call site (extensions/content/src/handler.rs:164) " +
+				"under a comment saying CONTENT-level gets do not trigger consult; py `d6cfbda` states the " +
+				"same at entity_handlers/content/handler.py:201 (\"this handler does NOT auto-invoke it\"); " +
+				"go's `WithClaimedSource` has exactly one caller in the whole repo and it is a test. So no " +
+				"conformance client can enter the chain over the wire — the deferral is cohort-convergent " +
+				"and deliberate, not a go gap. **This is an honest zero, and it is the reason this " +
+				"extension had no checks at all until 2026-08-13** — what IS reachable (the §7 convention " +
+				"handler) is now driven by the `substitute` category.",
+			SatisfiedBy: "in-process: ext/storagesubstitutesources/orchestrator_test.go — 15 tests covering " +
+				"priority ordering, advance-on-not-found, advance-on-hash-mismatch, abort-on-cap-denied, " +
+				"disabled/expired/wrong-source skipping, rejected-signature skipping, and the four §8 " +
+				"cap-scoping refusals; plus integration_test.go's end-to-end miss→fetch and the " +
+				"no-claimed-source bypass.",
+			Mutation: "EXECUTED, not described: TestConsultFailClosedMutationHasTeeth " +
+				"(ext/storagesubstitutesources/mutation_test.go) sets consultGateDisabled, replays " +
+				"TestConsult_FailClosed_NoCallerCapability's exact setup, and asserts the chain DOES " +
+				"consult and DOES dispatch — so it fails if the §8 gate is not what makes the fail-closed " +
+				"test pass. Runs in the unit suite on every commit.",
+			Voids: "This exclusion is void the moment any production caller populates the claimed source — " +
+				"the SDK closure-fetch and the Phase-2 dispatcher tree-walk that rust and py both name as " +
+				"the intended driver. At that point the chain becomes wire-reachable and these vectors MUST " +
+				"be driven, starting with the fail-closed cap gate: the surface it protects is an " +
+				"arbitrary-caller-triggered outbound fetch followed by a forced ingestion (§8), which is " +
+				"the highest-consequence hole in this extension and the one an in-process test is least " +
+				"able to speak for.",
+		},
 	}
 }

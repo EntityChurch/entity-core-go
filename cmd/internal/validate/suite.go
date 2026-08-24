@@ -108,7 +108,7 @@ func (s *ValidationSuite) SetWSPeers(urls []string) {
 }
 
 // SetProfile selects the V7 v7.72 §9.0 conformance profile the suite
-// scores against. "core" runs the 14-category core-profile set, scores
+// scores against. "core" runs the 16-category core-profile set, scores
 // type_system against the §9.5 53-type floor, runs the §9.5a
 // CORE-TREE-* vectors, and applies per-check carve-outs for extension-
 // targeted oracle checks. "full" (default) keeps historical behavior.
@@ -612,7 +612,7 @@ func (s *ValidationSuite) Run(ctx context.Context) (*Report, error) {
 	// vector at the §6.2 dispatch layer.
 	runCat(catAuthz, func() []CheckResult { return runAuthz(ctx, client) })
 
-	// Category 34: PROPOSAL-PEER-MANIFEST-STATIC-HANDSHAKE §4 published-root.
+	// Category 34: published-root.
 	// Six vectors covering ECF round-trip + signature carriage + seq
 	// monotonicity + MANIFEST_GET + outbound dial + §1.1 host-bytes-distrust.
 	// v4 + v5 require -poll-url to reach the peer's MANIFEST_GET surface;
@@ -642,6 +642,14 @@ func (s *ValidationSuite) Run(ctx context.Context) (*Report, error) {
 	// when the target peer was not started with an issuer policy; the gate
 	// always arms one, so a skip here means the harness lost its reach.
 	runCat(catRegistryIssuer, func() []CheckResult { return runRegistryIssuer(ctx, client) })
+
+	// EXTENSION-SUBSTITUTE §7 — the http convention handler, which is the
+	// only wire-reachable part of this extension in ANY of the three impls
+	// (the §3 chain needs a claimed-source context no production caller sets
+	// in go, rust or py — see substitute.go's header and the declared
+	// exclusion). Every check refuses at or before the URL-scheme gate, so
+	// nothing here touches the public network.
+	runCat(catSubstitute, func() []CheckResult { return runSubstitute(ctx, client) })
 
 	// Category 37: EXTENSION-RELAY v1.0 — 13 vectors covering Mode F +
 	// Mode S surfaces (post-Go-pre-impl-review at arch 54e5373 + 15b30d0).
@@ -942,6 +950,8 @@ func (s *ValidationSuite) RunCategory(ctx context.Context, category string) (*Re
 		report.AddAll(runDiscovery(ctx, client))
 	case catRegistryIssuer:
 		report.AddAll(runRegistryIssuer(ctx, client))
+	case catSubstitute:
+		report.AddAll(runSubstitute(ctx, client))
 	case catRelay:
 		report.AddAll(runRelay(ctx, client))
 	case catPublishFetchHTTPPoll:

@@ -73,22 +73,22 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 	// FAIL rather than silently disappearing.
 
 	// seed
-	r.Declare("seed_in_scope", "Amendment 5 §6.4.2 — seed: in-scope binding via tree:put")
-	r.Declare("seed_republished", "Amendment 10 §6.5.6 timing ruling (arch c78b3dc, 2026-08-07) — the served closure tracks the CURRENT published-root.root_hash; the trigger is the root republishing, not the bare tree:put")
-	r.Declare("seed_out_of_scope", "Amendment 5 — seed: out-of-scope binding (not under served namespace)")
+	r.Declare("seed_in_scope", "EXTENSION-NETWORK Amendment 5 §6.4.2 — seed: in-scope binding via tree:put")
+	r.Declare("seed_republished", "EXTENSION-NETWORK Amendment 10 §6.5.6 timing ruling (arch c78b3dc, 2026-08-07) — the served closure tracks the CURRENT published-root.root_hash; the trigger is the root republishing, not the bare tree:put")
+	r.Declare("seed_out_of_scope", "EXTENSION-NETWORK Amendment 5 — seed: out-of-scope binding (not under served namespace)")
 
 	// CONTENT_GET — unchanged in Amendment 5
-	r.Declare("content_get_in_scope_status", "Amendment 4 §6.5.3.1 / §5 A")
-	r.Declare("content_get_in_scope_content_type", "Amendment 4 §6.5.3.1")
-	r.Declare("content_get_in_scope_etag", "Amendment 4 §6.5.3.1 — ETag = 66-hex content hash")
-	r.Declare("content_get_in_scope_cache_control_immutable", "Amendment 4 §6.5.3.1 — immutable on hash-keyed route")
-	r.Declare("content_get_in_scope_cache_control_max_age", "Amendment 4 §6.5.3.1 — Cache-Control mandates max-age + immutable")
-	r.Declare("content_get_in_scope_body_rehash", "Amendment 4 §5 — pure-body-rehash invariant")
-	r.Declare("content_get_in_scope_body_shape_two_key", "Amendment 4 §5 A — ECF({type,data}) bare hashable body")
+	r.Declare("content_get_in_scope_status", "EXTENSION-NETWORK Amendment 4 §6.5.3.1 / §5 A")
+	r.Declare("content_get_in_scope_content_type", "EXTENSION-NETWORK Amendment 4 §6.5.3.1")
+	r.Declare("content_get_in_scope_etag", "EXTENSION-NETWORK Amendment 4 §6.5.3.1 — ETag = 66-hex content hash")
+	r.Declare("content_get_in_scope_cache_control_immutable", "EXTENSION-NETWORK Amendment 4 §6.5.3.1 — immutable on hash-keyed route")
+	r.Declare("content_get_in_scope_cache_control_max_age", "EXTENSION-NETWORK Amendment 4 §6.5.3.1 — Cache-Control mandates max-age + immutable")
+	r.Declare("content_get_in_scope_body_rehash", "EXTENSION-NETWORK Amendment 4 §5 — pure-body-rehash invariant")
+	r.Declare("content_get_in_scope_body_shape_two_key", "EXTENSION-NETWORK Amendment 4 §5 A — ECF({type,data}) bare hashable body")
 
-	r.Declare("content_get_out_of_scope_404", "Amendment 5 §6.5.6 T4")
-	r.Declare("content_get_not_held_404", "Amendment 5 §6.5.3.1 — unknown hash")
-	r.Declare("content_get_t4_oracle_identity", "Amendment 5 §6.5.6 T4 — identical 404 byte-for-byte")
+	r.Declare("content_get_out_of_scope_404", "EXTENSION-NETWORK Amendment 5 §6.5.6 T4")
+	r.Declare("content_get_not_held_404", "EXTENSION-NETWORK Amendment 5 §6.5.3.1 — unknown hash")
+	r.Declare("content_get_t4_oracle_identity", "EXTENSION-NETWORK Amendment 5 §6.5.6 T4 — identical 404 byte-for-byte")
 
 	// Hex strictness is length-against-the-string's-OWN-format-byte, never
 	// against a constant (§6.5.3.1 as corrected 2026-08-10;
@@ -97,64 +97,64 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 	// case still expects 400, but now for the correct reason: 66 chars
 	// disagrees with the 98 its own format byte implies.
 	r.Declare("content_get_hex_strictness_rejects_64char", "Amendment 4 §7 / V7 §3.5 — digest-only form (no format byte) → 400")
-	r.Declare("content_get_hex_strictness_rejects_unknown_algo", "Amendment 4 §7 — unallocated algorithm byte → 400 (fail-closed)")
-	r.Declare("content_get_hex_strictness_rejects_sha384_width_mismatch", "§6.5.3.1 (corrected 2026-08-10) — 66 hex chars claiming format 0x01 → 400: the length disagrees with its OWN format byte, which implies 98. NOT because SHA-384 is reserved — it is not.")
-	r.Declare("content_get_hex_strictness_rejects_sha256_width_mismatch", "§6.5.3.1 (corrected 2026-08-10) — 98 hex chars claiming format 0x00 → 400: the mirror case, which a fixed-66 length gate accepts nothing of and a format-blind decoder waves through")
-	r.Declare("content_get_hex_strictness_rejects_non_hex", "Amendment 4 §6.5.3.1 — invalid hex → 400")
+	r.Declare("content_get_hex_strictness_rejects_unknown_algo", "EXTENSION-NETWORK Amendment 4 §7 — unallocated algorithm byte → 400 (fail-closed)")
+	r.Declare("content_get_hex_strictness_rejects_sha384_width_mismatch", "EXTENSION-NETWORK §6.5.3.1 (corrected 2026-08-10) — 66 hex chars claiming format 0x01 → 400: the length disagrees with its OWN format byte, which implies 98. NOT because SHA-384 is reserved — it is not.")
+	r.Declare("content_get_hex_strictness_rejects_sha256_width_mismatch", "EXTENSION-NETWORK §6.5.3.1 (corrected 2026-08-10) — 98 hex chars claiming format 0x00 → 400: the mirror case, which a fixed-66 length gate accepts nothing of and a format-blind decoder waves through")
+	r.Declare("content_get_hex_strictness_rejects_non_hex", "EXTENSION-NETWORK Amendment 4 §6.5.3.1 — invalid hex → 400")
 
-	r.Declare("content_get_method_post_405", "Amendment 5 status table — GET only")
-	r.Declare("content_get_method_allow_header", "Amendment 5 status table — Allow: GET")
-	r.Declare("content_get_method_PUT_405", "Amendment 5 status table — PUT → 405")
-	r.Declare("content_get_method_DELETE_405", "Amendment 5 status table — DELETE → 405")
+	r.Declare("content_get_method_post_405", "EXTENSION-NETWORK Amendment 5 status table — GET only")
+	r.Declare("content_get_method_allow_header", "EXTENSION-NETWORK Amendment 5 status table — Allow: GET")
+	r.Declare("content_get_method_PUT_405", "EXTENSION-NETWORK Amendment 5 status table — PUT → 405")
+	r.Declare("content_get_method_DELETE_405", "EXTENSION-NETWORK Amendment 5 status table — DELETE → 405")
 
 	// TREE_GET leaf (Amendment 5 demux + Amendment 6 body: /{peer_id}/{path}.bin
 	// returns the BOUND HASH as a system/hash 2-key pointer, NOT the dereferenced
 	// entity. Consumer second-hops via /content/{hex(H)} for the bytes.
 	// Per V7 §1.7 dedup invariant: tree holds path→hash; content store holds
 	// hash→bytes once; one-hop materializes N copies on a static CDN.)
-	r.Declare("tree_entity_status", "Amendment 5 §6.5.3.1 — .bin → 200")
-	r.Declare("tree_entity_content_type", "Amendment 5 §6.5.3.1")
+	r.Declare("tree_entity_status", "EXTENSION-NETWORK Amendment 5 §6.5.3.1 — .bin → 200")
+	r.Declare("tree_entity_content_type", "EXTENSION-NETWORK Amendment 5 §6.5.3.1")
 	r.Declare("tree_entity_body_is_hash_pointer", "Amendment 6 §6.5.3.1 — body is `system/hash` 2-key pointer ECF({type, data}); NOT the dereferenced wire entity (V7 §1.7 dedup invariant)")
-	r.Declare("tree_entity_pointer_data_matches_bound_hash", "Amendment 6 — pointer's `data` MUST equal the bound hash H (the path's resolution)")
-	r.Declare("tree_entity_second_hop_dereferences", "Amendment 6 — CONTENT_GET /content/{hex(H)} for H from the pointer MUST round-trip the entity bytes")
-	r.Declare("tree_entity_etag", "Amendment 5 §6.5.3.1 + Amendment 6 polish — ETag = 66-hex BOUND hash (not pointer self-hash; changes on rebind = correct mutable cache key)")
-	r.Declare("tree_entity_no_immutable", "Amendment 4 §6.5.3.1 — bindings mutable; MUST NOT mark immutable")
-	r.Declare("tree_entity_out_of_scope_404", "Amendment 5 §6.5.6 T4")
-	r.Declare("tree_entity_unbound_404", "Amendment 5 §6.5.6 T4")
-	r.Declare("tree_entity_t4_oracle_identity", "Amendment 5 §6.5.6 — out-of-scope ≡ unbound byte-for-byte")
-	r.Declare("tree_entity_no_suffix_404", "Amendment 5 §6.5.3.1 — bare no-suffix path → 404 (leaf MUST carry .bin)")
-	r.Declare("tree_entity_method_POST_405", "Amendment 5 status table — GET only")
-	r.Declare("tree_entity_method_allow_header", "Amendment 5 status table — Allow: GET")
+	r.Declare("tree_entity_pointer_data_matches_bound_hash", "EXTENSION-NETWORK Amendment 6 — pointer's `data` MUST equal the bound hash H (the path's resolution)")
+	r.Declare("tree_entity_second_hop_dereferences", "EXTENSION-NETWORK Amendment 6 — CONTENT_GET /content/{hex(H)} for H from the pointer MUST round-trip the entity bytes")
+	r.Declare("tree_entity_etag", "EXTENSION-NETWORK Amendment 5 §6.5.3.1 + Amendment 6 polish — ETag = 66-hex BOUND hash (not pointer self-hash; changes on rebind = correct mutable cache key)")
+	r.Declare("tree_entity_no_immutable", "EXTENSION-NETWORK Amendment 4 §6.5.3.1 — bindings mutable; MUST NOT mark immutable")
+	r.Declare("tree_entity_out_of_scope_404", "EXTENSION-NETWORK Amendment 5 §6.5.6 T4")
+	r.Declare("tree_entity_unbound_404", "EXTENSION-NETWORK Amendment 5 §6.5.6 T4")
+	r.Declare("tree_entity_t4_oracle_identity", "EXTENSION-NETWORK Amendment 5 §6.5.6 — out-of-scope ≡ unbound byte-for-byte")
+	r.Declare("tree_entity_no_suffix_404", "EXTENSION-NETWORK Amendment 5 §6.5.3.1 — bare no-suffix path → 404 (leaf MUST carry .bin)")
+	r.Declare("tree_entity_method_POST_405", "EXTENSION-NETWORK Amendment 5 status table — GET only")
+	r.Declare("tree_entity_method_allow_header", "EXTENSION-NETWORK Amendment 5 status table — Allow: GET")
 
 	// TREE_GET listing (Amendment 5: /{peer_id}/{path}.list)
-	r.Declare("tree_listing_status", "Amendment 5 §6.5.3.1 — .list → system/tree/listing entity")
-	r.Declare("tree_listing_content_type", "Amendment 5 §6.5.3.1")
-	r.Declare("tree_listing_no_immutable", "Amendment 5 §6.5.3.1 — listings mutable; MUST NOT mark immutable")
-	r.Declare("tree_listing_body_is_listing_type", "Amendment 5 §6.5.3.1 — body decodes to system/tree/listing")
+	r.Declare("tree_listing_status", "EXTENSION-NETWORK Amendment 5 §6.5.3.1 — .list → system/tree/listing entity")
+	r.Declare("tree_listing_content_type", "EXTENSION-NETWORK Amendment 5 §6.5.3.1")
+	r.Declare("tree_listing_no_immutable", "EXTENSION-NETWORK Amendment 5 §6.5.3.1 — listings mutable; MUST NOT mark immutable")
+	r.Declare("tree_listing_body_is_listing_type", "EXTENSION-NETWORK Amendment 5 §6.5.3.1 — body decodes to system/tree/listing")
 	r.Declare("tree_listing_count_matches_entries", "TREE §1176 — count = in-scope filtered total = len(entries)")
-	r.Declare("tree_listing_nonexistent_404", "Amendment 5 §6.5.6 T4 — non-existent prefix → 404")
-	r.Declare("tree_listing_empty_in_scope_200", "Amendment 5 Q2 — empty in-scope prefix → 200 + entries={} + count=0")
+	r.Declare("tree_listing_nonexistent_404", "EXTENSION-NETWORK Amendment 5 §6.5.6 T4 — non-existent prefix → 404")
+	r.Declare("tree_listing_empty_in_scope_200", "EXTENSION-NETWORK Amendment 5 Q2 — empty in-scope prefix → 200 + entries={} + count=0")
 
 	// Root + peers listings
-	r.Declare("peer_root_listing_status", "Amendment 5 §6.5.3.1 — {peer_id}.list → root listing")
-	r.Declare("peer_root_listing_is_listing_type", "Amendment 5 §6.5.3.1")
-	r.Declare("peers_list_status", "Amendment 5 §6.5.6 — peers.list → universal-tree-root listing")
-	r.Declare("peers_list_is_listing_type", "Amendment 5 §6.5.6")
-	r.Declare("peers_list_contains_peer", "Amendment 5 §6.5.6 — peers.list lists peer-ids with bindings")
-	r.Declare("bare_peers_no_suffix_404", "Amendment 5 §6.5.6 — bare `peers` no suffix → 404")
-	r.Declare("multi_peer_publish_via_tree_put", "Amendment 5 §6.5.6 — peer can publish another peer's namespace (the universal-tree semantic): tree:put at /<other_peer>/... lands a binding the store actually holds")
-	r.Declare("peers_list_surfaces_other_peer", "Amendment 5 §6.5.6 — peers.list MUST include every top-level peer-id with bindings, not just the local one")
+	r.Declare("peer_root_listing_status", "EXTENSION-NETWORK Amendment 5 §6.5.3.1 — {peer_id}.list → root listing")
+	r.Declare("peer_root_listing_is_listing_type", "EXTENSION-NETWORK Amendment 5 §6.5.3.1")
+	r.Declare("peers_list_status", "EXTENSION-NETWORK Amendment 5 §6.5.6 — peers.list → universal-tree-root listing")
+	r.Declare("peers_list_is_listing_type", "EXTENSION-NETWORK Amendment 5 §6.5.6")
+	r.Declare("peers_list_contains_peer", "EXTENSION-NETWORK Amendment 5 §6.5.6 — peers.list lists peer-ids with bindings")
+	r.Declare("bare_peers_no_suffix_404", "EXTENSION-NETWORK Amendment 5 §6.5.6 — bare `peers` no suffix → 404")
+	r.Declare("multi_peer_publish_via_tree_put", "EXTENSION-NETWORK Amendment 5 §6.5.6 — peer can publish another peer's namespace (the universal-tree semantic): tree:put at /<other_peer>/... lands a binding the store actually holds")
+	r.Declare("peers_list_surfaces_other_peer", "EXTENSION-NETWORK Amendment 5 §6.5.6 — peers.list MUST include every top-level peer-id with bindings, not just the local one")
 
 	// MANIFEST_GET (Amendment 5: NO 501)
-	r.Declare("manifest_no_501", "Amendment 5 §6.5.3.1 — manifest route MUST NOT 501 in shipped peer")
-	r.Declare("manifest_trailing_slash_404", "Amendment 5 §6.5.3.1 — /manifest/ → 404 (terminal)")
+	r.Declare("manifest_no_501", "EXTENSION-NETWORK Amendment 5 §6.5.3.1 — manifest route MUST NOT 501 in shipped peer")
+	r.Declare("manifest_trailing_slash_404", "EXTENSION-NETWORK Amendment 5 §6.5.3.1 — /manifest/ → 404 (terminal)")
 
 	// Status-table edges
-	r.Declare("percent_encoded_slash_400", "Amendment 5 status table — %2F → 400")
-	r.Declare("unknown_first_segment_404", "Amendment 5 §6.5.6 — unknown literal → 404")
+	r.Declare("percent_encoded_slash_400", "EXTENSION-NETWORK Amendment 5 status table — %2F → 400")
+	r.Declare("unknown_first_segment_404", "EXTENSION-NETWORK Amendment 5 §6.5.6 — unknown literal → 404")
 
 	// Cross-route consistency
-	r.Declare("cross_route_consistency", "Amendment 5 — entity content_hash round-trips through /content")
+	r.Declare("cross_route_consistency", "EXTENSION-NETWORK Amendment 5 — entity content_hash round-trips through /content")
 
 	// --- seed phase ---
 

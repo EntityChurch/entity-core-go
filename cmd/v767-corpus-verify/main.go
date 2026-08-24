@@ -33,6 +33,7 @@ import (
 	"github.com/cloudflare/circl/sign/ed448"
 	"github.com/fxamacker/cbor/v2"
 
+	"go.entitychurch.org/entity-core-go/cmd/internal/corpus"
 	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
@@ -103,12 +104,28 @@ const (
 	// evidence that this encoder reproduces bytes it did not itself author,
 	// and it must not be re-pinned to a moving source. Re-verified green in
 	// the same run that produced the digest below.
-	expectedSHA = "6d0f4a94a7f52d0f41fbf83becfe082e59cdb86991e55e3d47d708e8af932e9e"
+	// THE VALUE ITSELF LIVES IN `cmd/internal/corpus`, not here. It used to be
+	// a literal in this file, which made it a second home for a fact the corpus
+	// registry also had to know — and a pin that exists in two places is a pin
+	// that will eventually exist at two values. `expectedSHA()` reads the
+	// registry; re-pinning happens there, once, for every tool.
 )
+
+// expectedSHA is the pinned artifact digest for the crypto-agility corpus,
+// read from the single registry rather than restated here.
+func expectedSHA() string {
+	c, ok := corpus.ByName("crypto-agility")
+	if !ok {
+		// Unreachable unless the registry entry is renamed out from under this
+		// tool — in which case failing loudly beats verifying against "".
+		panic("corpus registry has no crypto-agility entry: this verifier cannot pin an artifact it cannot name")
+	}
+	return c.ExpectedSHA
+}
 
 var (
 	flagPath        = flag.String("path", defaultPath, "path to conformance-vectors-v1.cbor")
-	flagExpectedSHA = flag.String("expected-sha", expectedSHA, "expected file sha256 (hex)")
+	flagExpectedSHA = flag.String("expected-sha", expectedSHA(), "expected file sha256 (hex)")
 	flagVerbose     = flag.Bool("verbose", false, "print a line per vector")
 	flagFullHashes  = flag.Bool("full-hashes", false, "print derived hashes in full rather than truncated — required when producing a re-stamp proposal, since a truncated value cannot be ratified")
 )
@@ -173,7 +190,37 @@ func main() {
 	}
 	fmt.Printf("decoded %d vectors\n\n", len(corpus))
 
+	for _, v := range corpus {
+		byID[mustStr(v, "id")] = v
+	}
+
 	c := &checks{verbose: *flagVerbose}
+
+	// Pass 0 — every vector this tool dispatches on by `id` must still make the
+	// assertion the dispatch assumes.
+	//
+	// WHY THIS EXISTS. `hash-format-sha-384.2.rehash` had its `kind` flipped
+	// from `content_hash_under_format` to `construct_reject` (arch 4cf0990) —
+	// the vector now asserts the OPPOSITE of what it used to. This tool
+	// switches on `id` alone, so nothing in it would have noticed: a vector
+	// whose meaning inverted underneath a verifier that still recognised its
+	// name would have been checked under the old assumption and reported PASS.
+	//
+	// That is the same defect one level up. The vector certified a forbidden
+	// construction because the verifier routed around the constructor; the
+	// verifier would keep certifying a retired assertion because it routes
+	// around the `kind`. Binding the two means the corpus cannot change what a
+	// vector claims without this tool going red and being made to agree.
+	fmt.Println("§0 Vector kinds match what this verifier asserts")
+	for _, id := range sortedIDs(corpus) {
+		want, known := expectedKinds[id]
+		if !known {
+			continue
+		}
+		got, _ := byID[id]["kind"].(string)
+		c.record(id, "kind="+want, got == want, fmt.Sprintf("kind=%q", got))
+	}
+	fmt.Println()
 
 	// Pass 1 — F16 structural invariants on every vector. Walk by id.
 	fmt.Println("§1 F16 structural invariants (decode the artifact, not its sha)")
@@ -410,23 +457,109 @@ func verifyIdentityUnderNonFloorRefused(c *checks, id string, v map[string]any) 
 		c.record(id, "non-floor-refused", false, fmt.Sprintf("ecf.Encode: %v", err))
 		return
 	}
+
+	// Route 1 — the EXPLICIT format request. A caller naming 0x01 outright.
 	_, err = entity.NewEntityFormat(hash.AlgorithmSHA384, types.TypePeer, dataCBOR)
 	c.record(id, "non-floor-refused(0x01)", err != nil, refusalDetail(err))
 
-	// And the floor form must still author — otherwise the guard above would be
-	// a SHA-256-only lock rather than §1.2's single named exception.
+	// Routes 2 and 3 — the HOME FORMAT, which is the half the vector's
+	// `verifier_requirement` is really about and the half this check was
+	// missing until 2026-08-13.
+	//
+	// §4.5a item 1a pins system/peer to the floor *"whatever the peer's home
+	// format"*. Everything above runs under the ambient process default, which
+	// in this tool is the 0x00 floor — so "the floor still authors" was true
+	// for the trivial reason that nothing had asked for anything else. It
+	// asserted the home-format clause without ever setting a home format.
+	//
+	// So set one. Under a 0x01 home format a real peer authoring its own
+	// identity takes one of exactly two paths, and 1a has to hold on both:
+	// the implicit constructor (NewEntity, which reads the default) must
+	// REFUSE, and the pinned peer-entity constructor (PeerData.ToEntity, the
+	// one the vector names) must still land on the floor rather than follow
+	// the home format it is sitting in.
+	prev := entity.DefaultHashAlgorithm()
+	entity.SetDefaultHashAlgorithm(hash.AlgorithmSHA384)
+	defer entity.SetDefaultHashAlgorithm(prev)
+
+	_, err = entity.NewEntity(types.TypePeer, dataCBOR)
+	c.record(id, "non-floor-refused(home=0x01)", err != nil, refusalDetail(err))
+
 	ent, err := pd.ToEntity()
 	if err != nil {
-		c.record(id, "floor-still-authors", false, fmt.Sprintf("PeerData.ToEntity: %v", err))
+		c.record(id, "floor-holds-under-home=0x01", false, fmt.Sprintf("PeerData.ToEntity: %v", err))
 		return
 	}
-	c.record(id, "floor-still-authors", ent.ContentHash.Algorithm == hash.AlgorithmSHA256,
-		hx(ent.ContentHash.Bytes()))
+	c.record(id, "floor-holds-under-home=0x01",
+		ent.ContentHash.Algorithm == hash.AlgorithmSHA256,
+		fmt.Sprintf("authored 0x%02x %s", ent.ContentHash.Algorithm, hx(ent.ContentHash.Bytes())))
 
-	if stale, ok := v["canonical_content_hash"].([]byte); ok && len(stale) > 0 && stale[0] == hash.AlgorithmSHA384 {
-		fmt.Printf("  NOTE %-50s vector still carries the pre-inversion 0x01 pin %s — SEEDS.md §5 step 4 (arch) owed\n",
-			id+"/pre-inversion-pin", hx(stale))
+	// The vector names the floor form it DOES have; check we reproduce it, so
+	// the refusal above cannot be satisfied by a constructor that refuses
+	// everything. `floor_form` is prose pointing at .1, so the value is read
+	// from .1 rather than parsed out of the sentence.
+	if want := floorFormFromSibling(id); want != nil {
+		c.record(id, "floor-form-matches-.1", bytesEq(ent.ContentHash.Bytes(), want), hx(ent.ContentHash.Bytes()))
 	}
+}
+
+// expectedKinds pins the assertion each dispatched vector makes. Every id this
+// tool switches on in §1/§2 appears here; a vector whose `kind` moves out from
+// under its verifier goes red rather than being checked under a retired
+// assumption. Vectors the tool does not dispatch on (the `decode_reject`
+// family, checked elsewhere) are deliberately absent — this asserts what THIS
+// tool relies on, not the corpus's whole shape.
+var expectedKinds = map[string]string{
+	"key-type-ed448.1.pubkey":                    "ed448_seed_to_pubkey",
+	"key-type-ed448.2.peer_id":                   "peer_id_construct",
+	"key-type-ed448.3.system_peer_entity":        "peer_entity_construct",
+	"key-type-ed448.4.signature":                 "ed448_sign",
+	"hash-format-sha-384.1.inherited_sha256_pin": "inherited_corpus_pin",
+
+	// Flipped from `content_hash_under_format` by arch 4cf0990. The old value
+	// asserted that a system/peer CAN be authored under 0x01 — the
+	// construction §4.5a item 1a forbids.
+	"hash-format-sha-384.2.rehash": "construct_reject",
+
+	"matrix.M2": "matrix_flow",
+	"matrix.M3": "matrix_flow",
+	"matrix.M6": "matrix_flow",
+}
+
+// sortedIDs gives the kind pass a stable order independent of corpus order.
+func sortedIDs(corpus []map[string]any) []string {
+	out := make([]string, 0, len(corpus))
+	for _, v := range corpus {
+		out = append(out, mustStr(v, "id"))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// byID indexes the decoded corpus so one vector's check can read a value another
+// vector pins, rather than restating it here. A verifier that carries its own
+// copy of a corpus value is a second home for the pin — the exact shape
+// `expectedSHA()` was moved into the registry to avoid.
+var byID = map[string]map[string]any{}
+
+// floorFormFromSibling returns the floor-form content_hash that
+// `hash-format-sha-384.2.rehash` points at via its `floor_form` field: *"see
+// hash-format-sha-384.1.inherited_sha256_pin — 003d0c34b5… is the only
+// content_hash this fixture has."* Both vectors carry the same fixture entity,
+// so .1's pin is .2's floor form.
+//
+// Read from the sibling vector rather than hardcoded, and nil when the sibling
+// is absent — a missing sibling makes this check unavailable, not failed.
+func floorFormFromSibling(id string) []byte {
+	if id != "hash-format-sha-384.2.rehash" {
+		return nil
+	}
+	sib, ok := byID["hash-format-sha-384.1.inherited_sha256_pin"]
+	if !ok {
+		return nil
+	}
+	b, _ := sib["canonical_content_hash"].([]byte)
+	return b
 }
 
 // refusalDetail renders a refusal for the report: the error when the guard

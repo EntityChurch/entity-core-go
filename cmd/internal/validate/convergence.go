@@ -1217,7 +1217,7 @@ func runConvergence(ctx context.Context, clients []*PeerClient) []CheckResult {
 			return PassCheck("peer A dispatched remote tree.get to B and delivered result")
 		}
 		contEntries, _, _ := a.TreeListing(ctx, contPath+"/")
-		return FailCheck(fmt.Sprintf("no delivery at result inbox after 6s (cont_inbox=%d entries — peer A may not support remote execute)", len(contEntries)))
+		return FailCheck(fmt.Sprintf("no delivery at result inbox after 6s (cont_inbox=%d entries). The dispatch spans BOTH peers — A hosts the continuation, B serves the tree:get — so this names neither. Bisect with a same-impl control (A→A) before routing it at either side: it read \"peer A may not support remote execute\" until 2026-08-13, when the A→A control passed in 201ms and the actual seam was B.", len(contEntries)))
 	})
 
 	// --- Level 2b: Cross-peer C-3 dispatch-capability scope enforcement ---
@@ -3616,7 +3616,7 @@ func checkRemoteExecute(ctx context.Context, a, b *PeerClient, suffix string) []
 	} else {
 		contEntries, _, _ := a.TreeListing(ctx, contPath+"/")
 		checks = append(checks, fail(catConvergence, "rexec_delivered", "REMOTE §3",
-			fmt.Sprintf("no delivery at result inbox after 6s (cont_inbox=%d entries — peer A may not support remote execute)", len(contEntries))))
+			fmt.Sprintf("no delivery at result inbox after 6s (cont_inbox=%d entries). The dispatch spans BOTH peers — A hosts the continuation, B serves the tree:get — so this names neither. Bisect with a same-impl control (A→A) before routing it at either side: it read \"peer A may not support remote execute\" until 2026-08-13, when the A→A control passed in 201ms and the actual seam was B.", len(contEntries))))
 	}
 
 	return checks

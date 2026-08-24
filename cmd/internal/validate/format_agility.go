@@ -62,8 +62,12 @@ func runFormatAgility(ctx context.Context, client *PeerClient) []CheckResult {
 		"v7.66 §2.2 errata (KEY-TYPE-STRING-1: system/peer.data.key_type encodes as CBOR string \"ed25519\", not int)")
 	r.Declare("key_type_prefix_1",
 		"v7.66 §2.2 errata (KEY-TYPE-PREFIX-1: binary peer_id prefix encodes as varint(0x01) for Ed25519)")
+	// Re-cited 2026-08-13 to the landed core-protocol sections (arch
+	// ROUTING-2026-08-13-f §4, read at arch `7a71dea`). These three named
+	// v7.66 surface numbers — a version-stamped spec revision rather than a
+	// section that still exists — so they resolved nowhere.
 	r.Declare("legacy_mint_1",
-		"v7.66 §3 legacy rip (LEGACY-MINT-1: no live mint API produces legacy SHA-256-form Ed25519 peer_id)")
+		"ENTITY-CORE-PROTOCOL §1.5 canonical-form-per-key_type table (Ed25519 → 0x00 identity-multihash) + the §1.5 wire-acceptance carve-out (LEGACY-MINT-1: non-canonical form MAY be accepted and MUST be canonicalized, but is never minted)")
 	r.Declare("agility_decode_1",
 		"v7.66 §4.4 surface 1 (AGILITY-DECODE-1: wire-format decoder accepts key_type=0xFE first byte without panic/hardcode-reject)")
 	r.Declare("agility_entity_1",
@@ -71,9 +75,12 @@ func runFormatAgility(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("agility_canonical_1",
 		"v7.66 §4.4 surface 3 (AGILITY-CANONICAL-1: canonical-form selection for key_type=0xFE returns SHA-256-form hash_type=0x01; identity-form refused at mint per substrate floor)")
 	r.Declare("agility_pattern_1",
-		"v7.66 §4.4 surface 5 (AGILITY-PATTERN-1: cap pattern with key_type=0xFE peer reference canonicalizes per v7.65 §6 rules — no Ed25519 short-circuit)")
+		"ENTITY-CORE-PROTOCOL §1.5 \"Why canonical form is mandated (cap-pattern operator-coherence)\" + the §1.5 wire-acceptance carve-out (MUST canonicalize before any cap-state operation) + §5.4 canonicalization (AGILITY-PATTERN-1: cap pattern with key_type=0xFE peer reference canonicalizes — no Ed25519 short-circuit)")
+	// §4.5 names AGILITY-UNKNOWN-1 in the spec text itself and pins the pass
+	// condition: "satisfied if 400 unsupported_key_type is emitted at any
+	// handshake surface."
 	r.Declare("agility_unknown_1",
-		"v7.66 §4.4 surface 6 / §7.1 (AGILITY-UNKNOWN-1: handshake with unsupported key_type=0xFD returns 400 unsupported_key_type)")
+		"ENTITY-CORE-PROTOCOL §4.5 unsupported-key_type canonical reject point (AGILITY-UNKNOWN-1: handshake with unsupported key_type=0xFD returns 400 unsupported_key_type at any handshake surface)")
 	r.Declare("format_code_interpretation_1",
 		"v7.67 §2.3 normative (FORMAT-CODE-INTERPRETATION-1, renamed from v7.66 PREFIX-DISPATCH-1: an impl receiving a content_hash whose format-code it does not support returns unsupported_content_hash_format; the format-code is intrinsic to the hash — no dispatch step is distinct from interpreting the leading bytes)")
 	r.Declare("cap_freeze_1",

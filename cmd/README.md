@@ -40,9 +40,12 @@ go run ./cmd/peer-manager stop --all
 | **validate-peer** | The conformance validator. Runs the V7 spec suite against a live peer, single-peer or multi-peer convergence. `validate-peer -list-categories` prints every category; see CLAUDE.md for the full flag reference. The primary gate for any implementation. |
 | **compare-types** | Connects to two peers, fetches all type definitions from each, and diffs them field-by-field (also against locally-generated types). |
 | **entity-sync** | Sets up cross-peer sync (continuation chains + subscriptions) so one peer's subtree mirrors onto another. |
+| **corpus-check** | Holds every registered conformance corpus to one contract — artifact-is-expected (pinned sha), source-produces-artifact (re-encode), and copies-agree. Registry: `cmd/internal/corpus`. Writes nothing. Wired into `validate-complete.sh` PASS 0. |
+| **conformance-register** | Emits the conformance category register — every check `validate-peer` declares, its citation, its profile membership, and whether it contacts the peer at all — and resolves each citation against the live spec trees. Static: no peer, no network. `-check` is a baseline ratchet wired into `validate-complete.sh` as PASS 0b. |
 
 ```bash
 go run ./cmd/validate-peer -addr host:port -identity framework-admin
+go run ./cmd/conformance-register            # summary; -md, -findings, -json, -check
 go run ./cmd/validate-peer -peers h1:p,h2:p -identity framework-admin   # convergence
 go run ./cmd/compare-types host1:port host2:port
 go run ./cmd/entity-sync -from host:port -to host:port -source-prefix local/files/

@@ -31,7 +31,7 @@ import (
 // is the coordination + socket-choreography half of §11.5 — not traversal.
 func runSignalingPunch(ctx context.Context, r *CheckRunner, sigA, sigB *signaling.Client) {
 	r.Declare("signaling_punch",
-		"brief §7.1/§7.4.1/§10.3 — two peers punch through the live node carrier: candidate+sync exchange, both-fire simultaneous open, identity-checked handshake, a verified op over the direct path, and pooled-transport reuse after an idle")
+		"EXTENSION-SIGNALING brief §7.1/§7.4.1/§10.3 — two peers punch through the live node carrier: candidate+sync exchange, both-fire simultaneous open, identity-checked handshake, a verified op over the direct path, and pooled-transport reuse after an idle")
 
 	r.Run("signaling_punch", func() CheckOutcome {
 		if out, ok := r.Require("signaling_authority"); !ok {

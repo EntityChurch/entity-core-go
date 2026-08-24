@@ -59,25 +59,33 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 	peerID := string(client.RemotePeerID())
 	uri := issuerURI(peerID)
 
-	r.Declare("surface_registered", "§6a.9 — the peer-issued issuer handler is reachable (peer started with an issuer policy); an unregistered handler is the default-off posture, not a failure of the peer, but it means nothing below is measured")
-	r.Declare("policy_open_grants", "§6a.9.1 mode=open — a layer-1-valid request is signed and published; the binding resolves afterwards")
-	r.Declare("name_taken_on_second_register", "§6a.9 — the third row of the pinned status table: a name already bound in this registry MUST be refused 409 name_taken, and the refusal MUST leave the first binding intact")
-	r.Declare("policy_allowlist_grants_listed", "§6a.9.1 mode=allowlist — a target_peer_id IN the allowlist is admitted")
-	r.Declare("policy_allowlist_rejects_unlisted", "§6a.9.1 mode=allowlist — a target_peer_id NOT in the allowlist MUST be refused 403 not_entitled")
-	r.Declare("policy_allowlist_unlisted_publishes_nothing", "§6a.9.1 — the negative half: a refused request MUST NOT leave a resolvable binding behind (a 403 that published anyway would pass a status-only check)")
-	r.Declare("policy_manual_queues", "§6a.9.1 mode=manual — the request is accepted for review as 202 pending_review, NOT signed")
-	r.Declare("policy_manual_publishes_nothing", "§6a.9.1 — the negative half of manual, and the one that matters: a 202 that quietly published the binding would satisfy a status-only assertion while defeating the entire mode")
-	r.Declare("name_constraints_rejects_nonmatching", "§6a.9.1 — a name outside the policy's name_constraints glob MUST be refused 403 not_entitled")
-	r.Declare("layer1_unsigned_request_rejected", "§6a.9 layer 1 — a register-request with no system/signature at its invariant pointer MUST be refused; ownership proof is the floor beneath every policy mode")
-	r.Declare("revoke_request_publishes_revocation", "§6a.9 — revoke-request MUST publish a verifying revocation at the by-target index, which is the §2.1 step-4 signal a resolver excludes the binding on. Revocation is ADDITIVE: the immutable binding and its by-name pointer stay put.")
-	r.Declare("renew_request_accepted", "§6a.9 — renew-request extends an existing binding's expiry")
-	r.Declare("layer1_unsigned_revoke_rejected", "§6a.9 REG-REVOKE-PROOF-1 [added 2026-08-11] — revoke-request is \"Signed by target_peer_id or the operator\". An unsigned revoke MUST be refused: revocation is monotonic and cannot be undone, so an unauthenticated one is a permanent denial-of-name against any binding in the registry")
-	r.Declare("layer1_unsigned_renew_rejected", "§6a.9 REG-RENEW-PROOF-1 [added 2026-08-11] — renew-request is \"Signed by target_peer_id (layer-1)\". Replay defense is not authorization: it stops a CAPTURED request being re-run while leaving a fresh unsigned one accepted")
-	r.Declare("unknown_operation_rejected", "§6a.9 — an operation the issuer does not implement MUST be refused, not silently accepted")
-	r.Declare("set_issuer_policy_round_trip", "§6a.9.2 — set-issuer-policy stores the policy and get-issuer-policy returns it as written. Before this ruling the capability system/capability/registry-manage-issuer-policy named an act the corpus never defined, and a client had nothing to call")
-	r.Declare("set_issuer_policy_replaces_whole", "§6a.9.2 [MUST] — set replaces the policy WHOLE; an absent optional field means *unset*, not *unchanged*. A merge would make the result depend on write order, which two peers cannot reconstruct")
-	r.Declare("set_issuer_policy_domain_control_rejected", "§6a.9.2 — mode \"domain-control\" MUST be refused 400 unsupported_mode and NOT stored, rather than arming a mode the issuer cannot enforce. The negative half is checked too: a 400 that stored anyway passes a status-only assertion")
-	r.Declare("get_issuer_policy_unset_404", "§6a.9.2 — unset is not a mode: with no policy stored, get MUST answer 404 not_found and MUST NOT synthesize a default `open`, which would silently turn a curated registry into a first-come-first-serve one")
+	r.Declare("surface_registered", "EXTENSION-REGISTRY §6a.9 — the peer-issued issuer handler is reachable (peer started with an issuer policy); an unregistered handler is the default-off posture, not a failure of the peer, but it means nothing below is measured")
+	r.Declare("policy_open_grants", "EXTENSION-REGISTRY §6a.9.1 mode=open — a layer-1-valid request is signed and published; the binding resolves afterwards")
+	r.Declare("register_result_status_bound", "EXTENSION-REGISTRY §6a.9 — the 200 row answers `register-result { status: \"bound\", binding_hash }`: its OWN result type, the pinned discriminator value, and the hash REQUIRED on that branch. The success branch was the unmeasured one — three impls quietly agreed on an under-specified shape while the 202's visible disagreement got all the scrutiny")
+	r.Declare("name_taken_on_second_register", "EXTENSION-REGISTRY §6a.9 — the third row of the pinned status table: a name already bound in this registry MUST be refused 409 name_taken, and the refusal MUST leave the first binding intact")
+	r.Declare("policy_allowlist_grants_listed", "EXTENSION-REGISTRY §6a.9.1 mode=allowlist — a target_peer_id IN the allowlist is admitted")
+	r.Declare("policy_allowlist_rejects_unlisted", "EXTENSION-REGISTRY §6a.9.1 mode=allowlist — a target_peer_id NOT in the allowlist MUST be refused 403 not_entitled")
+	r.Declare("policy_allowlist_unlisted_publishes_nothing", "EXTENSION-REGISTRY §6a.9.1 — the negative half: a refused request MUST NOT leave a resolvable binding behind (a 403 that published anyway would pass a status-only check)")
+	r.Declare("policy_manual_queues", "EXTENSION-REGISTRY §6a.9.1 mode=manual — the request is accepted for review as 202 pending_review, NOT signed")
+	r.Declare("policy_manual_publishes_nothing", "EXTENSION-REGISTRY §6a.9.1 — the negative half of manual, and the one that matters: a 202 that quietly published the binding would satisfy a status-only assertion while defeating the entire mode")
+	r.Declare("pending_handle_resolves", "EXTENSION-REGISTRY §6a.9.3 REG-PENDING-HANDLE-1 [RULED 2026-08-13] — the 202's pending_hash MUST RESOLVE to a system/registry/pending-binding with status pending_review. Until v1.3 this was unassertable: pending_hash was a MUST naming an entity with no schema, so a handle that named nothing fetchable was indistinguishable from a conformant one")
+	r.Declare("pending_pointer_resolves", "EXTENSION-REGISTRY §6a.9.3 — the by-request pointer at pending/by-request/{target_peer_id}/{name} MUST resolve to the same body, so a requester that no longer holds the 202 can still poll its own queued request")
+	r.Declare("pending_supersession_replaces_head", "EXTENSION-REGISTRY §6a.9.3 [MUST] — one pending head per (target_peer_id, name): a repeat request supersedes rather than enqueuing a duplicate. Retries carry a fresh nonce by construction, so without this an operator's queue fills with copies of one intent")
+	r.Declare("pending_deny_leaves_head_and_publishes_nothing", "EXTENSION-REGISTRY §6a.9.3 REG-PENDING-DECIDE-1 (deny half) — deny MUST publish nothing AND leave a `denied` head reachable through the pointer. Deny is not a delete: a requester polling a vanished pointer cannot distinguish denied from never-received, which is a silent drop. A deny that silently issued returns an identical body, so the publishes-nothing half is the only one that can see it")
+	r.Declare("pending_second_decision_rejected", "EXTENSION-REGISTRY §6a.9.3 — a second decision on a decided head MUST answer 409 already_decided. The dangerous failure is a 200: approving an already-denied request overturns the operator's refusal by retry, and re-approving mints a second binding for one request")
+	r.Declare("pending_approve_issues_and_leaves_head", "EXTENSION-REGISTRY §6a.9.3 REG-PENDING-DECIDE-1 (approve half) — approve issues a binding that resolves BY NAME and leaves an `approved` head carrying its binding_hash")
+	r.Declare("pending_decide_unknown_handle_404", "EXTENSION-REGISTRY §6a.9.3 — a pending_hash naming no stored pending-binding MUST answer 404 not_found. Probed with a well-formed body the registry never minted, not a random hash: a peer that rejects garbage but accepts a plausible unminted entity has the weaker check")
+	r.Declare("name_constraints_rejects_nonmatching","EXTENSION-REGISTRY §6a.9.1 — a name outside the policy's name_constraints glob MUST be refused 403 not_entitled")
+	r.Declare("layer1_unsigned_request_rejected", "EXTENSION-REGISTRY §6a.9 layer 1 — a register-request with no system/signature at its invariant pointer MUST be refused; ownership proof is the floor beneath every policy mode")
+	r.Declare("revoke_request_publishes_revocation", "EXTENSION-REGISTRY §6a.9 — revoke-request MUST publish a verifying revocation at the by-target index, which is the §2.1 step-4 signal a resolver excludes the binding on. Revocation is ADDITIVE: the immutable binding and its by-name pointer stay put.")
+	r.Declare("renew_request_accepted", "EXTENSION-REGISTRY §6a.9 — renew-request extends an existing binding's expiry")
+	r.Declare("layer1_unsigned_revoke_rejected", "EXTENSION-REGISTRY §6a.9 REG-REVOKE-PROOF-1 [added 2026-08-11] — revoke-request is \"Signed by target_peer_id or the operator\". An unsigned revoke MUST be refused: revocation is monotonic and cannot be undone, so an unauthenticated one is a permanent denial-of-name against any binding in the registry")
+	r.Declare("layer1_unsigned_renew_rejected", "EXTENSION-REGISTRY §6a.9 REG-RENEW-PROOF-1 [added 2026-08-11] — renew-request is \"Signed by target_peer_id (layer-1)\". Replay defense is not authorization: it stops a CAPTURED request being re-run while leaving a fresh unsigned one accepted")
+	r.Declare("unknown_operation_rejected", "EXTENSION-REGISTRY §6a.9 — an operation the issuer does not implement MUST be refused, not silently accepted")
+	r.Declare("set_issuer_policy_round_trip", "EXTENSION-REGISTRY §6a.9.2 — set-issuer-policy stores the policy and get-issuer-policy returns it as written. Before this ruling the capability system/capability/registry-manage-issuer-policy named an act the corpus never defined, and a client had nothing to call")
+	r.Declare("set_issuer_policy_replaces_whole", "EXTENSION-REGISTRY §6a.9.2 [MUST] — set replaces the policy WHOLE; an absent optional field means *unset*, not *unchanged*. A merge would make the result depend on write order, which two peers cannot reconstruct")
+	r.Declare("set_issuer_policy_domain_control_rejected", "EXTENSION-REGISTRY §6a.9.2 — mode \"domain-control\" MUST be refused 400 unsupported_mode and NOT stored, rather than arming a mode the issuer cannot enforce. The negative half is checked too: a 400 that stored anyway passes a status-only assertion")
+	r.Declare("get_issuer_policy_unset_404", "EXTENSION-REGISTRY §6a.9.2 — unset is not a mode: with no policy stored, get MUST answer 404 not_found and MUST NOT synthesize a default `open`, which would silently turn a curated registry into a first-come-first-serve one")
 
 	// --- surface reachability -------------------------------------------
 
@@ -146,6 +154,60 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 			return FailCheck("mode=open returned 200 but no binding is bound at " + types.PeerIssuedByNamePath(name) + " — the registry claimed to issue and did not")
 		}
 		return PassCheck("mode=open signed + published the binding, and it resolves")
+	}))
+
+	// R-7 (2026-08-13). §6a.9's 200 row pins BOTH halves of the result —
+	// `status: "bound"` and `binding_hash` — and nothing asserted either.
+	//
+	// WHY THIS WAS MISSED, and it is not the same miss as R-6. `policy_open_grants`
+	// above is a real check: it drives mode=open, requires 200, and reads the
+	// binding back. What it never does is open the RESULT BODY. So the
+	// discriminator field the whole §6a.9 ruling turns on was unmeasured on the
+	// success branch, and Go shipped `status: "registered"` against a spec that
+	// pins `"bound"` — a live cross-peer MUST divergence that passed every gate
+	// in every run, while the constant's own comment claimed to implement §6a.9.
+	//
+	// **Found by `entity-core-rust`, applying the same ruling, not by us.** Their
+	// observation is worth keeping verbatim: the three-way analysis all happened
+	// on the 202 because that is where the visible disagreement was, and *"the
+	// branch where all three quietly agreed on an under-specified shape got no
+	// scrutiny."* A divergence is found where implementations disagree loudly;
+	// this class hides where they agree.
+	r.Run("register_result_status_bound", gate(func() CheckOutcome {
+		if out := setIssuerPolicy(ctx, client, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen}); out != nil {
+			return *out
+		}
+		name := issuerName("bound")
+		status, code, resp, _, err := issuerRegisterResp(ctx, client, uri, name)
+		if err != nil {
+			return FailCheck("register-request: " + err.Error())
+		}
+		if status != 200 {
+			return FailCheck(fmt.Sprintf("mode=open register-request → %d/%q, want 200", status, code))
+		}
+		if len(resp.Result) == 0 {
+			return FailCheck("200 carried no result body — §6a.9 pins register-result { status, binding_hash } on the success branch")
+		}
+		var resultEnt entity.Entity
+		if err := ecf.Decode(resp.Result, &resultEnt); err != nil {
+			return FailCheck("undecodable result entity: " + err.Error())
+		}
+		if resultEnt.Type != types.TypeRegistryRegisterResult {
+			return FailCheck(fmt.Sprintf("200 result is %q, want %q — §6a.9 gives register-request its OWN result type on both branches (borrowing another operation's shape is what the ruling retired)",
+				resultEnt.Type, types.TypeRegistryRegisterResult))
+		}
+		var d types.RegistryRegisterResultData
+		if err := ecf.Decode(resultEnt.Data, &d); err != nil {
+			return FailCheck("undecodable register-result data: " + err.Error())
+		}
+		if d.Status != types.RegisterStatusBound {
+			return FailCheck(fmt.Sprintf("200 register-result status is %q, want %q — §6a.9 pins the discriminator on the success branch, and an impl-local spelling makes the outcome unreadable cross-peer",
+				d.Status, types.RegisterStatusBound))
+		}
+		if d.BindingHash == nil || d.BindingHash.IsZero() {
+			return FailCheck("200 register-result carries status=bound with no binding_hash — §6a.9 makes it REQUIRED on that branch, and without it the caller has no handle to the thing just issued")
+		}
+		return PassCheck(fmt.Sprintf("200 answers register-result{status=%q, binding_hash=%s}", d.Status, d.BindingHash.String()))
 	}))
 
 	// --- the name_taken row ------------------------------------------------
@@ -262,6 +324,9 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 	// --- mode: manual -----------------------------------------------------
 
 	manualName := issuerName("manual")
+	// Captured by policy_manual_queues and consumed by the §6a.9.3 rows
+	// below. They Require() that check, so an unset value is unreachable.
+	var manualPendingHash hash.Hash
 	r.Run("policy_manual_queues", gate(func() CheckOutcome {
 		if out := setIssuerPolicy(ctx, client, types.IssuerPolicyData{Mode: types.IssuerPolicyModeManual}); out != nil {
 			return *out
@@ -348,6 +413,7 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 			case ph == requestHash:
 				return FailCheck("mode=manual returned pending_hash equal to the register-request's own content_hash — that is the value the requester already held before dispatching, so it names nothing fetchable and is not a handle (ruled 2026-08-12 d)")
 			}
+			manualPendingHash = ph
 			return PassCheck("mode=manual queued as 202 with " + registryPendingReview + " in the result field (" + carrier + "), pending_hash distinct from the request")
 		case code == registryPendingReview:
 			return WarnCheck(fmt.Sprintf("mode=manual queued as 202 carrying %q as an ERROR CODE on a success status — §6a.9's table heading invites this, but its pseudocode and every cohort member write a result field (spec-issues/2026-08-12-c)", registryPendingReview))
@@ -368,6 +434,299 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 			return FailCheck("mode=manual returned 202 pending_review AND published a binding at " + types.PeerIssuedByNamePath(manualName) + " — operator review is bypassed; the mode does nothing")
 		}
 		return PassCheck("mode=manual published nothing pending review")
+	}))
+
+	// --- §6a.9.3 the manual-approval path (RULED 2026-08-13) --------------
+	//
+	// REG-PENDING-HANDLE-1's RESOLVABILITY half and REG-PENDING-DECIDE-1.
+	// Until v1.3 these could not be written: `pending_hash` was a MUST naming
+	// an entity with no schema, so the strongest thing assertable was that
+	// the handle differed from the request's own hash (above). A handle that
+	// names nothing fetchable was indistinguishable from a conformant one.
+	//
+	// EXPECT THESE TO FAIL AGAINST SIBLINGS, and that is the honest signal,
+	// not a probe bug: the ruling's own status line says UNBUILT IN ALL THREE
+	// (rust withheld pending_hash pending the schema; py built against the
+	// reserved section, storing `system/registry/register-pending` at a
+	// different prefix and removing the head on approve). Do NOT soften these
+	// to WARN to keep a cross-peer run green — a WARN is invisible in a green
+	// run, which is the exact failure mode this category was corrected for
+	// twice this month.
+
+	r.Run("pending_handle_resolves", gate(func() CheckOutcome {
+		if out, ok := r.Require("policy_manual_queues"); !ok {
+			return out
+		}
+		bodyPath := types.PendingBindingPath(manualPendingHash)
+		ent, _, err := client.TreeGet(ctx, bodyPath)
+		if err != nil {
+			return FailCheck("the 202's pending_hash does not resolve: tree:get " + bodyPath +
+				" → " + err.Error() + " — §6a.9.3 stores the queued request at that path, and a" +
+				" handle naming nothing fetchable is not a handle (ruled 2026-08-12 d, schema 2026-08-13)")
+		}
+		if ent.Type != types.TypeRegistryPendingBinding {
+			return FailCheck(fmt.Sprintf("pending_hash resolves to type %q, want %q (§6a.9.3)",
+				ent.Type, types.TypeRegistryPendingBinding))
+		}
+		pb, err := types.PendingBindingDataFromEntity(ent)
+		if err != nil {
+			return FailCheck("decode pending-binding: " + err.Error())
+		}
+		if pb.Status != types.PendingStatusPendingReview {
+			return FailCheck(fmt.Sprintf("queued pending-binding status is %q, want %q",
+				pb.Status, types.PendingStatusPendingReview))
+		}
+		if pb.Name != manualName {
+			return FailCheck(fmt.Sprintf("pending-binding names %q, the request asked for %q", pb.Name, manualName))
+		}
+		if pb.BindingHash != nil {
+			return FailCheck("a pending_review head carries binding_hash — that field is REQUIRED on \"approved\" and absent otherwise, so a peer setting it here has issued something or is mis-shaping the entity")
+		}
+		return PassCheck("pending_hash resolves to a " + types.TypeRegistryPendingBinding +
+			" with status " + types.PendingStatusPendingReview)
+	}))
+
+	r.Run("pending_pointer_resolves", gate(func() CheckOutcome {
+		if out, ok := r.Require("pending_handle_resolves"); !ok {
+			return out
+		}
+		ptr := types.PendingBindingByRequestPath(string(client.LocalPeerID()), manualName)
+		ent, _, err := client.TreeGet(ctx, ptr)
+		if err != nil {
+			return FailCheck("no by-request pointer at " + ptr + ": " + err.Error() +
+				" — §6a.9.3 requires it precisely so a requester that no longer holds the 202" +
+				" can still poll its own queued request")
+		}
+		if ent.ContentHash != manualPendingHash {
+			return FailCheck(fmt.Sprintf("by-request pointer resolves to %s but the 202 handed back %s"+
+				" — the pointer MUST name the current head",
+				types.PeerIdentityHashHex(ent.ContentHash), types.PeerIdentityHashHex(manualPendingHash)))
+		}
+		return PassCheck("by-request pointer at " + ptr + " resolves to the same body the 202 named")
+	}))
+
+	// Supersession, measured before any decision is taken — a second request
+	// for the same (target_peer_id, name) MUST replace the head rather than
+	// enqueue a duplicate. Retries carry a fresh nonce by construction, so
+	// without this rule an operator's queue fills with copies of one intent.
+	r.Run("pending_supersession_replaces_head", gate(func() CheckOutcome {
+		if out, ok := r.Require("pending_pointer_resolves"); !ok {
+			return out
+		}
+		status, code, resp, _, err := issuerRegisterResp(ctx, client, uri, manualName)
+		if err != nil {
+			return FailCheck("superseding register-request: " + err.Error())
+		}
+		if status != 202 {
+			return FailCheck(fmt.Sprintf("a repeat request for a name already pending answered %d/%q,"+
+				" want 202 — the queue is not a reservation and a pending head is not a binding", status, code))
+		}
+		newPH, ok := pendingHashFromResult(resp)
+		if !ok {
+			return FailCheck("superseding request returned no pending_hash")
+		}
+		if newPH == manualPendingHash {
+			return FailCheck("superseding request returned the SAME pending_hash — the head was not replaced")
+		}
+		ptr := types.PendingBindingByRequestPath(string(client.LocalPeerID()), manualName)
+		ent, _, err := client.TreeGet(ctx, ptr)
+		if err != nil {
+			return FailCheck("by-request pointer vanished after supersession: " + err.Error())
+		}
+		if ent.ContentHash != newPH {
+			return FailCheck("by-request pointer still names the superseded head — §6a.9.3 [MUST]: one pending head per (target_peer_id, name)")
+		}
+		manualPendingHash = newPH
+		return PassCheck("a repeat request superseded the head; the pointer names the new body")
+	}))
+
+	// REG-PENDING-DECIDE-1, deny half. Run FIRST and on the name already in
+	// the queue: deny is the half an outcome-only check cannot see, because a
+	// deny that silently issued returns the same shape.
+	r.Run("pending_deny_leaves_head_and_publishes_nothing", gate(func() CheckOutcome {
+		if out, ok := r.Require("pending_supersession_replaces_head"); !ok {
+			return out
+		}
+		reason := "conformance probe — deny path"
+		params, err := types.RegistryDecisionRequestData{
+			PendingHash: manualPendingHash,
+			Reason:      &reason,
+		}.ToDenyEntity()
+		if err != nil {
+			return FailCheck("encode deny-request: " + err.Error())
+		}
+		status, code, err := issuerDispatch(ctx, client, uri, peerissued.OpDenyRequest, params)
+		if err != nil {
+			return FailCheck("deny-request: " + err.Error())
+		}
+		if status != 200 {
+			return FailCheck(fmt.Sprintf("deny-request → %d/%q, want 200 (§6a.9.3 operations table)", status, code))
+		}
+		// The load-bearing half: nothing was signed.
+		bound, err := issuerNameResolves(ctx, client, manualName)
+		if err != nil {
+			return FailCheck("read back by-name binding: " + err.Error())
+		}
+		if bound {
+			return FailCheck("deny-request published a binding at " + types.PeerIssuedByNamePath(manualName) +
+				" — a deny that silently issues passes an outcome-only check, which is why this half exists")
+		}
+		// Deny is not a delete: the head persists so a poller can tell
+		// "denied" from "never received".
+		ptr := types.PendingBindingByRequestPath(string(client.LocalPeerID()), manualName)
+		ent, _, err := client.TreeGet(ctx, ptr)
+		if err != nil {
+			return FailCheck("deny removed the by-request pointer (" + ptr + "): " + err.Error() +
+				" — §6a.9.3 [MUST]: a requester polling a vanished pointer cannot distinguish denied" +
+				" from never-received, which is a silent drop")
+		}
+		pb, err := types.PendingBindingDataFromEntity(ent)
+		if err != nil {
+			return FailCheck("decode denied head: " + err.Error())
+		}
+		if pb.Status != types.PendingStatusDenied {
+			return FailCheck(fmt.Sprintf("head after deny has status %q, want %q", pb.Status, types.PendingStatusDenied))
+		}
+		manualPendingHash = ent.ContentHash
+		return PassCheck("deny left a " + types.PendingStatusDenied + " head reachable through the pointer and published nothing")
+	}))
+
+	r.Run("pending_second_decision_rejected", gate(func() CheckOutcome {
+		if out, ok := r.Require("pending_deny_leaves_head_and_publishes_nothing"); !ok {
+			return out
+		}
+		params, err := types.RegistryDecisionRequestData{PendingHash: manualPendingHash}.ToApproveEntity()
+		if err != nil {
+			return FailCheck("encode approve-request: " + err.Error())
+		}
+		status, code, err := issuerDispatch(ctx, client, uri, peerissued.OpApproveRequest, params)
+		if err != nil {
+			return FailCheck("approve-request on a decided head: " + err.Error())
+		}
+		if status != 409 {
+			// Named explicitly because the dangerous failure here is a 200:
+			// approving an already-denied request mints a binding the
+			// operator refused.
+			return FailCheck(fmt.Sprintf("approving an already-denied request → %d/%q, want 409 already_decided"+
+				" — approve and deny are not idempotent-by-replay, and a 200 here means the operator's"+
+				" refusal was overturned by a retry", status, code))
+		}
+		// Asserted as status AND code, per §6a.9's own conformance MUST: a
+		// check of a pinned row that reads only the status scores the
+		// contract's weaker half and reports green on a divergence.
+		if code != types.RegistryErrAlreadyDecided {
+			return FailCheck(fmt.Sprintf("second decision answered 409 %q, §6a.9.3 pins %q",
+				code, types.RegistryErrAlreadyDecided))
+		}
+		bound, err := issuerNameResolves(ctx, client, manualName)
+		if err != nil {
+			return FailCheck("read back by-name binding: " + err.Error())
+		}
+		if bound {
+			return FailCheck("the refused second decision published a binding anyway")
+		}
+		return PassCheck("a second decision on a decided head → 409 already_decided, nothing published")
+	}))
+
+	// REG-PENDING-DECIDE-1, approve half — on its own name, because the one
+	// above is now permanently denied.
+	approveName := issuerName("approve")
+	r.Run("pending_approve_issues_and_leaves_head", gate(func() CheckOutcome {
+		if out, ok := r.Require("pending_handle_resolves"); !ok {
+			return out
+		}
+		if out := setIssuerPolicy(ctx, client, types.IssuerPolicyData{Mode: types.IssuerPolicyModeManual}); out != nil {
+			return *out
+		}
+		status, code, resp, _, err := issuerRegisterResp(ctx, client, uri, approveName)
+		if err != nil {
+			return FailCheck("register-request: " + err.Error())
+		}
+		if status != 202 {
+			return FailCheck(fmt.Sprintf("mode=manual → %d/%q, want 202", status, code))
+		}
+		ph, ok := pendingHashFromResult(resp)
+		if !ok {
+			return FailCheck("202 returned no pending_hash")
+		}
+		params, err := types.RegistryDecisionRequestData{PendingHash: ph}.ToApproveEntity()
+		if err != nil {
+			return FailCheck("encode approve-request: " + err.Error())
+		}
+		status, code, aResp, err := issuerDispatchFull(ctx, client, uri, peerissued.OpApproveRequest, params)
+		if err != nil {
+			return FailCheck("approve-request: " + err.Error())
+		}
+		if status != 200 {
+			return FailCheck(fmt.Sprintf("approve-request → %d/%q, want 200 with register-result {status: bound, binding_hash}", status, code))
+		}
+		if s, desc := pendingReviewFromResult(aResp); s != types.RegisterStatusBound {
+			return FailCheck(fmt.Sprintf("approve-request result status is %q, want %q (%s)",
+				s, types.RegisterStatusBound, desc))
+		}
+		// It actually issued.
+		bound, err := issuerNameResolves(ctx, client, approveName)
+		if err != nil {
+			return FailCheck("read back by-name binding: " + err.Error())
+		}
+		if !bound {
+			return FailCheck("approve-request answered 200 bound but " + types.PeerIssuedByNamePath(approveName) +
+				" does not resolve — the approval issued nothing")
+		}
+		// And left an `approved` head carrying the binding it issued.
+		ptr := types.PendingBindingByRequestPath(string(client.LocalPeerID()), approveName)
+		ent, _, err := client.TreeGet(ctx, ptr)
+		if err != nil {
+			return FailCheck("approve removed the by-request pointer (" + ptr + "): " + err.Error() +
+				" — §6a.9.3 keeps the head so the outcome stays pollable")
+		}
+		pb, err := types.PendingBindingDataFromEntity(ent)
+		if err != nil {
+			return FailCheck("decode approved head: " + err.Error())
+		}
+		if pb.Status != types.PendingStatusApproved {
+			return FailCheck(fmt.Sprintf("head after approve has status %q, want %q", pb.Status, types.PendingStatusApproved))
+		}
+		if pb.BindingHash == nil {
+			return FailCheck("approved head carries no binding_hash — REQUIRED on \"approved\" (§6a.9.3)")
+		}
+		return PassCheck("approve issued a resolvable binding and left an " + types.PendingStatusApproved +
+			" head carrying its binding_hash")
+	}))
+
+	r.Run("pending_decide_unknown_handle_404", gate(func() CheckOutcome {
+		if out, ok := r.Require("pending_handle_resolves"); !ok {
+			return out
+		}
+		// A well-formed pending-binding this registry never minted. Not a
+		// random hash: a peer that 404s on garbage but accepts a plausible
+		// unminted body has the weaker check, and this is the shape that
+		// distinguishes them.
+		unminted, err := types.PendingBindingData{
+			Name:         issuerName("never-queued"),
+			TargetPeerID: string(client.LocalPeerID()),
+			QueuedAt:     uint64(time.Now().UnixMilli()),
+			Status:       types.PendingStatusPendingReview,
+		}.ToEntity()
+		if err != nil {
+			return FailCheck("encode unminted pending-binding: " + err.Error())
+		}
+		params, err := types.RegistryDecisionRequestData{PendingHash: unminted.ContentHash}.ToApproveEntity()
+		if err != nil {
+			return FailCheck("encode approve-request: " + err.Error())
+		}
+		status, code, err := issuerDispatch(ctx, client, uri, peerissued.OpApproveRequest, params)
+		if err != nil {
+			return FailCheck("approve-request: " + err.Error())
+		}
+		if status != 404 {
+			return FailCheck(fmt.Sprintf("approving a pending_hash the registry never stored → %d/%q,"+
+				" want 404 not_found (§6a.9.3)", status, code))
+		}
+		if code != types.RegistryErrNotFound {
+			return FailCheck(fmt.Sprintf("404 answered code %q, §6a.9.3 pins %q", code, types.RegistryErrNotFound))
+		}
+		return PassCheck("a pending_hash naming no stored pending-binding → 404 not_found")
 	}))
 
 	// --- name_constraints -------------------------------------------------
