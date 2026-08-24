@@ -105,7 +105,8 @@ func openEntryCap(t *testing.T, p *Peer) entity.Entity {
 // the peer's own engine could no longer write the foreign-namespace subtrees
 // its store legitimately holds under V7 §1.4's universal address space
 // (Category A: a `follow` mirror at /{them}/app/..., a cached foreign content
-// site). entity-core-rust hit exactly this at c484fa6.
+// site). entity-core-rust hit exactly this shape in their own
+// `default_handler_self_grant` and fixed it the same way.
 //
 // Teeth: this test goes 403 capability_denied against the pre-fix bare-"*"
 // spelling. The CONTROL below — the identical binding written through the

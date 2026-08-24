@@ -952,8 +952,12 @@ func advertisedServedScope(reg *handler.Registry) []types.GrantEntry {
 // /{them}/app/..., a cached foreign content site): a default-scope handler
 // sub-dispatching system/tree:put at /{remote}/... got 403 capability_denied
 // while the identical binding through the bootstrap LocationIndex path
-// succeeded. entity-core-rust hit the same shape at c484fa6 and fixed it the
-// same way (default_handler_self_grant, peer-wildcard form).
+// succeeded. entity-core-rust hit the same shape and fixed it the same way —
+// their `default_handler_self_grant` (core/capability/src/lib.rs) now spells
+// the peer-wildcard form. (Cited by symbol, not by SHA: a sibling's dev commit
+// is re-authored by the release `--series` filter and resolves nowhere for a
+// reader of the published tree — [ADR-0012] Amendment 1 / RUNBOOK-RELEASE-
+// CURATION. The symbol survives; the hash does not.)
 //
 // This does not blunt D1. D1's teeth are handlers that declare a NARROW
 // InternalScope (ext/network's "system/*", ext/localfiles' "local/files/*", …);

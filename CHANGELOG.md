@@ -9,10 +9,50 @@ A **tag is a release** ([ADR-0015]) — a docs or `AGENTS.md` change does not ge
 one. Conformance, not the version number, is the contract ([ADR-0012]): every
 number below is pinned to the commit it was measured at.
 
+## Versioning — three numbers, three jobs
+
+Read this before writing a version anywhere in this repo.
+
+| Number | What it is | Where it lives |
+|---|---|---|
+| **`0.y.z`** | **This module's own release.** 3-field SemVer, forward-only from the published `v0.8.0`. | the git tag, the headings below, `ext/go.mod`, `cmd/go.mod`, README §Module paths |
+| **`v7.NN`** | **The protocol revision we implement.** Carried out-of-band, never in the version. | README, `--profile core`, flag help, `docs/STATUS.md` |
+| **`N · 0F · 0S · 0W @ <commit>`** | **What we measured.** Conformance is the contract, not the version ([ADR-0012]). | `docs/STATUS.md`, README |
+
+[ADR-0002] (accepted ecosystem-wide 2026-06-16) chose 3-field SemVer and put the
+spec/conformance level out-of-band **specifically so these cannot be conflated**:
+a version that encodes the spec level confuses *which spec level an implementation
+targets* with *the implementation's own release*. So:
+
+- **We do not adopt another repo's number.** `entity-core-protocol` cuts its own
+  releases; those are the spec's version, not ours. Our repos share a fleet cut
+  *date*, not a fleet *number*, and the numbers are expected to diverge.
+- **There is no 4th digit.** Go enforces this for us — the module resolver parses
+  `vMAJOR.MINOR.PATCH` and nothing else, so `v0.8.2.1` is not a resolvable module
+  version at all.
+- **A cut is one edit across every site**, because a `replace` hides a stale
+  `require` from us and from nobody else: an external consumer resolves
+  `.../cmd@vX` and gets its `require` lines *without* its `replace` lines, so a
+  `cmd` cut that still requires the previous `core` publishes a build that only
+  works inside this workspace. `cmd/internal/hygiene/version_test.go` gates both
+  halves — the SemVer shape, and lockstep between the newest heading here and
+  every module declaration.
+
+**The next cut is `0.9.0`**, and the reasoning belongs on the record rather than in
+someone's head. Pre-1.0 SemVer puts breaking changes in the MINOR field, and the
+work below is breaking for a consumer of `core`/`ext`: the §5.4 matcher no longer
+self-matches a bare prefix, `assoc` answers `index_out_of_range` where it answered
+`type_mismatch`, `fold` contains an error accumulator instead of short-circuiting,
+the default per-handler self-grant widened to the peer-wildcard form, and `ext/`
+grew from 8 packages to 28. `0.8.1` would claim backward-compatible fixes only,
+which is false. (`entity-core-py` independently reached `0.9.0` for an unrelated
+reason — a fourth workspace package. Same number, different derivation; do not
+read it as a fleet version.)
+
 ## [Unreleased]
 
-Development lands on `dev`; `master` carries the last release. Highlights since
-`v0.8.0`, all measured in-tree:
+Development lands on `dev`; `master` carries the last release. **Will be cut as
+`0.9.0`** — see Versioning above. Highlights since `v0.8.0`, all measured in-tree:
 
 - **Compute budget: the `depth` limit is honored end-to-end (§5.2).** The eval
   depth limit is sourced from the capability's **grant-level**

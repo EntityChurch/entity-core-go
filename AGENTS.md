@@ -122,6 +122,71 @@ TYPES=go,rust,python ./scripts/test-cross-peer.sh                        # conve
 - **`docs/`** — `architecture/`, `validation/` (conformance reports, spec-issues), `reviews/`, `legacy/`.
 - **Module direction: `core ← ext ← cmd`.** Core never imports ext or cmd.
 
+## Versioning — our number is ours ([ADR-0002])
+
+**Canonical statement + the reasoning: `CHANGELOG.md` §Versioning.** Enforced by
+`cmd/internal/hygiene/version_test.go`. The short form:
+
+- **`0.y.z` is this repo's own 3-field SemVer**, forward-only from the published
+  `v0.8.0`. **`v7.NN` is the protocol revision we implement** and rides out-of-band.
+  **`N · 0F · 0S · 0W @ <commit>`** is what we measured. Three numbers, three jobs —
+  ADR-0002 separated them on purpose, and conflating them is the failure it names.
+- **Never adopt a sibling's release number.** `entity-core-protocol`'s `0.8.x` is the
+  *spec repo's* version. The fleet shares a cut **date**, not a **number**, and the
+  numbers are expected to diverge. This is not theoretical: on 2026-08-23 a
+  coordination pass wrote `## [0.8.2]` — the protocol's number — into our CHANGELOG,
+  and nothing in the tree contradicted it because nothing in the tree had ever said
+  what our number was. **A convention that is not written down gets decided by
+  whoever asks last.**
+- **A cut is ONE edit across every declaration site** — the CHANGELOG heading,
+  `ext/go.mod`, `cmd/go.mod`, README §Module paths. The trap is go-specific and
+  silent: a sibling-path `replace` hides a stale `require` from *us* and from nobody
+  else, because a consumer resolving `.../cmd@vX` gets the requires **without** the
+  replaces. A `cmd` cut that still requires the previous `core` publishes a build
+  reproducible only inside this workspace. `TestModuleRequiresMatchTheLatestRelease`
+  is the gate; it goes RED the moment a release heading lands unaccompanied.
+- **The next cut is `0.9.0`** (breaking pre-1.0 changes → MINOR: the §5.4 matcher, the
+  `assoc`/`fold` corner rulings, the widened default self-grant, `ext/` 8 → 28).
+
+## Citations on the PUBLISHED surface: name the finding, not the hash
+
+**Earned 2026-08-23, browser-rust caught it downstream.** `core/peer/peer.go` and
+`core/peer/handler_grant_ceiling_test.go` both cited `entity-core-rust`'s fix as
+`c484fa6` — a commit that exists **on no branch, in no repo**. The rust seat had
+committed, reset `dev` locally, and re-committed, twice; `c484fa6` survives only in
+that machine's reflog. Nothing was lost (the trees are byte-identical to the surviving
+commits and the remote only ever moved forward) but the hash a reader looks up resolves
+nowhere. Both files are `.go`, so both **ship**.
+
+The rule is [RUNBOOK-RELEASE-CURATION] + [ADR-0012] Amendment 1 and it is stronger than
+the orphan case: `--series` **re-authors every commit** on the release branch, so an
+internal SHA quoted in a file that publishes can never resolve for a public reader *even
+when it is perfectly alive here*. A sibling's SHA is worse — the reader has no such repo.
+**In anything that ships, cite the SYMBOL and the finding** (`their
+default_handler_self_grant`, `core/capability/src/lib.rs`) — that is what
+AGENTS-STANDARD's *"pin citations to `(symbol, path, commit)`"* reduces to when the
+commit half cannot travel. A released version or a tag survives a re-author; a dev SHA
+does not.
+
+**Two kinds of SHA live on our published surface and they are NOT the same** — the
+distinction is what to check before touching one:
+
+- **A POINTER** — "fixed at `abc1234`", "landed at rust `3e9c9fc`" — invites the reader
+  to go look. On the published surface it is broken by construction. Rewrite it to name
+  the symbol/behavior; keep a hash only if it is a *tag* or a released version.
+- **A RECEIPT** — `cmd/peer-manager/start.go`'s `siblingPinRust` / `siblingPinPython`,
+  the corpus artifact hashes, `docs/STATUS.md`'s `@ <commit>` measurement pins. These
+  do not ask to be resolved; they record *the state a claim was verified against*, and
+  ADR-0012 **requires** them ("a number is only true of the commit it was taken at").
+  Leave them. Stripping a receipt would delete the only thing that dates the claim.
+
+**Enforcement, before you write one:** ask whether a reader of the published mirror is
+expected to *resolve* it. If yes, it is a pointer and the hash is the wrong citation. If
+it is a receipt, say so at the site (`[historical]`, `read live <date>`, `measured @`) so
+the next sweep does not "fix" it. The measured scope on the published tree today is ~161
+distinct hashes across ~115 files, overwhelmingly receipts; the two above were the only
+pointers to a commit that resolves nowhere at all.
+
 ## Boundaries — do NOT modify
 
 - **Cross-repo git:** git in `entity-core-go` is in scope — commit/push freely, no per-commit asking (don't force-push or rewrite published history). **Never run git in `entity-core-py`, `entity-core-rust`, `entity-core-protocol`, or `entity-system-architecture`** — those are coordinated through the operator.
