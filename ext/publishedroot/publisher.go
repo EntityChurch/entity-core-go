@@ -50,6 +50,25 @@ import (
 // part of the published self-description.
 const PrefixForLocalPeer = "system/"
 
+// publishedPrefix renders a tracker prefix in the form EXTENSION-TREE §3.3a
+// requires on the wire: a non-empty prefix MUST end with "/", and "/" is the
+// universal tree.
+//
+// The tracker stores prefixes without a guaranteed trailing slash (its config
+// path derivation trims one), so normalize here rather than at every call site
+// — a prefix that reaches the wire without its slash is not a cosmetic defect:
+// `absolute_prefix + relative_key` would concatenate straight into a wrong
+// path, and §3.3's trim would not be its inverse.
+func publishedPrefix(prefix string) string {
+	if prefix == "" {
+		return "/"
+	}
+	if strings.HasSuffix(prefix, "/") {
+		return prefix
+	}
+	return prefix + "/"
+}
+
 // PublisherHandlerPattern is the MutationContext.HandlerPattern tag the
 // publisher stamps on its own LI writes (published-root binding + signature
 // invariant pointer). Sync-hook consumers — notably tree.RootTracker — check
@@ -221,8 +240,13 @@ func (p *Publisher) Publish(rootHash hash.Hash) (entity.Entity, error) {
 	p.publishing = true
 	p.lastSeq++
 	pr := types.PublishedRootData{
-		PeerID:      p.peerID,
-		RootHash:    rootHash,
+		PeerID:   p.peerID,
+		RootHash: rootHash,
+		// EXTENSION-TREE §3.3a: REQUIRED, and MUST end with "/". We publish the
+		// prefix we actually track, so a consumer reconstructs paths as
+		// `absolute_prefix + relative_key` against the same operand we trimmed
+		// with — never a default and never an inference.
+		Prefix:      publishedPrefix(p.prefix),
 		Seq:         p.lastSeq,
 		PublishedAt: uint64(time.Now().UnixMilli()),
 		Predecessor: p.lastHash,

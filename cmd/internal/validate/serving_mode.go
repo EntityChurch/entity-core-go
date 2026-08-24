@@ -219,14 +219,36 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 		}
 		deadline := time.Now().Add(servingModeRepublishWait)
 		sawAnyRoot := baselineRootOK
+		// A FAILED baseline is not a republish. This previously read
+		// `!baselineRootOK || seq > baselineSeq || ...`, so if the pre-seed
+		// fetch missed for any reason the first successful fetch returned PASS
+		// with a message asserting a seq advance it had never observed — a peer
+		// that mints once and freezes would pass on a transiently unavailable
+		// manifest. Latent while the baseline succeeds in practice, but this
+		// vector is the conformance gate for the proposed bounded-convergence
+		// republish MUST, and a gate that can pass without observing the thing
+		// it gates is the failure mode this suite exists to catch.
+		//
+		// Instead, adopt the first reading as the baseline and keep waiting for
+		// a real advance. If none comes we SKIP as UNEXERCISED — the honest
+		// outcome, and the one the rest of this block already documents.
+		// Local to this check — never write back to the outer baseline, which
+		// other checks read.
+		refSeq, refRoot, haveRef := baselineSeq, baselineRoot, baselineRootOK
 		for {
 			seq, root, ok := fetchPublishedRoot(ctx, urlManifest())
-			if ok {
+			switch {
+			case !ok:
+				// nothing to compare this round
+			case !haveRef:
+				refSeq, refRoot, haveRef = seq, root, true
 				sawAnyRoot = true
-				if !baselineRootOK || seq > baselineSeq || root != baselineRoot {
+			default:
+				sawAnyRoot = true
+				if seq > refSeq || root != refRoot {
 					return PassCheck(fmt.Sprintf(
 						"published-root republished after the bind (seq %d→%d, root %s…) — the seeded entity is inside the CURRENT root's closure, so the in-scope probes below test what §6.5.6 actually requires",
-						baselineSeq, seq, root.String()[:16]))
+						refSeq, seq, root.String()[:16]))
 				}
 			}
 			if time.Now().After(deadline) {

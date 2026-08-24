@@ -53,11 +53,15 @@ const bogusReachAddr = "6.6.6.6:6666"
 func runReachability(ctx context.Context, client *PeerClient) []CheckResult {
 	r := NewCheckRunner(catReachability)
 	r.Declare("reachability_observe_address", "§6.7.1 — observe-address reflects our transport source, never a body value (§12.3: offering it at all is OPTIONAL)")
+	r.Declare("reachability_observed_not_persisted", "§6.7.1 MUST 2 — the observed address MUST NOT be persisted to any durable per-peer address field (system/connection.address, system/peer/transport/*, system/peer/status). A responder-side fact written into dialer-side state corrupts §10 dispatch for every other reader")
 	r.Declare("reachability_dialback_posture", "§6.7.2/§6.7.4 — check-reachability dials our observed source, or is restricted (403) (§12.3: offering it at all is OPTIONAL)")
 
 	if client == nil || !client.Connected() {
 		r.Run("reachability_observe_address", func() CheckOutcome {
 			return SkipCheck("client not connected — reachability facts ride an established connection")
+		})
+		r.Run("reachability_observed_not_persisted", func() CheckOutcome {
+			return SkipCheck("client not connected")
 		})
 		r.Run("reachability_dialback_posture", func() CheckOutcome {
 			return SkipCheck("client not connected")
@@ -67,10 +71,14 @@ func runReachability(ctx context.Context, client *PeerClient) []CheckResult {
 
 	uri := fmt.Sprintf("entity://%s/system/network", client.RemotePeerID())
 
+	// Filled in by the MUST 1 check below and consumed by MUST 2.
+	var observedAddr string
+
 	// A body-supplied address the handler must ignore, on both ops.
 	bogus, err := types.ObserveAddressResultData{ObservedAddress: bogusReachAddr}.ToEntity()
 	if err != nil {
 		r.Run("reachability_observe_address", func() CheckOutcome { return FailCheck("build params: " + err.Error()) })
+		r.Run("reachability_observed_not_persisted", func() CheckOutcome { return SkipCheck("params build failed") })
 		r.Run("reachability_dialback_posture", func() CheckOutcome { return SkipCheck("params build failed") })
 		return r.Results()
 	}
@@ -107,7 +115,14 @@ func runReachability(ctx context.Context, client *PeerClient) []CheckResult {
 		if _, _, err := net.SplitHostPort(obs.ObservedAddress); err != nil {
 			return FailCheck(fmt.Sprintf("observed_address %q is not a valid host:port — §6.7.1 returns the transport source", obs.ObservedAddress))
 		}
+		observedAddr = obs.ObservedAddress
 		return PassCheck(fmt.Sprintf("§6.7.1 observe-address reflected our real transport source %s (body-supplied address ignored)", obs.ObservedAddress))
+	})
+
+	// MUST 2 reuses MUST 1's answer: the value the peer told us it observed is
+	// exactly the value that must not appear in durable state.
+	r.Run("reachability_observed_not_persisted", func() CheckOutcome {
+		return runReachabilityObservedNotPersisted(ctx, client, observedAddr)
 	})
 
 	r.Run("reachability_dialback_posture", func() CheckOutcome {

@@ -48,6 +48,25 @@ type PublishedRootData struct {
 	// reachable bindings are hash-chained from here; consumers walk TREE_GET
 	// from RootHash and never trust paths the host claims outside that chain.
 	RootHash hash.Hash `cbor:"root_hash"`
+	// Prefix is the absolute prefix this root's trie keys are relative to —
+	// REQUIRED per EXTENSION-TREE §3.3a (landed 2026-08-08, D1/D2). MUST end
+	// with "/"; "/" designates the universal tree.
+	//
+	// This is the field the type was missing, and its absence is why three
+	// conformant implementations published mutually unreadable keys: §3.3
+	// reconstructs full paths as `absolute_prefix + relative_key`, and a
+	// published root has no request channel to carry the operand the way
+	// snapshot/extract/merge do. Without it a consumer holds relative keys and
+	// cannot rebuild a single absolute path — the hash-chain walk that is the
+	// whole security model is underspecified at its first step.
+	//
+	// Required rather than optional-with-a-default: any default would have to
+	// be one of §3.3's three admissible shapes, which silently promotes one
+	// implementation's convention to "the answer you get for saying nothing".
+	//
+	// Go publishes the peer-relative subtree, so this is "system/" and keys are
+	// relative to /{peer_id}/system/ (§3.3's first table row).
+	Prefix string `cbor:"prefix"`
 	// Seq is the per-peer monotonic freshness counter. Same discipline as
 	// snapshot-manifest §3-RES.4: consumers cache the highest seq observed
 	// per peer and reject any incoming published-root whose seq is less.

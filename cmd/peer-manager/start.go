@@ -28,11 +28,14 @@ func cmdStart(args []string) {
 	history := fs.String("history", "*", "history recording pattern (default: \"*\" records all; use \"\" to disable)")
 	clockTickMs := fs.Uint64("clock-tick-ms", 0, "EXTENSION-CLOCK §2.5 tick_interval: emit a periodic clock tick every N ms (Go peers only; 0 = disabled, the spec default). Forwarded as --clock-tick-ms to entity-peer.")
 	remote := fs.String("remote", "", "register a remote peer by name (must already be running)")
-	httpAddr := fs.String("http-addr", "", "additional HTTP-live listener address (e.g. 127.0.0.1:0 for random; empty disables). Chunk D / Amendment 3. Go supports; Rust + Python CLI wiring pending.")
+	httpAddr := fs.String("http-addr", "", "additional HTTP-live listener address (e.g. 127.0.0.1:0 for random; empty disables). Chunk D / Amendment 3. Honored by all three (verified in the live worktrees 2026-08-08): Go -http-addr, Rust --http-listen (474bb11, rust f561493), Python --http-addr (main.py argparse, py ebeda0f). peer-manager already forwards to both siblings below — the prior \"CLI wiring pending\" note contradicted the forwarding code in this same file.")
 	httpPath := fs.String("http-path", "/entity", "URL path the HTTP-live listener accepts POSTs at (when --http-addr set)")
-	wsAddr := fs.String("ws-addr", "", "additional WebSocket-live listener address (e.g. 127.0.0.1:9501; --ws-addr does not yet accept :0 because the port is needed to construct the ws:// URL). Thread F (NETWORK §6.5.2b). Go-only initially; Rust wiring is feature-gated and Python has no WS listener.")
+	wsAddr := fs.String("ws-addr", "", "additional WebSocket-live listener address (e.g. 127.0.0.1:9501; --ws-addr does not yet accept :0 because the port is needed to construct the ws:// URL). Thread F (NETWORK §6.5.2b). Go + Rust (verified in the live worktrees 2026-08-08): Rust ships --ws-listen ungated at the CLI (rust f561493) and peer-manager forwards it below; there is no --ws-path on the Rust side, so Go's configurable path is a Go-side extension. Python has no WS listener as of py ebeda0f — checked, not assumed.")
 	wsPath := fs.String("ws-path", "/ws", "URL path the WebSocket listener accepts upgrades at (when --ws-addr set)")
-	// Chunk E serving-mode flags (Go-only initially; Rust + Python add equivalents during E impl).
+	// Chunk E serving-mode flags. All three ship them now (verified in the live
+	// worktrees 2026-08-08): Rust 58d9188, Python --http-poll-addr in the
+	// entity-cli argparse @ ebeda0f. The "Go-only initially" note this replaces
+	// described the state during E impl and outlived it.
 	httpPollAddr := fs.String("http-poll-addr", "", "Chunk E: isolated HTTP poll listener (e.g. 127.0.0.1:9201); GET /content/{hex(H)}. Mutually exclusive with --http-poll-mount-on-live.")
 	httpPollMountOnLive := fs.Bool("http-poll-mount-on-live", false, "Chunk E: mount poll routes on the live HTTP listener (Posture 2). Requires --http-addr.")
 	httpPollPrefix := fs.String("http-poll-prefix", "/poll", "Chunk E: URL prefix when mounting poll on live listener (default /poll); ignored on isolated port.")
@@ -42,11 +45,12 @@ func cmdStart(args []string) {
 	hashType := fs.String("hash-type", "sha256", "content_hash_format / home format the peer authors content + substrate under: sha256 (default, 0x00) | sha384 (0x01). V7 v7.70 §1.2. Honored by Go (--hash-type), Rust (--hash-type, post-v7.70 0616727), Python (--hash-type).")
 	inboxRelayRegistry := fs.String("inbox-relay-registry", "", "EXTENSION-RELAY §3.5 REGISTRY-served inbox-relay decl chain (Go-only initially): comma-separated peer-names of registries to consult (in order). The names are translated to peer-ids from state. Forwarded as --inbox-relay-registry to entity-peer.")
 	validate := fs.Bool("validate", false, "GUIDE-CONFORMANCE §7a: enable system/validate/echo + system/validate/dispatch-outbound test handlers (unblocks concurrency.t1_2_concurrent_reentry). MUST NOT be on in production. Honored by all three impls.")
-	signalingNode := fs.Bool("signaling-node", false, "EXTENSION-SIGNALING §4/§5: serve the system/signaling rendezvous node (offer/collect/advertise) for the punch gate. Go-only; forwarded as -signaling-node to entity-peer. Pairs with the default --open-access so the caller's grant covers system/signaling.")
-	publishRoot := fs.Bool("publish-root", false, "PROPOSAL-PEER-MANIFEST §4: mint signed system/peer/published-root on every tree-root change + serve via http-poll. Pair with --http-poll-addr to expose the manifest on the wire. Accepted by all three impls, but only Go REPUBLISHES on a root change: Rust + Python mint once at startup and hold seq=0 (measured 2026-08-07 over 6 min, docs/validation/reports/2026-08-07-f-publish-root-republish-contract-rust-py.md). Under §6.5.6 Amendment 10 that freezes their served closure at boot, so serving_mode.seed_republished SKIPs against them.")
-	serveClosureRoot := fs.Bool("serve-closure-root", false, "EXTENSION-NETWORK §6.5.6 Amendment 10: scope served set to the transitive trie-node closure reachable from system/peer/published-root. Pair with --publish-root so a consumer's signed-root hash-chain walk does not 404 on a CHAMP interior node. Mutually exclusive with --serve-namespace / --serve-scope-whole-store. Honored by Go + Python (Rust impl pending).")
-	peerIssuedRegistry := fs.String("peer-issued-registry", "", "PROPOSAL-PEER-ISSUED-REGISTRY-BACKEND §2: pin one or more peer-issued registries (comma-separated `peer_id@tree_url_prefix`). Pair with validate-peer -peer-issued-bundle, which serves the fixture registry at that URL. An http:// prefix implies --substitute-allow-http (fixture registries are loopback-only). Forwarded as --peer-issued-registry to entity-peer; Go-only, Rust + Python impl pending.")
-	publishDescriptors := fs.Bool("publish-descriptors", false, "DOMAIN-LOCAL-FILES v1.3 §10.5 V3: configure the --files root with publish_descriptors=true so file reads write `system/content/descriptor/{hash}` entities into the tree. Arms local_files.v3_descriptor_publish_exercised. Honored by Go; Rust + Python impl pending.")
+	signalingNode := fs.Bool("signaling-node", false, "EXTENSION-SIGNALING §4/§5: serve the system/signaling rendezvous node (offer/collect/advertise) for the punch gate. Honored by all three impls as of 2026-08-08 (Go -signaling-node; Rust + Python --signaling-node). Off by default everywhere — a peer is a signaling CLIENT by default and only a deployed introducer serves. The flag registers the handler but grants nobody access, so it needs an admission posture: Go/Python get the default --open-access, Rust gets --debug-grants (passed unconditionally).")
+	publishRoot := fs.Bool("publish-root", false, "PROPOSAL-PEER-MANIFEST §4: mint signed system/peer/published-root on every tree-root change + serve via http-poll. Pair with --http-poll-addr to expose the manifest on the wire. Honored by all three impls, and all three now republish on a root change — measured live 2026-08-08 (Go, Rust 8879e06, Python c896e66; serving_mode.seed_republished PASSes three ways on real seq advances). The 2026-08-07 measurement of Rust + Python frozen at seq=0 (docs/validation/reports/2026-08-07-f-...md) is superseded: both built it after that report. NOTE the wording above describes what these impls DO, not what the spec requires — no landed spec obliges a publisher to ever republish, so a peer that mints once and freezes is conformant today. That gap is PROPOSAL-PUBLISHED-ROOT-PREFIX-AND-REPUBLISH §5 (DRAFT); until it folds, a non-republishing peer is not a sibling bug.")
+	serveClosureRoot := fs.Bool("serve-closure-root", false, "EXTENSION-NETWORK §6.5.6 Amendment 10: scope served set to the transitive trie-node closure reachable from system/peer/published-root. Pair with --publish-root so a consumer's signed-root hash-chain walk does not 404 on a CHAMP interior node. Mutually exclusive with --serve-namespace / --serve-scope-whole-store. Honored by all three impls: Go, Rust (3e9c9fc, already forwarded below), Python (takes a PATH — peer-manager passes \"published\").")
+	peerIssuedRegistry := fs.String("peer-issued-registry", "", "PROPOSAL-PEER-ISSUED-REGISTRY-BACKEND §2: pin one or more peer-issued registries (comma-separated `peer_id@tree_url_prefix`). Pair with validate-peer -peer-issued-bundle, which serves the fixture registry at that URL. An http:// prefix implies --substitute-allow-http (fixture registries are loopback-only). Honored by all three impls (2026-08-08), same peer_id@url spec, installing a trust root + a §4 chain entry carrying hints.endpoint. Rust's live remote-read seam landed 5c58195; before that it registered a backend but resolved against its LOCAL STORE only, and the category SKIPped rather than fail an unbuilt surface. Rust's flag is repeatable rather than comma-separated — peer-manager splits on comma and emits one occurrence per pin.")
+	publishPrefix := fs.String("publish-prefix", "", "EXTENSION-TREE §3.3a: the subtree --publish-root commits to, and the `prefix` the published root declares (e.g. system/content/ to publish only shareable content, or / for the universal tree). Empty keeps the peer's own default. This is how a peer publishes a SUBSET of its tree — the common deployment — rather than everything under system/. Go-only as of 2026-08-08: verified absent from rust f561493 and python e60c822 CLIs by reading both worktrees, so it is dropped with a warning for those types rather than passed and rejected.")
+	publishDescriptors := fs.Bool("publish-descriptors", false, "DOMAIN-LOCAL-FILES v1.3 §10.5 V3: configure the --files root with publish_descriptors=true so file reads write `system/content/descriptor/{hash}` entities into the tree. Arms local_files.v3_descriptor_publish_exercised. Honored by all three impls: Go, Rust (3e9c9fc), Python (2026-08-08).")
 	keepalive := fs.String("keepalive", "", "EXTENSION-NETWORK §2.3 keepalive override as interval_ms,timeout_ms,max_missed (e.g. 1500,800,2) so the §5.4 escalation is observable in seconds — pair with validate-peer -keepalive-envelope-ms for the liveness harness. A field may be empty to keep its spec default. Honored by all three impls: Go (-keepalive-*-ms), Python (--keepalive-*-ms, 0a0eb48), Rust (--keepalive-*-ms, 99ff398).")
 	fs.Parse(args)
 
@@ -79,17 +83,18 @@ func cmdStart(args []string) {
 	var entry *PeerEntry
 
 	pollFlags := chunkEFlags{
-		pollAddr:           *httpPollAddr,
-		mountOnLive:        *httpPollMountOnLive,
-		pollPrefix:         *httpPollPrefix,
-		serveNamespace:     *serveNamespace,
-		serveWholeStore:    *serveWholeStore,
-		serveClosureRoot:   *serveClosureRoot,
-		validate:           *validate,
-		signalingNode:      *signalingNode,
-		publishRoot:        *publishRoot,
-		publishDescriptors: *publishDescriptors,
-		peerIssuedRegistry: *peerIssuedRegistry,
+		pollAddr:            *httpPollAddr,
+		mountOnLive:         *httpPollMountOnLive,
+		pollPrefix:          *httpPollPrefix,
+		serveNamespace:      *serveNamespace,
+		serveWholeStore:     *serveWholeStore,
+		serveClosureRoot:    *serveClosureRoot,
+		validate:            *validate,
+		signalingNode:       *signalingNode,
+		publishRoot:         *publishRoot,
+		publishDescriptors:  *publishDescriptors,
+		publishPrefix:       *publishPrefix,
+		peerIssuedRegistry:  *peerIssuedRegistry,
 		substituteAllowHTTP: *peerIssuedRegistry != "" && strings.Contains(*peerIssuedRegistry, "http://"),
 	}
 
@@ -179,11 +184,14 @@ type chunkEFlags struct {
 	signalingNode      bool
 	publishRoot        bool
 	publishDescriptors bool
+	// publishPrefix is the EXTENSION-TREE §3.3a subtree --publish-root commits
+	// to. Empty means "use the peer's own default".
+	publishPrefix string
 	// peerIssuedRegistry is the PROPOSAL-PEER-ISSUED-REGISTRY-BACKEND §2
 	// pin spec, `peer_id@url_prefix`. Forwarded verbatim; the peer-id is a
 	// registry identity, not a peer-manager-managed peer, so unlike
 	// --inbox-relay-registry there is no name→id translation to do.
-	peerIssuedRegistry string
+	peerIssuedRegistry  string
 	substituteAllowHTTP bool
 }
 
@@ -326,6 +334,9 @@ func startGoPeer(name, addr string, debug, openAccess bool, files, history, stor
 	}
 	if poll.publishRoot {
 		cmdArgs = append(cmdArgs, "-publish-root")
+	}
+	if poll.publishPrefix != "" {
+		cmdArgs = append(cmdArgs, "-publish-prefix", poll.publishPrefix)
 	}
 	if poll.publishDescriptors {
 		cmdArgs = append(cmdArgs, "-publish-descriptors")
@@ -505,9 +516,41 @@ func startRustPeer(name, addr string, debug bool, storage, history, files, httpA
 	if poll.publishRoot {
 		cmdArgs = append(cmdArgs, "--publish-root")
 	}
+	if poll.signalingNode {
+		// Rust 2026-08-08: the §4/§5 node role installs through the same
+		// public PeerBuilder::handler seam entity-signaling-node uses, so any
+		// peer can serve it. Rust's own flag doc requires pairing it with an
+		// admission posture — the handler is registered but grants nobody
+		// access, and without one every verb is 403 at the §4.4 floor. We
+		// pass --debug-grants unconditionally above, so that pairing holds.
+		cmdArgs = append(cmdArgs, "--signaling-node")
+	}
 	if poll.publishDescriptors {
 		// R5 (Rust 3e9c9fc): --publish-descriptors CLI flag landed.
 		cmdArgs = append(cmdArgs, "--publish-descriptors")
+	}
+	if poll.peerIssuedRegistry != "" {
+		// Rust 5c58195: the live remote-read seam landed (RegistryTreeReader +
+		// HttpPollRegistryReader over a poll_read module), so the pin now
+		// reaches the wire instead of resolving against the local store. Until
+		// then this passthrough did not exist and the category SKIPped.
+		//
+		// Rust's flag is REPEATABLE (`Vec<String>`), not comma-separated like
+		// Go's single string — pinning several registries means several
+		// occurrences, tried in flag order. Split here rather than handing
+		// clap a comma-joined value it would take as one malformed spec.
+		for _, spec := range strings.Split(poll.peerIssuedRegistry, ",") {
+			if spec = strings.TrimSpace(spec); spec != "" {
+				cmdArgs = append(cmdArgs, "--peer-issued-registry", spec)
+			}
+		}
+	}
+	if poll.publishPrefix != "" {
+		// Verified absent from both sibling CLIs (rust f561493, python e60c822)
+		// by reading the worktrees. Passing it would be rejected at startup, so
+		// drop it and SAY SO — a silently dropped scope flag would publish the
+		// peer's default subtree while the operator believed it had narrowed.
+		fmt.Fprintf(os.Stderr, "Warning: --publish-prefix ignored for this peer type (Go-only; the peer publishes its own default subtree)\n")
 	}
 	// §2.3 keepalive overrides (Rust 99ff398 — same flag names as Go and
 	// Python in clap's double-dash dialect; omitted fields keep spec defaults).
@@ -682,10 +725,35 @@ func startPythonPeer(name, addr string, debug, openAccess bool, history, files, 
 		// the current system/peer/published-root head (main.py:898).
 		cmdArgs = append(cmdArgs, "--serve-closure-root", "published")
 	}
+	if poll.signalingNode {
+		// Python 2026-08-08: §4/§5 node role landed (keyed mailbox, §5's six
+		// pins, §8.2 rate limiting per source and per key), off by default —
+		// same posture as Go and Rust: client by default, only a deployed
+		// introducer serves. Without this passthrough the 7 signaling vectors
+		// skipped against a peer that passes them when driven directly.
+		cmdArgs = append(cmdArgs, "--signaling-node")
+	}
 	if poll.publishDescriptors {
-		// Python local-files takes publish_descriptors via the per-root
-		// config; CLI surface pending. Warn-and-drop until Python ships it.
-		fmt.Fprintf(os.Stderr, "Warning: --publish-descriptors ignored for type=python (CLI flag pending)\n")
+		// Python's --publish-descriptors landed (entity_cli/main.py). This was
+		// warn-and-dropped for two handoffs on a "CLI surface pending" note
+		// that had gone stale — the warning outlived the gap it described,
+		// which is its own kind of silent skip.
+		cmdArgs = append(cmdArgs, "--publish-descriptors")
+	}
+	if poll.peerIssuedRegistry != "" {
+		// Python 2026-08-08: --peer-issued-registry takes the same
+		// `peer_id@url` spec as Go and installs BOTH halves (trust root + §4
+		// resolver-chain entry). No allow-http gate on their side. Containers
+		// run --network host, so a 127.0.0.1 fixture URL resolves to the same
+		// loopback the validator serves on.
+		cmdArgs = append(cmdArgs, "--peer-issued-registry", poll.peerIssuedRegistry)
+	}
+	if poll.publishPrefix != "" {
+		// Verified absent from both sibling CLIs (rust f561493, python e60c822)
+		// by reading the worktrees. Passing it would be rejected at startup, so
+		// drop it and SAY SO — a silently dropped scope flag would publish the
+		// peer's default subtree while the operator believed it had narrowed.
+		fmt.Fprintf(os.Stderr, "Warning: --publish-prefix ignored for this peer type (Go-only; the peer publishes its own default subtree)\n")
 	}
 	// §2.3 keepalive overrides (Python 0a0eb48 — same flag names as the Go
 	// peer in argparse's double-dash dialect; omitted fields keep spec defaults).

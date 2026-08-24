@@ -179,6 +179,19 @@ func RegisterCoreTypes(r *TypeRegistry) {
 	// Cross-impl alignment: Rust + Python already bind this field to
 	// system/peer-id; Go was the outlier reflecting it as primitive/string.
 	r.OverrideField(TypePeerPublishedRoot, "peer_id", FieldSpec{TypeRef: "system/peer-id"})
+	// published-root.prefix is a system/tree/path per EXTENSION-TREE §3.3a
+	// (arch 391c92b) — the same refinement every other spec-named prefix field
+	// already carries (snapshot / snapshot-request / extract-request /
+	// tracking-config in core/tree/handler.go, subscription-redirect below).
+	// Reflection gives the base type for a Go string; the spec names the
+	// refined one, exactly as with peer_id above.
+	//
+	// Missing rather than deliberate, and both siblings independently declined
+	// to match `primitive/string` to reach 0 F — correctly. Conforming to the
+	// oracle instead of the spec is how a cohort converges on a shape no
+	// document describes, which is the same failure mode as v8's key-form
+	// blind spot.
+	r.OverrideField(TypePeerPublishedRoot, "prefix", FieldSpec{TypeRef: TypeTreePath})
 
 	// EXTENSION-REGISTRY v1.0 — entity types + handler request/result types.
 	// Inner shape types (ResolverChainEntry / PinnedEntry / DispatchEntry +

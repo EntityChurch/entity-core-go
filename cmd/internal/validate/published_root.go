@@ -64,6 +64,10 @@ func runPublishedRoot(ctx context.Context, pollURL string) []CheckResult {
 	r.Declare("v5_outbound_dial", "End-to-end dial → MANIFEST_GET → signature verify (requires --publish-root + -poll-url)")
 	r.Declare("v6_host_bytes_distrust", "§1.1 threat-model gate — a host serving wrong bytes is rejected by the connector's hash check")
 	r.Declare("v7_trie_closure_content_get", "EXTENSION-NETWORK §6.5.6 Amendment 10 — CONTENT_GET(published-root.root_hash) MUST succeed; trie nodes are hash-linked not path-bound (V7 §1.7), so the closure-of-signed-root scope is the floor when signed_pointer is advertised")
+	r.Declare("v8_trie_key_convention", "EXTENSION-TREE §3.3 + §3.1 MUST — mirror the served trie from published-root.root_hash and rebuild it from the collected (relative_key → value_hash) pairs; the rebuilt root MUST equal the served one. Proves routing is SHA-256(canonical-normalize(relative_key)) and NOT the absolute path (the §3.3 named ambiguity), under the pinned bitWidth=5 / bucketSize=3, with the canonical-form and bucket-sort invariants held. No prior vector resolved a key from a published root — v2/v5 verify a signature and v7 asserts an entity type")
+
+	r.Declare("v9_prefix_key_form", "EXTENSION-TREE §3.3a + §12.1 MUST (arch 391c92b, D1/D2/D7 §6.1) — published-root MUST carry `prefix`; the oracle derives relative_key from that DECLARED prefix for an absolute path known to be bound, and the trie MUST resolve THAT key. §12.1 states normatively that a trie-rebuild equality check (v8) does NOT satisfy this: the rebuild takes its keys from the trie and passes for any key form")
+	r.Declare("v10_prefix_reconstruction", "EXTENSION-TREE §3.3a + §12.1 MUST (D7 §6.2) — `absolute_prefix + relative_key` MUST reproduce the absolute path the publisher bound, for every served key; the trim and the concatenation are inverses. Catches the `/{peer}//` shape the superseded §3.3 formula produced on the universal tree")
 
 	r.Run("v1_round_trip", runPublishedRootRoundTrip)
 	r.Run("v2_signature_carriage", runPublishedRootSignatureCarriage)
@@ -72,6 +76,9 @@ func runPublishedRoot(ctx context.Context, pollURL string) []CheckResult {
 	r.Run("v5_outbound_dial", func() CheckOutcome { return runPublishedRootOutboundDial(ctx, pollURL) })
 	r.Run("v6_host_bytes_distrust", func() CheckOutcome { return runPublishedRootHostBytesDistrust(ctx) })
 	r.Run("v7_trie_closure_content_get", func() CheckOutcome { return runPublishedRootTrieClosure(ctx, pollURL) })
+	r.Run("v8_trie_key_convention", func() CheckOutcome { return runPublishedRootTrieKeys(ctx, pollURL) })
+	r.Run("v9_prefix_key_form", func() CheckOutcome { return runPublishedRootKeyForm(ctx, pollURL) })
+	r.Run("v10_prefix_reconstruction", func() CheckOutcome { return runPublishedRootReconstruction(ctx, pollURL) })
 
 	return r.Results()
 }

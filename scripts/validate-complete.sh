@@ -72,16 +72,19 @@ printf 'entity-core-go validate-complete fixture\n' > "$FILES_DIR/docs/fixture.t
 # against a single long-lived peer the backend's cacheOnResolve then makes
 # each vector resolve the previous vector's leftovers. The validator refuses a
 # cohort bundle rather than reporting six green checks that measured nothing.
-# Armed for Go only. `--peer-issued-registry` is a Go-only entity-peer flag
-# (Rust + Python impl pending), so pinning a rust/python target is impossible
-# and the vectors would report six MUST failures against a surface those peers
-# have not built — a false cross-impl finding of exactly the kind this repo has
-# withdrawn before. Against a sibling the category SKIPs instead, which is the
-# accurate statement: UNBUILT, and ours to route rather than to fix. Same
-# disposition as the §4/§5 signaling node role.
+# Armed where `--peer-issued-registry` exists — now all three. Python landed
+# the pin on 2026-08-08 (trust root + §4 chain entry, both halves); Rust's live
+# remote-read seam landed at 5c58195 (RegistryTreeReader + HttpPollRegistryReader),
+# so its pin reaches the wire rather than resolving against the local store.
+#
+# Until that seam existed the category SKIPped against rust deliberately:
+# pinning a peer whose remote-read surface is genuinely absent reports six MUST
+# failures against something that is not there — a false cross-impl finding of
+# exactly the kind this repo has withdrawn before. The gate closed on UNBUILT,
+# not on impl identity, so building the surface is what opens it.
 PI_ARGS_PEER=()
 PI_ARGS_VALIDATE=()
-if [ "$TYPE" = "go" ]; then
+if [ "$TYPE" = "go" ] || [ "$TYPE" = "python" ] || [ "$TYPE" = "rust" ]; then
     echo "==> peer-issued fixture registry bundle"
     go run ./cmd/peerissued-fixtures -wire -out "$PI_DIR" >/dev/null
     PI_PID=$(cat "$PI_DIR/registry/peer_id.txt")
@@ -90,7 +93,7 @@ if [ "$TYPE" = "go" ]; then
     PI_ARGS_VALIDATE=(-peer-issued-bundle "$PI_DIR" -peer-issued-addr "127.0.0.1:${PI_PORT}")
 else
     echo "==> peer-issued fixture registry: SKIPPED for $TYPE"
-    echo "    --peer-issued-registry is Go-only (Rust + Python pending); the six"
+    echo "    --peer-issued-registry is unavailable for $TYPE; the six"
     echo "    REG-PEERISSUED-* vectors will skip rather than fail an unbuilt surface."
 fi
 

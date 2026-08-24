@@ -101,6 +101,7 @@ func main() {
 	validate := flag.Bool("validate", false, "enable GUIDE-CONFORMANCE §7a test handlers (system/validate/echo + system/validate/dispatch-outbound) for validate-peer probing. OFF by default — these handlers expose §6.13(a)/§6.13(b) for black-box wire attestation and MUST NOT be on in production (dispatch-outbound originates outbound).")
 	signalingNode := flag.Bool("signaling-node", false, "EXTENSION-SIGNALING §4/§5: serve the system/signaling rendezvous node (offer/collect/advertise) — the opaque per-key blob store for NAT-introduction and the §7 punch. OFF by default; the caller's grant must cover system/signaling:{offer,collect,advertise} (use --open-access or a seed policy). Endpoint advertised is --addr.")
 	publishRoot := flag.Bool("publish-root", false, "PROPOSAL-PEER-MANIFEST-STATIC-HANDSHAKE §4 (LOCKED): on every tree-root change, mint a signed system/peer/published-root pointer at system/peer/published-root/{peer_id_hex}, bind its signature at the invariant-pointer, and serve it as MANIFEST_GET's body via the http-poll listener. Requires a serving-mode posture (--http-poll-addr or --http-poll-mount-on-live) to be reachable on the wire; produces the entity unconditionally so other consumers can read it from the local tree.")
+	publishPrefix := flag.String("publish-prefix", publishedroot.PrefixForLocalPeer, "EXTENSION-TREE §3.3a: the subtree --publish-root commits to, and the `prefix` the published root declares. Keys in the published trie are relative to this, and the served closure covers only what is under it — so this is how a peer publishes a SUBSET of its tree rather than all of it, which is the common deployment. Three admissible shapes (§3.3): a peer-relative subtree (\"system/\", the default; \"system/content/\" to publish only shareable content), the peer-qualified \"/{peer_id}/\" (this peer's whole namespace), or \"/\" (the universal tree — every peer-id this peer holds). MUST end with \"/\". Entity content hashes are path-independent, so narrowing the prefix changes which entities are reachable, never their hashes; the trie ROOT does change, because keys are relative to the prefix.")
 	discoveryAnnounce := flag.String("discovery-announce", "", "EXTENSION-DISCOVERY §3: announce self on the mDNS backend (`_entity-core._udp.local.`). Value is the transport profile_ref to advertise (the {profile-id} under system/peer/transport/{peer}/...). Empty disables. Requires --addr (TCP profile) or --http-addr (HTTP-live profile) to provide a reachable port.")
 	inboxRelayRegistry := flag.String("inbox-relay-registry", "", "EXTENSION-RELAY §3.5 REGISTRY-served inbox-relay decl chain: comma-separated peer-ids to consult (in order) before the local-tree fallback. Each registry peer must have a published transport profile in this peer's tree so the remote tree:get can dial. Empty disables (local-tree only).")
 	peerIssuedRegistry := flag.String("peer-issued-registry", "", "PROPOSAL-PEER-ISSUED-REGISTRY-BACKEND §2 — pin one or more peer-issued registries (comma-separated, each `peer_id@tree_url_prefix`). The peer-id MUST be identity-multihash form (ed25519) so the receiver can derive the registry's pinned key. URL prefix is the http-poll TreeURLPrefix the registry serves at; allow http:// requires --substitute-allow-http. Empty disables (no peer-issued backend registered). The substrate IS opt-in / default-off per handoff §1.1 — a common peer's footprint is unchanged.")
@@ -264,7 +265,15 @@ func main() {
 	// no-ops.
 	var publisher *publishedroot.Publisher
 	if *publishRoot {
-		publisher = publishedroot.NewPublisher(cs, rootTracker, publishedroot.PrefixForLocalPeer, debugLog)
+		// §3.3a: the declared prefix is load-bearing for every consumer, so a
+		// malformed one is a startup error rather than something to normalize
+		// quietly. An empty prefix is also rejected by RootTracker itself
+		// (reloadConfigsLocked drops prefix == ""), which would leave the
+		// publisher watching a root that never advances.
+		if strings.TrimSpace(*publishPrefix) == "" {
+			log.Fatalf("--publish-prefix must not be empty (use \"/\" for the universal tree, or a subtree like \"system/\")")
+		}
+		publisher = publishedroot.NewPublisher(cs, rootTracker, *publishPrefix, debugLog)
 	}
 
 	// Wire compute extension: engine (reactive mode) + handler.

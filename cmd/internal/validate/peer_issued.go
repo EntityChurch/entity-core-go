@@ -47,6 +47,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/fxamacker/cbor/v2"
+
 	"go.entitychurch.org/entity-core-go/core/types"
 )
 
@@ -62,9 +64,11 @@ const peerIssuedSkipReason = "peer-issued wire vectors need a fixture registry: 
 	"`-peer-issued-bundle <dir> -peer-issued-addr 127.0.0.1:<port>`. " +
 	"scripts/validate-complete.sh does all three. The Backend is additionally unit-tested in " +
 	"ext/registry/peerissued (in-process, all six paths) — but in-process coverage is not wire coverage. " +
-	"NOTE for non-Go targets: --peer-issued-registry is Go-only today (Rust + Python impl pending), so a " +
-	"sibling peer cannot be pinned and this category is UNBUILT rather than failing — a routing item for " +
-	"the sibling's work queue, not a conformance debt to close from here."
+	"NOTE on cohort coverage: Go and Python both honor --peer-issued-registry (Python as of 2026-08-08). " +
+	"Rust registers a backend but resolves against its LOCAL STORE only — the live remote-read seam its own " +
+	"module doc defers is unbuilt — so a pinned rust peer cannot fetch from the fixture and the category is " +
+	"UNBUILT there rather than failing: a routing item for rust's work queue, not a conformance debt to " +
+	"close from here."
 
 func runPeerIssued(ctx context.Context, client *PeerClient, bundleDir, fixtureAddr string) []CheckResult {
 	r := NewCheckRunner(catPeerIssued)
@@ -160,11 +164,48 @@ var peerIssuedCheckNames = []string{
 // chain could resolve a name the peer-issued backend rejected, turning a
 // correct rejection into an apparent pass.
 func installPeerIssuedResolverChain(ctx context.Context, client *PeerClient, fx *peerIssuedFixture) *CheckOutcome {
+	// If the target ALREADY has a chain entry for this registry, leave it
+	// alone. Go derives the endpoint from its CLI flag and needs nothing in
+	// the config, so an entry carrying only (kind, id) is sufficient here —
+	// but §4's ResolverChainEntry has a `hints` map, and Python's
+	// --peer-issued-registry puts the registry endpoint in it (that is where
+	// its RegistryReader reads from). Overwriting the config to "arm" the
+	// chain therefore STRIPS the endpoint and silently disarms a correctly
+	// pinned peer: the backend is registered, the chain names it, and it has
+	// nowhere to dial. All six vectors then fail with "fixture saw 0
+	// requests" — identical to an unpinned peer, and a false finding against
+	// an impl that did everything right.
+	//
+	// This is the oracle encoding Go's reading: our install was only ever
+	// correct because Go happens not to need the field it was discarding.
+	if hasPeerIssuedChainEntry(ctx, client, fx.manifest.RegistryPeerID) {
+		return nil
+	}
+
+	// Carry the endpoint hint. Go derives the registry URL from its CLI flag,
+	// so a bare (kind, id) entry arms a Go peer — but §4's chain entry has a
+	// `hints` map precisely so the config can be self-describing, and Python's
+	// pin puts the endpoint there because that is where its RegistryReader
+	// reads from.
+	//
+	// This must be self-sufficient rather than merely non-destructive: the
+	// `registry` category installs its own resolver-config earlier in the run
+	// and removes it on the way out, so by the time we get here a correctly
+	// pinned Python peer has already lost its entry through no fault of its
+	// own. Preserving what we find is not enough when there is nothing left to
+	// preserve. The validator knows the fixture URL — so it states it.
+	endpointHint, err := cbor.Marshal(fx.url)
+	if err != nil {
+		out := FailCheck("encode endpoint hint: " + err.Error())
+		return &out
+	}
 	cfg := types.ResolverConfigData{
 		ResolverChain: []types.ResolverChainEntry{{
-			BackendKind: types.BackendKindPeerIssued,
-			BackendID:   fx.manifest.RegistryPeerID,
-			Priority:    0,
+			BackendKind:          types.BackendKindPeerIssued,
+			BackendID:            fx.manifest.RegistryPeerID,
+			Priority:             0,
+			AcceptedTrustAnchors: []string{types.PeerIssuedTrustAnchor(fx.manifest.RegistryPeerID)},
+			Hints:                map[string]cbor.RawMessage{"endpoint": endpointHint},
 		}},
 	}
 	cfgEnt, err := cfg.ToEntity()
@@ -181,6 +222,36 @@ func installPeerIssuedResolverChain(ctx context.Context, client *PeerClient, fx 
 		return &out
 	}
 	return nil
+}
+
+// hasPeerIssuedChainEntry reports whether the target's resolver-config
+// already routes to `registryPeerID` as a peer-issued backend. A peer whose
+// own CLI installed the entry is already armed — and its entry may carry
+// impl-specific `hints` we must not discard.
+//
+// Absent or undecodable config reads as "no entry": installing over garbage
+// is the right move, and a decode failure here is not this category's verdict
+// to render.
+func hasPeerIssuedChainEntry(ctx context.Context, client *PeerClient, registryPeerID string) bool {
+	ent, _, err := client.TreeGet(ctx, types.ResolverConfigStoragePath)
+	if err != nil {
+		return false
+	}
+	cfg, err := types.ResolverConfigDataFromEntity(ent)
+	if err != nil {
+		return false
+	}
+	for _, e := range cfg.ResolverChain {
+		if e.BackendKind != types.BackendKindPeerIssued {
+			continue
+		}
+		// An empty/"local" id matches the sole registered backend of the kind
+		// per §4's lookup rule, so it routes to our registry too.
+		if e.BackendID == registryPeerID || e.BackendID == "" || e.BackendID == "local" {
+			return true
+		}
+	}
+	return false
 }
 
 // clearPeerIssuedCache unbinds the three paths the backend's cacheOnResolve
@@ -583,21 +654,33 @@ func runPeerIssuedOfflineNotFound(ctx context.Context, client *PeerClient, fx *p
 	// When the peer DOES surface the backend-level negative, hold it to the
 	// bundle's declared neg_ttl / backend_id. When it reports chain_exhausted
 	// the fields are legitimately absent — the chain loop drops them.
+	// neg_ttl is OPTIONAL / SHOULD, not MUST — REGISTRY §2.1's field table
+	// reads "OPTIONAL negative-cache hint on not_found / chain_exhausted;
+	// SHOULD per backend." A missing one is a WARN. Failing here would be a
+	// MUST-failure reported against a conformant peer, which is the precise
+	// class of false finding this repo has withdrawn before.
 	detail := fmt.Sprintf("status %q", res.Status)
 	if res.Status == types.ResolutionStatusNotFound {
-		if v.Expected.NegTTLMs != nil {
-			if res.NegTTL == nil {
-				return FailCheck(fmt.Sprintf(
-					"status not_found but neg_ttl absent — §2.1 step 1 pairs the negative with a negative TTL (bundle declares %d ms)",
-					*v.Expected.NegTTLMs))
-			}
-			if *res.NegTTL != *v.Expected.NegTTLMs {
-				return FailCheck(fmt.Sprintf("neg_ttl %d ms, want %d ms", *res.NegTTL, *v.Expected.NegTTLMs))
-			}
-			detail += fmt.Sprintf(" with neg_ttl=%d ms", *res.NegTTL)
-		}
 		if v.Expected.BackendID != "" && res.BackendID != v.Expected.BackendID {
 			return FailCheck(fmt.Sprintf("backend_id %q, want %q", res.BackendID, v.Expected.BackendID))
+		}
+		if v.Expected.NegTTLMs != nil {
+			switch {
+			case res.NegTTL == nil:
+				return WarnCheck(fmt.Sprintf(
+					"absent name correctly declined → status %q, and the backend was consulted (%d wire request(s)) "+
+						"— but no neg_ttl was surfaced. §2.1 makes neg_ttl OPTIONAL / SHOULD, so this is conformant; "+
+						"the bundle declares %d ms and a consumer that gets no hint re-queries an absent name every "+
+						"time. WARN, not FAIL.",
+					res.Status, len(fetched), *v.Expected.NegTTLMs))
+			case *res.NegTTL != *v.Expected.NegTTLMs:
+				return WarnCheck(fmt.Sprintf(
+					"neg_ttl %d ms, bundle declares %d ms — neg_ttl is backend-scoped policy (§2.1 SHOULD), not a "+
+						"wire-format MUST, so a different value is conformant. WARN for cohort visibility.",
+					*res.NegTTL, *v.Expected.NegTTLMs))
+			default:
+				detail += fmt.Sprintf(" with neg_ttl=%d ms", *res.NegTTL)
+			}
 		}
 	}
 

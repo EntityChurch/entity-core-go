@@ -20,11 +20,11 @@ mark() { if [ "$1" -ne 0 ]; then FAIL=1; echo ">> FAILED: $2"; else echo ">> ok:
 cleanup() { go run ./cmd/peer-manager stop --all >/dev/null 2>&1 || true; }
 trap cleanup EXIT INT TERM
 
-step "1/5  build + vet (all three modules)"
+step "1/6  build + vet (all three modules)"
 go build ./core/... ./ext/... ./cmd/...; mark $? "build"
 go vet ./core/... ./ext/... ./cmd/...;   mark $? "vet"
 
-step "2/5  unit + race (signaling stack)"
+step "2/6  unit + race (signaling stack)"
 go test ./core/... ./ext/... ./cmd/...;  mark $? "unit"
 # Race the whole punch path, not just the library half: punchwire carries the
 # candidate/SRFLX gathering and validate carries the signaling_punch check, and
@@ -32,13 +32,13 @@ go test ./core/... ./ext/... ./cmd/...;  mark $? "unit"
 go test -race ./ext/signaling/... ./cmd/internal/punchwire/... ./cmd/internal/validate/...
 mark $? "race (signaling + punchwire + validate)"
 
-step "3/5  G3 — emulated dual-NAT harness (positive traverses, negative control fails)"
+step "3/6  G3 — emulated dual-NAT harness (positive traverses, negative control fails)"
 bash scripts/punch-nat-harness.sh;        mark $? "G3 harness"
 
-step "3b/5  endpoint binding — §6.7.3 violation: loopback certifies it, the NAT rung catches it"
+step "3b/6  endpoint binding — §6.7.3 violation: loopback certifies it, the NAT rung catches it"
 bash scripts/punch-endpoint-binding.sh;   mark $? "endpoint-binding harness"
 
-step "3c/5  NAT-type detection — §6.7.1/§11.2 multi-reflector: cone punchable, per-destination relay-only, one reflector refused"
+step "3c/6  NAT-type detection — §6.7.1/§11.2 multi-reflector: cone punchable, per-destination relay-only, one reflector refused"
 # Cross-impl here is NOT a bonus lap: a classifier can be unit-tested against
 # authored divergent vectors in either tree, but no unit test can PRODUCE a
 # per-destination mapping. This is the only substrate in the cohort that can, so
@@ -50,7 +50,7 @@ else
 	bash scripts/punch-nat-type.sh;       mark $? "nat-type harness (go only)"
 fi
 
-step "4/5  validate-peer signaling category (live Go node: meet x4 + signaling_punch)"
+step "4/6  validate-peer signaling category (live Go node: meet x4 + signaling_punch)"
 go run ./cmd/peer-manager stop --all >/dev/null 2>&1 || true
 START="$(go run ./cmd/peer-manager start --name "$NODE_NAME" --type go --signaling-node --debug 2>&1)"
 echo "$START"
@@ -72,7 +72,7 @@ if [ -n "${RUST_PUNCH:-}" ]; then
 	# their mapping from the node's §6.7.1 responder instead of being handed it.
 	# Stage 3 stays on the asserted mapping so the --srflx path keeps its coverage;
 	# between them the suite exercises both mapping sources and both impl pairings.
-	step "5/5  cross-impl — Go↔Rust, two NATs, reflector-discovered srflx (opt-in via RUST_PUNCH)"
+	step "5/6  cross-impl — Go↔Rust, two NATs, reflector-discovered srflx (opt-in via RUST_PUNCH)"
 	bash scripts/punch-nat-harness.sh --reflector --crossimpl "$RUST_PUNCH"; mark $? "cross-impl NAT harness (reflector)"
 	# Stage 6 moves ONE more variable: the §6.7.1 reflector becomes Rust's node, so
 	# Go's observe-address CLIENT meets Rust's RESPONDER with a real NAT in between.
@@ -86,7 +86,7 @@ if [ -n "${RUST_PUNCH:-}" ]; then
 		step "6/6  rust-reflector — SKIPPED (set RUST_NODE=<path to entity-signaling-node> to run it)"
 	fi
 else
-	step "5/5  cross-impl — SKIPPED (set RUST_PUNCH=<path to rust signaling-punch> to run it)"
+	step "5/6  cross-impl — SKIPPED (set RUST_PUNCH=<path to rust signaling-punch> to run it)"
 fi
 
 echo
