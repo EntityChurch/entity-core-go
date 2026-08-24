@@ -126,9 +126,22 @@ type SignalingLimitsData struct {
 // top-level field. Clients read these limits rather than assuming them — a
 // limit the client does not know is a cross-implementation reject boundary
 // (§4.5).
+//
+// ReflectionEndpoints is the OPTIONAL top-level `reflection_endpoints` field
+// added in EXTENSION-SIGNALING v1.1 (§4.5.1): this node's OWN §9.3 STUN
+// listener(s), each an RFC 7064 `stun:`/`stuns:` URI. It is a sibling of
+// Endpoint and Limits, NOT nested in limits. A node that serves §9.3 reflection
+// MUST publish its listener(s) here on every surface it offers (§4.5.1, §12);
+// a node that serves no reflection omits the field. Absent and empty are the
+// same already-legal no-reflection state, so this follows the LobbyConstant
+// precedent exactly: absent (nil) stays absent via omitempty, never encoded as
+// an empty array or null. Each entry is carried VERBATIM — the wire form is
+// pinned (§4.5.1: `stun:host[:port]`, non-hierarchical, no `//`) precisely so no
+// consumer runs a transform; a browser hands these to RTCIceServer.urls as-is.
 type AdvertiseResultData struct {
-	Endpoint string              `cbor:"endpoint"`
-	Limits   SignalingLimitsData `cbor:"limits"`
+	Endpoint            string              `cbor:"endpoint"`
+	Limits              SignalingLimitsData `cbor:"limits"`
+	ReflectionEndpoints []string            `cbor:"reflection_endpoints,omitempty"`
 }
 
 // ConnectRequestData is the system/signaling/connect-request payload (§6.1).

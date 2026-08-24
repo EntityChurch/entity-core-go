@@ -58,6 +58,7 @@ func runSignaling(ctx context.Context, clientA *PeerClient, addr string) []Check
 	// defect, because it looks resolved.
 	r.Declare("signaling_authority", "EXTENSION-SIGNALING §8.1/§7 — the wrapped surface is capability-gated: advertise + caller grant covers system/signaling")
 	r.Declare("signaling_limits_shape", "EXTENSION-SIGNALING §4.5 — advertise-result carries the committed limits shape (ttl_seconds/max_blob_bytes/max_bucket_blobs)")
+	r.Declare("signaling_reflection_endpoints", "EXTENSION-SIGNALING §4.5.1 (v1.1) — when advertise carries reflection_endpoints, every entry is a well-formed RFC 7064 stun:/stuns: URI; absent/empty is the legal no-reflection state")
 	r.Declare("signaling_meet_tag", "EXTENSION-SIGNALING §4.1/§4.5 — two peers derive a `tag` key and meet")
 	r.Declare("signaling_meet_secret", "EXTENSION-SIGNALING §4.1/§4.5 — two peers derive a `secret` key and meet")
 	r.Declare("signaling_meet_lobby", "EXTENSION-SIGNALING §4.1/§4.5 — two peers derive a `lobby` key and meet")
@@ -108,6 +109,7 @@ func runSignaling(ctx context.Context, clientA *PeerClient, addr string) []Check
 	var pool []signaling.PoolMember
 	lobbyConst := signaling.LobbyDefault
 	var advLimits types.SignalingLimitsData
+	var advReflection []string
 
 	r.Run("signaling_authority", func() CheckOutcome {
 		status, adv, err := sigA.Advertise(ctx)
@@ -153,6 +155,7 @@ func runSignaling(ctx context.Context, clientA *PeerClient, addr string) []Check
 		}
 		pool = []signaling.PoolMember{{Endpoint: adv.Endpoint, Priority: 0}}
 		advLimits = adv.Limits
+		advReflection = adv.ReflectionEndpoints
 		if len(adv.Limits.LobbyConstant) > 0 {
 			lobbyConst = string(adv.Limits.LobbyConstant)
 		}
@@ -180,6 +183,35 @@ func runSignaling(ctx context.Context, clientA *PeerClient, addr string) []Check
 		}
 		return PassCheck(fmt.Sprintf("advertise-result limits match §4.5 shape (ttl_seconds=%d max_blob_bytes=%d max_bucket_blobs=%d)",
 			advLimits.TTLSeconds, advLimits.MaxBlobBytes, advLimits.MaxBucketBlobs))
+	})
+
+	// §4.5.1 (v1.1) reflection_endpoints — the wire-observable half of the field
+	// Go leads and rust/py now carry. What a client CAN assert over the wire:
+	// whatever the live node emits is a well-formed RFC 7064 URI. It CANNOT assert
+	// the §11.5 "serves reflection ⇒ MUST advertise" direction — whether the node
+	// runs a §9.3 STUN listener is not observable from the wrapped surface — so an
+	// empty field is the legal absent state (a non-reflecting or pre-v1.1 node),
+	// not a failure. The check earns its keep against a node that advertises a
+	// MALFORMED entry: a browser hands each string to RTCIceServer.urls verbatim
+	// and a bad one throws at RTCPeerConnection construction rather than degrading
+	// to host-only (§4.5.1). Start the target with a reflection endpoint
+	// (peer-manager --reflection-endpoint / entity-peer --reflection-endpoint) to
+	// exercise the populated path; this is the cross-impl proof that a live node's
+	// emission is conformant, which a same-side round-trip cannot give.
+	r.Run("signaling_reflection_endpoints", func() CheckOutcome {
+		if out, ok := r.Require("signaling_authority"); !ok {
+			return out
+		}
+		if len(advReflection) == 0 {
+			return PassCheck("advertise carries no reflection_endpoints — the legal §4.5.1 absent/empty state (a non-reflecting or pre-v1.1 node is conformant; a node that DOES serve §9.3 must publish here, which is not client-observable). Start the node with --reflection-endpoint to exercise the populated path.")
+		}
+		for _, uri := range advReflection {
+			if err := signaling.ValidateReflectionEndpoint(uri); err != nil {
+				return FailCheck(fmt.Sprintf("advertise reflection_endpoints carries a non-conformant entry: %v — a browser hands this to RTCIceServer.urls verbatim and it throws at RTCPeerConnection construction rather than degrading to host-only (§4.5.1 pins the RFC 7064 form)", err))
+			}
+		}
+		return PassCheck(fmt.Sprintf("advertise reflection_endpoints: %d entry(ies), all well-formed RFC 7064 stun:/stuns: URIs (§4.5.1): %v",
+			len(advReflection), advReflection))
 	})
 
 	meet := func(name, label string, deriveKey func() ([]byte, error)) {
@@ -296,7 +328,7 @@ func signalingMeet(ctx context.Context, sigA, sigB *signaling.Client, idA, idB s
 // an early return (peer-B setup failure), before any check has run, so a plain
 // Run per check is safe.
 func skipAllSignaling(r *CheckRunner, msg string) []CheckResult {
-	for _, name := range []string{"signaling_authority", "signaling_meet_tag", "signaling_meet_secret", "signaling_meet_lobby", "signaling_meet_pair"} {
+	for _, name := range []string{"signaling_authority", "signaling_reflection_endpoints", "signaling_meet_tag", "signaling_meet_secret", "signaling_meet_lobby", "signaling_meet_pair"} {
 		r.Run(name, func() CheckOutcome { return SkipCheck(msg) })
 	}
 	return r.Results()

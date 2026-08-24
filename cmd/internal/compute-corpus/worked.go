@@ -26,6 +26,7 @@ import (
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/hash"
+	"go.entitychurch.org/entity-core-go/core/types"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -667,6 +668,44 @@ var workedVectors = []workedVector{
 			return probe(b, b.lookupScope("nope"))
 		},
 	},
+	{
+		// §2.4 materialized-error determinism — the vector arch's ROUTING
+		// 2026-08-13(i) / 2026-08-15(e) names as the ONE thing left gating
+		// PROPOSAL-COMPUTE-ERROR-MATERIALIZATION-DETERMINISM (§2.4, v3.21
+		// provisional) from ratifying. It has to exist here because EVERY other
+		// error vector in this file — division-by-zero, budget/exhausted,
+		// scope/unbound-name, record/index-out-of-range, numeric-intent/cast-* —
+		// produces an error that PROPAGATES OUT of its `probe` as a top-level
+		// {kind:"error", code} outcome. cross-bless compares the `code` string for
+		// those; the error is never content-hashed AS AN ENTITY, so an impl that
+		// materializes a `compute/error` over {code, message} rather than {code}
+		// ALONE (§2.4) is invisible to all of them. Three green impls, one hashing
+		// a different field set, and nothing that would notice — the exact
+		// unexercised divergence the gate calls out.
+		//
+		// This closes it. A compute/error is a value-type (SA-1, eval.go): a
+		// LITERAL error, evaluated, returns as-is instead of propagating, so it
+		// lands in a compute/construct FIELD. When the construct materializes at
+		// the compute→non-compute boundary (§2.3 N1), that field becomes a bare
+		// system/hash ref to a materialized error entity content-hashed over `code`
+		// alone (eval_construct.go materialize() → MaterializeErrorEntity). The
+		// literal carries a LOUD `message`; if any impl folds it into the
+		// materialized hash, this vector's entity-kind boundary diverges three-way
+		// and cross-bless localizes it. All three stripping to `code` is the
+		// ratification evidence §2.4 was waiting on.
+		//
+		// Boundary is entity-kind (a materialized error is a bare entity), NOT
+		// error-kind — that is the point: the error is reached as a materialized
+		// SUBTREE, not as the outcome. The unbound-name/division vectors keep the
+		// error-kind path covered.
+		id: "worked/error/materialized-into-construct",
+		build: func(b *irBuilder) hash.Hash {
+			b.feature("error-path", "materialized-error")
+			errLit := errorValue(b, "corpus_materialized_error",
+				"DIAGNOSTIC PROSE — §2.4 requires this message be stripped before the compute/error is content-addressed; if it appears in the entity-kind boundary hash, the impl folded message into the materialized hash")
+			return probe(b, errLit)
+		},
+	},
 }
 
 // matchVariant builds the §4d match decomposition for a given tag: construct a
@@ -684,6 +723,23 @@ func matchVariant(b *irBuilder, tag string) hash.Hash {
 	isCircle := b.compare("eq", tagOf, b.lit("circle"))
 	body := b.ifE(isCircle, circle, &square)
 	return probe(b, b.letE(map[string]hash.Hash{"v": variant}, body))
+}
+
+// errorValue records a compute/error VALUE literal in the closure and returns
+// its hash. This is the in-flight form (§2.4: {code, message, at?, expression?}),
+// so the `message` is REALLY in the artifact bytes — which is the whole point of
+// the materialized-into-construct vector: the materialized boundary MUST strip it
+// to `code` alone, and an artifact that carried only the code could not tell a
+// stripping impl from a non-stripping one. A compute/error is a value-type (SA-1),
+// so evaluating this literal returns it as-is rather than propagating, letting it
+// be placed into a compute/construct field. Panics on encode failure — the inputs
+// are literals here, so a failure is a corpus-build programming error.
+func errorValue(b *irBuilder, code, message string) hash.Hash {
+	ent, err := types.ComputeErrorData{Code: code, Message: message}.ToEntity()
+	if err != nil {
+		panic("corpus: build compute/error literal " + code + ": " + err.Error())
+	}
+	return b.addRaw(ent)
 }
 
 // rawEntity hand-builds a non-compute entity for tree preconditions. Panics on

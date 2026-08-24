@@ -196,6 +196,7 @@ func cmdStart(args []string) {
 	issuerPolicyAllowlist := fs.String("issuer-policy-allowlist", "", "EXTENSION-REGISTRY §6a.9.1 — comma-separated target_peer_ids permitted to register when --issuer-policy-mode=allowlist. Ignored in other modes. Go-only, see --issuer-policy-mode.")
 	issuerPolicyNameConstraints := fs.String("issuer-policy-name-constraints", "", "EXTENSION-REGISTRY §6a.9.1 — POSIX glob narrowing which names this registry will issue (e.g. \"*.lab\"); a non-matching name is rejected 403 not_entitled. Empty = no constraint. Go-only, see --issuer-policy-mode.")
 	issuerPolicyDefaultTTL := fs.String("issuer-policy-default-ttl", "", "EXTENSION-REGISTRY §6a.9.1 — Go duration (e.g. 1h) the registry signs when register-request omits requested_ttl. Empty/zero = no expiry. Go-only, see --issuer-policy-mode.")
+	reflectionEndpoints := fs.String("reflection-endpoint", "", "EXTENSION-SIGNALING §4.5.1 (v1.1): comma-separated RFC 7064 STUN URI(s) this node advertises as its OWN §9.3 reflection listener(s), in `advertise`'s top-level reflection_endpoints. Pair with --signaling-node. Go-only for now: the field is unbuilt in rust and py as of 2026-08-15 (source-read, docs/validation/reports/2026-08-15-reflection-endpoints-*.md) — arch routed it P0 to entity-core-rust. Dropped with a warning for those peer types rather than passed and rejected.")
 	fs.Parse(args)
 
 	if *name == "" {
@@ -246,6 +247,7 @@ func cmdStart(args []string) {
 		issuerPolicyAllowlist:       *issuerPolicyAllowlist,
 		issuerPolicyNameConstraints: *issuerPolicyNameConstraints,
 		issuerPolicyDefaultTTL:      *issuerPolicyDefaultTTL,
+		reflectionEndpoints:         *reflectionEndpoints,
 	}
 
 	// Resolve --inbox-relay-registry peer-names → peer-ids from state.
@@ -386,6 +388,12 @@ type chunkEFlags struct {
 	// unless issuerPolicyMode is set, which is why the surface had zero
 	// validator coverage until this passthrough existed — the suite could
 	// not start it (GUIDE-CONFORMANCE §5.2b).
+	// reflectionEndpoints is the EXTENSION-SIGNALING §4.5.1 (v1.1) comma-separated
+	// RFC 7064 STUN URI list this node advertises as its own §9.3 reflection
+	// listener(s). Go-only for now — unbuilt in rust/py, so forwarded to Go peers
+	// and dropped-with-warning for the siblings, the same shape as publishPrefix.
+	reflectionEndpoints string
+
 	issuerPolicyMode            string
 	issuerPolicyAllowlist       string
 	issuerPolicyNameConstraints string
@@ -531,6 +539,9 @@ func startGoPeer(name, addr string, debug, openAccess bool, files, history, stor
 	}
 	if poll.signalingNode {
 		cmdArgs = append(cmdArgs, "-signaling-node")
+	}
+	if poll.reflectionEndpoints != "" {
+		cmdArgs = append(cmdArgs, "-reflection-endpoint", poll.reflectionEndpoints)
 	}
 	if poll.publishRoot {
 		cmdArgs = append(cmdArgs, "-publish-root")
@@ -792,6 +803,14 @@ func startRustPeer(name, addr string, debug bool, storage, history, files, httpA
 		// peer's default subtree while the operator believed it had narrowed.
 		fmt.Fprintf(os.Stderr, "Warning: --publish-prefix ignored for this peer type (Go-only; the peer publishes its own default subtree)\n")
 	}
+	if poll.reflectionEndpoints != "" {
+		// EXTENSION-SIGNALING §4.5.1 reflection_endpoints is unbuilt in this
+		// sibling as of 2026-08-15 (source-read; arch routed it P0 to rust). A
+		// node that cannot advertise its reflector is not a bug — the field is
+		// OPTIONAL and absent means host-candidates-only — so drop it and SAY SO
+		// rather than pass a flag the sibling CLI would reject at startup.
+		fmt.Fprintf(os.Stderr, "Warning: --reflection-endpoint ignored for this peer type (Go-only; the sibling has no §4.5.1 reflection_endpoints surface yet)\n")
+	}
 	if poll.discoveryAnnounce != "" {
 		// Dropped for RUST only, and now for a verified reason rather than a
 		// carried one: rust's `PeerAction::Start` has no discovery flag at all
@@ -1047,6 +1066,14 @@ func startPythonPeer(name, addr string, debug, openAccess bool, history, files, 
 		// drop it and SAY SO — a silently dropped scope flag would publish the
 		// peer's default subtree while the operator believed it had narrowed.
 		fmt.Fprintf(os.Stderr, "Warning: --publish-prefix ignored for this peer type (Go-only; the peer publishes its own default subtree)\n")
+	}
+	if poll.reflectionEndpoints != "" {
+		// EXTENSION-SIGNALING §4.5.1 reflection_endpoints is unbuilt in this
+		// sibling as of 2026-08-15 (source-read; arch routed it P0 to rust). A
+		// node that cannot advertise its reflector is not a bug — the field is
+		// OPTIONAL and absent means host-candidates-only — so drop it and SAY SO
+		// rather than pass a flag the sibling CLI would reject at startup.
+		fmt.Fprintf(os.Stderr, "Warning: --reflection-endpoint ignored for this peer type (Go-only; the sibling has no §4.5.1 reflection_endpoints surface yet)\n")
 	}
 	if poll.discoveryAnnounce != "" {
 		// FORWARDED as of 2026-08-12 (e). Python has had this flag; we were

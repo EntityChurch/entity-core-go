@@ -2,10 +2,37 @@ package continuation
 
 import (
 	"testing"
+	"time"
 
+	"github.com/fxamacker/cbor/v2"
+
+	"go.entitychurch.org/entity-core-go/core/ecf"
+	"go.entitychurch.org/entity-core-go/core/entity"
+	"go.entitychurch.org/entity-core-go/core/protocol"
 	"go.entitychurch.org/entity-core-go/core/store"
 	"go.entitychurch.org/entity-core-go/core/types"
 )
+
+// setChainErrorsRetention writes the v1.23 operator knob — a
+// system/config/chain-errors entity carrying retention_ms — into the tree.
+func setChainErrorsRetention(t *testing.T, cs store.ContentStore, li store.LocationIndex, ms uint64) {
+	t.Helper()
+	raw, err := ecf.Encode(protocol.ChainErrorsConfig{RetentionMs: &ms})
+	if err != nil {
+		t.Fatalf("encode chain-errors config: %v", err)
+	}
+	ent, err := entity.NewEntity(MarkerRetentionConfigPath, cbor.RawMessage(raw))
+	if err != nil {
+		t.Fatalf("build config entity: %v", err)
+	}
+	h, err := cs.Put(ent)
+	if err != nil {
+		t.Fatalf("store config: %v", err)
+	}
+	if err := li.Set(MarkerRetentionConfigPath, h); err != nil {
+		t.Fatalf("bind config: %v", err)
+	}
+}
 
 const collectNow uint64 = 1_800_000_000_000 // arbitrary "now", ms since epoch
 
@@ -67,6 +94,61 @@ func TestCollectExpiredMarkers(t *testing.T) {
 				t.Errorf("marker aged %dms was collected under a %dms retention window", tt.age, tt.retention)
 			}
 		})
+	}
+}
+
+// TestRetentionFromConfigReadsTheTreeKnob covers the v1.23 §3.4 A.1 config key:
+// the retention window is read from system/config/chain-errors → retention_ms,
+// with absent (no entity / no field) distinguishable from an explicit 0
+// (RetainMarkersForever — the operator turning collection off).
+func TestRetentionFromConfigReadsTheTreeKnob(t *testing.T) {
+	cs := store.NewMemoryContentStore()
+	li := store.NewMemoryLocationIndex()
+
+	if _, ok := retentionFromConfig(cs, li); ok {
+		t.Fatalf("retentionFromConfig reported a value with no config entity present")
+	}
+
+	setChainErrorsRetention(t, cs, li, 5000)
+	if got, ok := retentionFromConfig(cs, li); !ok || got != 5000 {
+		t.Fatalf("retentionFromConfig = (%d,%v), want (5000,true)", got, ok)
+	}
+
+	// Explicit 0 is a real value (turn collection off), NOT the absent case.
+	setChainErrorsRetention(t, cs, li, 0)
+	if got, ok := retentionFromConfig(cs, li); !ok || got != RetainMarkersForever {
+		t.Fatalf("explicit retention_ms=0 = (%d,%v), want (0,true) so an operator can opt out via the tree", got, ok)
+	}
+}
+
+// TestTreeConfigOverridesBuilderRetention is the v1.23 precedence rule as an
+// executable claim: the operator's system/config/chain-errors → retention_ms
+// wins over the deploy-time WithMarkerRetention default. A handler built to
+// RETAIN FOREVER still collects an expired marker once the tree config sets a
+// short window — proving the sweep consults the tree, not just its own field.
+func TestTreeConfigOverridesBuilderRetention(t *testing.T) {
+	cs := store.NewMemoryContentStore()
+	li := store.NewMemoryLocationIndex()
+
+	// Builder says never collect.
+	h := NewHandler(WithMarkerRetention(RetainMarkersForever))
+
+	// An old marker that a short window would collect.
+	path := bindMarker(t, cs, li, "chain-cfg", collectNow-2*DefaultMarkerRetentionMs)
+
+	// With no tree config, the builder's RetainMarkersForever holds → survives.
+	h.lastCollect = time.Time{}
+	h.maybeCollectMarkers(cs, li)
+	if _, present := li.Get(path); !present {
+		t.Fatalf("marker collected while builder said retain-forever and no tree config was set")
+	}
+
+	// Operator writes a short window into the tree → the sweep adopts it.
+	setChainErrorsRetention(t, cs, li, 1000)
+	h.lastCollect = time.Time{} // clear the throttle so the sweep runs now
+	h.maybeCollectMarkersAt(cs, li, collectNow)
+	if _, present := li.Get(path); present {
+		t.Fatalf("tree config retention_ms=1000 did not override the builder's retain-forever — the sweep is not reading system/config/chain-errors")
 	}
 }
 

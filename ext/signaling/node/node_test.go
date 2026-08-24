@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/handler"
 	"go.entitychurch.org/entity-core-go/core/types"
@@ -228,6 +229,66 @@ func TestAdvertiseLimits(t *testing.T) {
 	dadv, _ := types.AdvertiseResultDataFromEntity(def.Result)
 	if dadv.Limits.MaxBlobBytes != DefaultMaxBlobBytes || dadv.Limits.MaxBucketBlobs != DefaultMaxBucketBlobs || dadv.Limits.TTLSeconds != DefaultTTLSeconds {
 		t.Errorf("default limits=%+v, want {%d %d %d}", dadv.Limits, DefaultMaxBlobBytes, DefaultMaxBucketBlobs, DefaultTTLSeconds)
+	}
+}
+
+// TestAdvertiseReflectionEndpoints covers §4.5.1 (v1.1): a node that serves §9.3
+// reflection publishes its own listener(s) in advertise's top-level
+// reflection_endpoints, emitted verbatim and decoded back unchanged.
+func TestAdvertiseReflectionEndpoints(t *testing.T) {
+	want := []string{"stun:stun.example.org:3478", "stuns:[2001:db8::1]:5349"}
+	h := New(WithEndpoint("127.0.0.1:4050"), WithReflectionEndpoints(want...))
+	resp, err := h.Handle(context.Background(), &handler.Request{Operation: signaling.OpAdvertise})
+	if err != nil {
+		t.Fatalf("advertise: %v", err)
+	}
+	adv, err := types.AdvertiseResultDataFromEntity(resp.Result)
+	if err != nil {
+		t.Fatalf("decode advertise-result: %v", err)
+	}
+	if len(adv.ReflectionEndpoints) != len(want) {
+		t.Fatalf("reflection_endpoints=%v, want %v", adv.ReflectionEndpoints, want)
+	}
+	for i := range want {
+		if adv.ReflectionEndpoints[i] != want[i] {
+			t.Errorf("reflection_endpoints[%d]=%q, want %q (verbatim, no transform)", i, adv.ReflectionEndpoints[i], want[i])
+		}
+	}
+}
+
+// TestAdvertiseNoReflectionOmitsField pins the LobbyConstant precedent (§4.5.1:
+// absent, never null): a node serving no reflection MUST NOT carry the field on
+// the wire — absent decodes to the already-legal no-reflection state, and an
+// empty array or null would be a different, non-conformant encoding.
+func TestAdvertiseNoReflectionOmitsField(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		h    *Handler
+	}{
+		{"unset", New(WithEndpoint("127.0.0.1:4050"))},
+		{"explicit-empty", New(WithEndpoint("127.0.0.1:4050"), WithReflectionEndpoints())},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := tc.h.Handle(context.Background(), &handler.Request{Operation: signaling.OpAdvertise})
+			if err != nil {
+				t.Fatalf("advertise: %v", err)
+			}
+			adv, err := types.AdvertiseResultDataFromEntity(resp.Result)
+			if err != nil {
+				t.Fatalf("decode advertise-result: %v", err)
+			}
+			if adv.ReflectionEndpoints != nil {
+				t.Errorf("reflection_endpoints=%v, want nil (decoded)", adv.ReflectionEndpoints)
+			}
+			// Wire-level: the key must be absent from the encoded map, not present-with-null.
+			var m map[string]any
+			if err := ecf.Decode(resp.Result.Data, &m); err != nil {
+				t.Fatalf("decode advertise-result data as map: %v", err)
+			}
+			if _, present := m["reflection_endpoints"]; present {
+				t.Errorf("reflection_endpoints key present on the wire; §4.5.1 requires absent (omitempty), not null/empty")
+			}
+		})
 	}
 }
 

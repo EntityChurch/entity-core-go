@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.entitychurch.org/entity-core-go/core/capability"
@@ -99,6 +100,16 @@ type Dispatcher struct {
 	// durable store (never overclaims). NewDispatcher sets the default
 	// ("stored" self-determinable).
 	DurabilityPolicy DurabilityPolicy
+
+	// lastChainErrorSweep throttles the dispatcher's self-sweep of `rejected`
+	// chain-error markers (v1.23 §3.4 A.1), unix-ms of the last sweep. The
+	// dispatcher binds `rejected` markers on chain-scoped cap rejections
+	// (bindRejectedChainErrorMarker) and MUST reap them itself: the
+	// ext/continuation sweep is unreachable from here (ext depends on core, not
+	// the reverse) and would never fire for a peer that only DENIES chain
+	// dispatches and never advances a continuation — the attacker-driven case.
+	// See chainerror_collect.go.
+	lastChainErrorSweep atomic.Int64
 
 	// preservedRequests is the idempotency index for durably-preserved
 	// requests (EXTENSION-DURABILITY §5 / §6 / §8). Key:
@@ -361,7 +372,43 @@ func (d *Dispatcher) bindRejectedChainErrorMarker(execData types.ExecuteData, co
 	}
 	d.debugf("bound rejected chain-error marker at %s (code=%q attempted_uri=%q requesting_peer=%q)",
 		markerPath, code, attemptedURI, requestingPeerID)
+	// v1.23 §3.4 A.1: self-collect. Bind-time and throttled, so the attacker-
+	// driven 403 path that grows this tree is exactly the path that reaps it, and
+	// a peer that has stopped being probed has nothing to sweep.
+	d.maybeCollectChainErrorMarkers()
 	return markerHash
+}
+
+// chainErrorSweepThrottle bounds how often a rejected-marker bind pays for a
+// full sweep of the chain-errors tree.
+const chainErrorSweepThrottle = time.Minute
+
+// maybeCollectChainErrorMarkers runs a throttled, best-effort sweep of expired
+// chain-error markers (both `lost` and `rejected` live under MarkerRoot) at the
+// v1.23 retention window. The window is the operator's system/config/chain-errors
+// → retention_ms when set, else the 24h default; the dispatcher has no builder
+// override (that is a continuation-handler deploy knob), and the tree config
+// governs both binders identically. Concurrency-safe: a CAS on the throttle
+// timestamp lets exactly one goroutine sweep per window.
+func (d *Dispatcher) maybeCollectChainErrorMarkers() {
+	if d.Store == nil || d.LocationIndex == nil {
+		return
+	}
+	nowMs := time.Now().UnixMilli()
+	last := d.lastChainErrorSweep.Load()
+	if last != 0 && nowMs-last < chainErrorSweepThrottle.Milliseconds() {
+		return
+	}
+	if !d.lastChainErrorSweep.CompareAndSwap(last, nowMs) {
+		return // another goroutine claimed this window
+	}
+	retention := EffectiveRetention(d.Store, d.LocationIndex, DefaultMarkerRetentionMs)
+	if retention == RetainMarkersForever {
+		return
+	}
+	if n := CollectExpiredMarkers(d.Store, d.LocationIndex, retention, uint64(nowMs)); n > 0 {
+		d.debugf("dispatcher collected %d expired chain-error marker(s) (retention %dms)", n, retention)
+	}
 }
 
 // DefaultMaxChainDepth is the EXTENSION-CONTINUATION §8.4 implementation-

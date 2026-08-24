@@ -294,6 +294,48 @@ func TestWorkedErrorVectorsRaiseTheirCode(t *testing.T) {
 	}
 }
 
+// TestMaterializedErrorIsCodeOnly is §2.4 as an executable claim, and the
+// invariant the worked/error/materialized-into-construct vector carries into the
+// cross-impl corpus. A compute/error materialized into a construct field is
+// content-hashed over `code` ALONE (PROPOSAL-COMPUTE-ERROR-MATERIALIZATION-
+// DETERMINISM). So the construct's entity-kind boundary must turn on the error's
+// CODE and be blind to its (in-flight-only) `message`.
+//
+// This is what makes the corpus vector load-bearing rather than decorative: it
+// asserts, from both directions, exactly the divergence the vector exists to
+// catch three-way — an impl that folds `message` into the materialized hash fails
+// the same-code half; an impl that hashes a constant regardless of code fails the
+// different-code half.
+func TestMaterializedErrorIsCodeOnly(t *testing.T) {
+	boundary := func(code, message string) []byte {
+		b := newIRBuilder(nil)
+		root := probe(b, errorValue(b, code, message))
+		v, err := b.freeze("test/materialized-error", 0, root, map[string]interface{}{}, stdBudget)
+		if err != nil {
+			t.Fatalf("freeze(%q): %v", code, err)
+		}
+		o, err := evalVector(v)
+		if err != nil {
+			t.Fatalf("eval(%q): %v", code, err)
+		}
+		if o.Kind != OutcomeEntity {
+			t.Fatalf("code %q: expected an entity-kind boundary (a materialized error is a bare entity), got %s", code, o)
+		}
+		return o.Boundary
+	}
+
+	sameCodeA := boundary("materialized_code", "message ALPHA — this prose is in-flight only and MUST NOT be hashed")
+	sameCodeB := boundary("materialized_code", "an entirely different message, beta, of a different length")
+	diffCode := boundary("other_code", "message ALPHA — this prose is in-flight only and MUST NOT be hashed")
+
+	if !bytes.Equal(sameCodeA, sameCodeB) {
+		t.Errorf("same code + different message produced DIFFERENT boundaries — `message` leaked into the materialized hash (§2.4 code-only violated):\n  A: %x\n  B: %x", sameCodeA, sameCodeB)
+	}
+	if bytes.Equal(sameCodeA, diffCode) {
+		t.Errorf("different code produced the SAME boundary — the materialized error is not discriminating on `code` (§2.4):\n  both: %x", sameCodeA)
+	}
+}
+
 // TestTailRecursionIterates is §4c as an executable claim.
 //
 // The vector runs 5 levels of self-call under a depth budget of 16. An engine

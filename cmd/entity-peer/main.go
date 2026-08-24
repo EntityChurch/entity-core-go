@@ -101,6 +101,7 @@ func main() {
 	hashType := flag.String("hash-type", "sha256", "content_hash_format used for entities this peer authors: sha256 (default, 0x00) | sha384 (0x01). Received entities verify under their claimed algorithm regardless (v7.67 §2.3 format-code interpretation).")
 	validate := flag.Bool("validate", false, "enable GUIDE-CONFORMANCE §7a test handlers (system/validate/echo + system/validate/dispatch-outbound) for validate-peer probing. OFF by default — these handlers expose §6.13(a)/§6.13(b) for black-box wire attestation and MUST NOT be on in production (dispatch-outbound originates outbound).")
 	signalingNode := flag.Bool("signaling-node", false, "EXTENSION-SIGNALING §4/§5: serve the system/signaling rendezvous node (offer/collect/advertise) — the opaque per-key blob store for NAT-introduction and the §7 punch. OFF by default; the caller's grant must cover system/signaling:{offer,collect,advertise} (use --open-access or a seed policy). Endpoint advertised is --addr.")
+	reflectionEndpoints := flag.String("reflection-endpoint", "", "EXTENSION-SIGNALING §4.5.1 (v1.1): comma-separated RFC 7064 STUN URI(s) (stun:host[:port] / stuns:host[:port], non-hierarchical — no //) for this node's OWN §9.3 reflection listener(s), published in `advertise`'s top-level reflection_endpoints. Set ONLY if this deployment actually serves §9.3 reflection (co-located reflector per GUIDE-REFERENCE-DEPLOYMENT). Requires --signaling-node. Empty (default) advertises no reflection. Each URI is validated at startup and emitted verbatim — a browser hands them to RTCIceServer.urls as-is.")
 	publishRoot := flag.Bool("publish-root", false, "PROPOSAL-PEER-MANIFEST-STATIC-HANDSHAKE §4 (LOCKED): on every tree-root change, mint a signed system/peer/published-root pointer at system/peer/published-root/{peer_id_hex}, bind its signature at the invariant-pointer, and serve it as MANIFEST_GET's body via the http-poll listener. Requires a serving-mode posture (--http-poll-addr or --http-poll-mount-on-live) to be reachable on the wire; produces the entity unconditionally so other consumers can read it from the local tree.")
 	publishPrefix := flag.String("publish-prefix", publishedroot.PrefixForLocalPeer, "EXTENSION-TREE §3.3a: the subtree --publish-root commits to, and the `prefix` the published root declares. Keys in the published trie are relative to this, and the served closure covers only what is under it — so this is how a peer publishes a SUBSET of its tree rather than all of it, which is the common deployment. Three admissible shapes (§3.3): a peer-relative subtree (\"system/\", the default; \"system/content/\" to publish only shareable content), the peer-qualified \"/{peer_id}/\" (this peer's whole namespace), or \"/\" (the universal tree — every peer-id this peer holds). MUST end with \"/\". Entity content hashes are path-independent, so narrowing the prefix changes which entities are reachable, never their hashes; the trie ROOT does change, because keys are relative to the prefix.")
 	discoveryAnnounce := flag.String("discovery-announce", "", "EXTENSION-DISCOVERY §3: announce self on the mDNS backend (`_entity-core._udp.local.`). Value is the transport profile_ref to advertise (the {profile-id} under system/peer/transport/{peer}/...). Empty disables. Requires --addr (TCP profile) or --http-addr (HTTP-live profile) to provide a reachable port.")
@@ -518,9 +519,25 @@ func main() {
 	// caller's grant over system/signaling — seed it (--open-access / seed policy)
 	// or offer/collect/advertise return capability_denied.
 	if *signalingNode {
+		nodeOpts := []signalingnode.Option{signalingnode.WithEndpoint(*addr)}
+		// §4.5.1: advertise this node's own §9.3 reflection listener(s). Validate
+		// the pinned RFC 7064 form at startup and fail loudly — a malformed URI
+		// throws in a browser's RTCPeerConnection rather than degrading, so a bad
+		// operator value must never reach the wire.
+		if uris := splitCSV(*reflectionEndpoints); len(uris) > 0 {
+			for _, u := range uris {
+				if err := signaling.ValidateReflectionEndpoint(u); err != nil {
+					log.Fatalf("--reflection-endpoint: %v", err)
+				}
+			}
+			nodeOpts = append(nodeOpts, signalingnode.WithReflectionEndpoints(uris...))
+			log.Printf("Signaling node advertising %d reflection endpoint(s) (§4.5.1): %s", len(uris), strings.Join(uris, ", "))
+		}
 		opts = append(opts, peer.WithHandler(signaling.HandlerPattern,
-			signalingnode.New(signalingnode.WithEndpoint(*addr))))
+			signalingnode.New(nodeOpts...)))
 		log.Printf("Signaling rendezvous node enabled (--signaling-node): %s (EXTENSION-SIGNALING §4/§5)", signaling.HandlerPattern)
+	} else if *reflectionEndpoints != "" {
+		log.Fatalf("--reflection-endpoint requires --signaling-node (§4.5.1 publishes on the node's advertise)")
 	}
 	if sqliteStore != nil {
 		opts = append(opts, peer.WithCloseFunc(func() {

@@ -66,6 +66,7 @@ type Handler struct {
 	maxBucketBlobs uint64
 	ttl            time.Duration
 	lobbyConstant  []byte
+	reflectionURIs []string
 }
 
 // Option configures a node Handler. Every field is a §4.5 deployment limit or
@@ -96,6 +97,26 @@ func WithLimits(maxBlobBytes, maxBucketBlobs, ttlSeconds uint64) Option {
 // limits. Absent (the default) means the node uses signaling.LobbyDefault and
 // advertises no override.
 func WithLobbyConstant(b []byte) Option { return func(h *Handler) { h.lobbyConstant = b } }
+
+// WithReflectionEndpoints sets the node's OWN §9.3 STUN listener(s), published
+// in `advertise`'s top-level `reflection_endpoints` (§4.5.1, added v1.1). Supply
+// these ONLY if this deployment actually serves §9.3 reflection — advertising a
+// reflector it does not run is non-conformant, and the reference deployment
+// co-locates the reflector on the signaling VM (§4.5.1). Each entry MUST be an
+// RFC 7064 `stun:`/`stuns:` URI in the pinned non-hierarchical form; callers
+// should validate with signaling.ValidateReflectionEndpoint before passing them
+// (the node emits verbatim — the wire form is the operator's contract, §4.5.1).
+// Absent (the default) advertises no reflection, the already-legal state a
+// pre-v1.1 node was in. Never another node's endpoints.
+func WithReflectionEndpoints(uris ...string) Option {
+	return func(h *Handler) {
+		if len(uris) == 0 {
+			h.reflectionURIs = nil
+			return
+		}
+		h.reflectionURIs = append([]string(nil), uris...)
+	}
+}
 
 // WithClock injects the time source (tests drive TTL without sleeping).
 func WithClock(fn func() time.Time) Option { return func(h *Handler) { h.now = fn } }
@@ -213,10 +234,22 @@ func (h *Handler) advertise() (*handler.Response, error) {
 		LobbyConstant:  h.lobbyConstant,
 	}
 	endpoint := h.endpoint
+	// §4.5.1: emit the node's own reflection listeners as a top-level field.
+	// nil stays nil so omitempty omits it — absent ⇒ no reflection, the pre-v1.1
+	// state. Copy so a caller mutating the returned slice cannot reach into the
+	// handler's config under the lock's protection.
+	var reflection []string
+	if len(h.reflectionURIs) > 0 {
+		reflection = append([]string(nil), h.reflectionURIs...)
+	}
 	h.mu.Unlock()
 
 	return handler.NewResponse(200, types.TypeSignalingAdvertiseResult,
-		types.AdvertiseResultData{Endpoint: endpoint, Limits: limits})
+		types.AdvertiseResultData{
+			Endpoint:            endpoint,
+			Limits:              limits,
+			ReflectionEndpoints: reflection,
+		})
 }
 
 // liveBucketLocked returns key's bucket with expired entries dropped (TTL binding

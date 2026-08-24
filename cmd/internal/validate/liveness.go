@@ -1,6 +1,7 @@
 package validate
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -54,6 +55,7 @@ func runLiveness(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs in
 
 	r.Declare("liveness_dialback_establish", "EXTENSION-NETWORK §6.2 + §10 dial-out (harness setup; reverse-direction connected write)")
 	r.Declare("liveness_connected_on_establish", "Amendment 12 §A3 rung 1 / ENTITY-CORE-PROTOCOL §3.13")
+	r.Declare("liveness_no_cadence_write", "EXTENSION-NETWORK §5.4.1 [MUST] — status is transition-written; a healthy keepalive tick writes nothing")
 	r.Declare("liveness_suspect_on_transport_error", "Amendment 12 §A1 — direct-dispatch demotion seam")
 	r.Declare("liveness_disconnected_on_keepalive_miss", "EXTENSION-NETWORK §5.4 / Amendment 12 rung 2 + §A4 last_seen snapshot")
 	r.Declare("liveness_escalate_after_eviction", "EXTENSION-NETWORK §5.4a [MUST] — NET-LIVENESS-ESCALATE-AFTER-EVICTION-1")
@@ -62,6 +64,7 @@ func runLiveness(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs in
 		for _, name := range []string{
 			"liveness_dialback_establish",
 			"liveness_connected_on_establish",
+			"liveness_no_cadence_write",
 			"liveness_suspect_on_transport_error",
 			"liveness_disconnected_on_keepalive_miss",
 			"liveness_escalate_after_eviction",
@@ -136,6 +139,69 @@ func runLiveness(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs in
 			return FailCheck(fmt.Sprintf("connected establish write carries reason %q — reasons belong to demotion transitions (§A2)", d.Reason))
 		}
 		return PassCheck("target wrote connected at system/peer/status/{counterpart} on establish (peer_id correct, no demotion reason)")
+	})
+
+	// §5.4.1 [MUST]: status is transition-written; a successful keepalive tick
+	// produces NO tree write. This runs while the FIRST counterpart is still
+	// alive and the connection is healthy — so any status write during the window
+	// is a cadence write, not a transition. Cross-impl instrument owed per the
+	// 2026-08-15(e) report and entity-core-rust's shape guidance: don't assert
+	// "no event within N ms" (flaky); sample the status entity at both ends of a
+	// quiet window and require content equality — a per-tick writer changes
+	// last_seen → changes {type,data} → fails on its FIRST tick. The Require on
+	// liveness_connected_on_establish is rust's sibling guard: a peer that never
+	// writes status at all cannot reach here, so it cannot pass vacuously. And the
+	// window is meaningful precisely because liveness_disconnected_on_keepalive_miss
+	// (same envelope, same peer) proves the keepalive loop actually ticks.
+	r.Run("liveness_no_cadence_write", func() CheckOutcome {
+		if out, ok := r.Require("liveness_connected_on_establish"); !ok {
+			return out
+		}
+		if keepaliveEnvelopeMs <= 0 {
+			return SkipCheck("pass -keepalive-envelope-ms (the target's §2.3 interval_ms × max_missed + timeout_ms) — the §5.4.1 quiet-window probe needs the connection to tick under a known envelope; opt-in so default runs don't wait. Paired with liveness_disconnected_on_keepalive_miss, which proves the loop ticks.")
+		}
+		statusPath := types.TypePeerStatus + "/" + counterpart.hexID
+		before, _, err := client.TreeGet(ctx, statusPath)
+		if err != nil {
+			return FailCheck("read status entity before the quiet window: " + err.Error())
+		}
+		if d, derr := types.PeerStatusDataFromEntity(before); derr != nil || d.Status != types.PeerStatusConnected {
+			return SkipCheck(fmt.Sprintf("status was not connected at the start of the window (status=%q) — the connection was not healthy, so a quiet-window claim would be unsound", func() string {
+				if derr != nil {
+					return "undecodable"
+				}
+				d, _ := types.PeerStatusDataFromEntity(before)
+				return d.Status
+			}()))
+		}
+		// Idle across the full miss-detection envelope: ≥ max_missed healthy ticks
+		// occur (each a successful pong), none of which may write. The counterpart
+		// stays alive, so the connection never demotes. Small margin over the
+		// envelope to be sure a tick boundary is crossed.
+		quiet := time.Duration(keepaliveEnvelopeMs)*time.Millisecond + 500*time.Millisecond
+		select {
+		case <-ctx.Done():
+			return SkipCheck("context canceled during the quiet window")
+		case <-time.After(quiet):
+		}
+		after, _, err := client.TreeGet(ctx, statusPath)
+		if err != nil {
+			return FailCheck("read status entity after the quiet window: " + err.Error())
+		}
+		dAfter, derr := types.PeerStatusDataFromEntity(after)
+		if derr != nil {
+			return FailCheck("status entity undecodable after the quiet window: " + derr.Error())
+		}
+		if dAfter.Status != types.PeerStatusConnected {
+			return SkipCheck(fmt.Sprintf("status left connected during the window (now %q reason %q) — the connection did not stay healthy, so this window cannot speak to cadence writes; re-run with a live counterpart", dAfter.Status, dAfter.Reason))
+		}
+		if before.Type == after.Type && bytes.Equal(before.Data, after.Data) {
+			return PassCheck(fmt.Sprintf("status entity content unchanged across a %s quiet window of healthy keepalive ticks — transition-written, no per-tick cadence writes (§5.4.1)", quiet))
+		}
+		// The entity changed while nothing transitioned: a cadence write. The
+		// most common form is a re-stamped last_seen on an otherwise identical
+		// connected status.
+		return FailCheck(fmt.Sprintf("status entity CHANGED across a quiet window with no transition (status stayed %q) — a successful keepalive tick wrote to system/peer/status, which §5.4.1 forbids (transition-written; per-tick freshness is impl-internal). last_seen now=%d: a re-stamped last_seen on a healthy connection is the classic write-amplification this MUST closes", dAfter.Status, dAfter.LastSeen))
 	})
 
 	r.Run("liveness_suspect_on_transport_error", func() CheckOutcome {

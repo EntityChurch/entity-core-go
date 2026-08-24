@@ -35,8 +35,14 @@ type Handler struct {
 // HandlerOption configures a continuation Handler.
 type HandlerOption func(*Handler)
 
-// WithMarkerRetention sets the §3.10 chain-error marker retention window in
-// milliseconds — the named knob behind MarkerRetentionKey.
+// WithMarkerRetention sets the DEPLOY-TIME DEFAULT chain-error marker retention
+// window in milliseconds (§3.10 / v1.23 §3.4 A.1).
+//
+// This is overridden at runtime by the operator's tree config —
+// system/config/chain-errors → retention_ms (MarkerRetentionConfigPath /
+// MarkerRetentionField), the v1.23 canonical knob — whenever that entity is
+// present, including an explicit 0 to turn collection off. This option is the
+// fallback when the operator has set nothing there.
 //
 // Pass RetainMarkersForever to keep every marker: the tree IS the event log,
 // and an operator who wants the whole history is entitled to it. The default

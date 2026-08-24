@@ -14,36 +14,72 @@ import (
 
 const catEncoding = "encoding"
 
-// hashWireCandidate reports whether raw[i:] begins a CBOR byte string sized
-// like a content hash under *some* allocated content_hash_format, returning
-// its format byte and its declared length.
-//
-// Candidacy is decided by the declared length alone — deliberately, so that a
-// byte string sized like a hash but carrying an unallocated format byte is
-// still surfaced (and then failed by the caller) rather than skipped as "not a
-// hash." Scanning instead for a literal 0x5821 prefix, as this did until
-// 2026-08-10, cannot see a SHA-384 hash at all (49 bytes → 0x5831): the check
-// WARNed, `hash_algorithm_byte` SKIPped behind it, and an entire format went
-// unmeasured while the scoreboard read covered.
-func hashWireCandidate(raw []byte, i int) (alg byte, declared int, ok bool) {
-	if i+2 >= len(raw) || raw[i] != 0x58 {
-		return 0, 0, false
-	}
-	declared = int(raw[i+1])
-	if i+2+declared > len(raw) {
-		return 0, 0, false
-	}
-	sized := false
+// isHashWireSize reports whether n is the on-wire byte length of a content hash
+// under some allocated content_hash_format (33 for SHA-256, 49 for SHA-384).
+func isHashWireSize(n int) bool {
 	for _, a := range hash.Algorithms() {
-		if hash.HashWireSize(a) == declared {
-			sized = true
-			break
+		if hash.HashWireSize(a) == n {
+			return true
 		}
 	}
-	if !sized {
-		return 0, 0, false
+	return false
+}
+
+// collectHashSizedByteStrings decodes a raw CBOR handshake frame STRUCTURALLY
+// and returns every byte-string ITEM whose length is a content-hash wire size
+// (algorithm || digest). Each returned slice is the whole byte string, so the
+// caller reads its leading format byte at [0].
+//
+// WHY STRUCTURAL, NOT A BYTE SCAN (fixes the recurring `hash_wire_format` flake).
+// This used to walk raw[i:] at every offset looking for the pair 0x58,0x21 /
+// 0x58,0x31 (a 1-byte-length CBOR byte string sized 33/49). That pair occurs by
+// chance inside the *content* of any sufficiently long byte string — a 32-byte
+// digest, a 64-byte signature, a nonce — and when it did, the following random
+// byte was read as a bogus "format byte", `hash.HashWireSize` returned 0 ≠ the
+// declared length, and the check FAILed. Data-dependent (the digests change per
+// run), so it flaked ~1-in-6, same commit, same box — sighted against python
+// 2026-08-08 and rust 2026-08-14, both non-reproducing and both closed as
+// "flake" because the *mechanism* was never named. Decoding the CBOR and
+// inspecting only real byte-string items cannot collide with byte-string
+// content, because content is never visited as structure.
+//
+// The §8.4.5 intent survives: a genuine hash-sized byte-string item carrying an
+// unallocated format byte is still an item, still collected, and still failed by
+// the caller — only the phantom matches inside other items' payloads are gone.
+// An undecodable frame returns nil (the caller then WARNs "could not locate"),
+// which is itself a signal, not a silent pass.
+func collectHashSizedByteStrings(raw []byte) [][]byte {
+	var v interface{}
+	if err := cbor.Unmarshal(raw, &v); err != nil {
+		return nil
 	}
-	return raw[i+2], declared, true
+	var out [][]byte
+	var walk func(x interface{})
+	walk = func(x interface{}) {
+		switch t := x.(type) {
+		case []byte:
+			if isHashWireSize(len(t)) {
+				out = append(out, t)
+			}
+		case []interface{}:
+			for _, e := range t {
+				walk(e)
+			}
+		case map[interface{}]interface{}:
+			for k, val := range t {
+				walk(k)
+				walk(val)
+			}
+		case map[string]interface{}:
+			for _, val := range t {
+				walk(val)
+			}
+		case cbor.Tag:
+			walk(t.Content)
+		}
+	}
+	walk(v)
+	return out
 }
 
 // appendFormatOnce records an observed content_hash_format for reporting.
@@ -96,11 +132,8 @@ func runEncoding(client *PeerClient) []CheckResult {
 		valid := true
 		var seen []string
 		for _, raw := range allRawFrames {
-			for i := 0; i < len(raw)-2; i++ {
-				alg, declared, ok := hashWireCandidate(raw, i)
-				if !ok {
-					continue
-				}
+			for _, bs := range collectHashSizedByteStrings(raw) {
+				alg, declared := bs[0], len(bs)
 				if hash.HashWireSize(alg) == declared {
 					found = true
 					seen = appendFormatOnce(seen, alg)
@@ -139,11 +172,8 @@ func runEncoding(client *PeerClient) []CheckResult {
 		allGood := true
 		var seen []string
 		for _, raw := range allRawFrames {
-			for i := 0; i < len(raw)-2; i++ {
-				alg, declared, ok := hashWireCandidate(raw, i)
-				if !ok {
-					continue
-				}
+			for _, bs := range collectHashSizedByteStrings(raw) {
+				alg, declared := bs[0], len(bs)
 				if hash.HashWireSize(alg) != declared {
 					allGood = false
 					continue
