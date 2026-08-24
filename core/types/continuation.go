@@ -149,8 +149,8 @@ type ChainErrorLostData struct {
 	// Without these the marker records that a round failed and loses which
 	// slots — which is the entire diagnostic content of the observation.
 	//
-	// Go's proposed spelling, routed for cohort pinning with the round clock
-	// (docs/validation/spec-issues/2026-07-22-join-completion-round-clock.md).
+	// Go's proposed spelling, routed to arch 2026-07-22 for cohort pinning
+	// alongside the join-completion round clock.
 	// Both are omitempty, so no non-join marker's bytes change.
 	JoinPath  string   `cbor:"join_path,omitempty"`
 	JoinSlots []string `cbor:"join_slots,omitempty"`
@@ -402,9 +402,9 @@ type ContinuationJoinData struct {
 	// handler memory is the choice that follows this codebase's grain (the
 	// tree IS the event log; nothing here owns a timer goroutine) and makes a
 	// wedged round diagnosable by reading the tree. It is a wire-visible field
-	// on a spec'd type, so it is a cross-impl surface and is routed to arch for
-	// pinning rather than assumed — see
-	// docs/validation/spec-issues/2026-07-22-join-completion-round-clock.md.
+	// on a spec'd type, so it is a cross-impl surface and was routed to arch
+	// 2026-07-22 (the join-completion round clock) for pinning rather than
+	// assumed.
 	RoundStartedMs *uint64 `cbor:"round_started_ms,omitempty"`
 
 	// ReceivedStatus records the advance status of any slot that arrived

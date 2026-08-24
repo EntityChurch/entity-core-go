@@ -230,8 +230,8 @@ func runNetwork(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs int
 	// continuation is re-installed by the very maintain-peer it dispatches, and
 	// the advance then consumes the remaining_executions it read before that
 	// re-install existed. The path ends up empty and the next advance reports
-	// {advanced:false} with status 200 — no error, no marker, no log. See
-	// docs/validation/spec-issues/2026-07-16-backoff-one-shot-clobber.md.
+	// {advanced:false} with status 200 — no error, no marker, no log. Routed
+	// to arch 2026-07-16 as the §4.1 one-shot backoff clobber.
 	//
 	// Any impl following §4.1's one-shot literally is a candidate, so this asks
 	// the question of the wire rather than of the pseudocode.
@@ -304,7 +304,7 @@ func runNetwork(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs int
 			}
 		}
 		if n := dc.count(); n < wantDials {
-			return FailCheck(fmt.Sprintf("only %d reconnect dial(s) in %v against a peer that stayed dead, want >=%d at min_ms=500/max_ms=1000 — the retry loop stopped instead of retrying forever, so this peer would never recover a neighbour that came back later. A loop that dies after ~2 attempts is the §4.1 one-shot backoff clobber (docs/validation/spec-issues/2026-07-16-backoff-one-shot-clobber.md); the reconnect anchor cannot see it because re-establishing needs only one retry",
+			return FailCheck(fmt.Sprintf("only %d reconnect dial(s) in %v against a peer that stayed dead, want >=%d at min_ms=500/max_ms=1000 — the retry loop stopped instead of retrying forever, so this peer would never recover a neighbour that came back later. A loop that dies after ~2 attempts is the §4.1 one-shot backoff clobber — the continuation is re-installed by the very maintain-peer it dispatches, and the advance then consumes the remaining_executions it read before that re-install existed; the reconnect anchor cannot see it because re-establishing needs only one retry",
 				n, time.Since(deadline.Add(-25*time.Second)).Round(time.Millisecond), wantDials))
 		}
 		return PassCheck(fmt.Sprintf("retry loop survived the outage: %d reconnect dials against a peer that stayed dead (>=%d at min_ms=500/max_ms=1000) — retry-forever holds", dc.count(), wantDials))

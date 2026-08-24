@@ -198,9 +198,8 @@ respect, because every impl can check it from the artifact with no instrumentati
   strictly IS the materialized-boundary comparison — not a deviation from §7c.3 but its resolution;
   and the **observable budget charges `evaluate()` steps only** (§4.2), making `budget_exhausted` a
   deterministic, gated outcome with budget-edge vectors kept in. The corpus already compared `code`
-  strictly, so no gate change was needed; Go absorbed the materialization side (see
-  `docs/validation/reports/2026-07-23-arch-rulings-absorbed.md`). The two spec-issue docs are marked
-  RESOLVED with pointers to the ruling.
+  strictly, so no gate change was needed; Go absorbed the materialization side on 2026-07-23. The
+  two spec-issue docs are marked RESOLVED with pointers to the ruling.
 
 ## Where the artifact lands
 

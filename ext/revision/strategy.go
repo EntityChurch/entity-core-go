@@ -362,9 +362,8 @@ func applyMergeStrategy(ctx context.Context, hctx *handler.HandlerContext, cs st
 		// {path, base, local, remote}; the normative merge-request type block
 		// declares {base, local, remote} with NO `path`; §5.1's dispatch
 		// passes {base, local, remote}. We build the type block: normative
-		// site, and §5.1 independently agrees. Filed as A-6 E1 under
-		// docs/validation/spec-issues/. If arch rules for `path`, the struct
-		// and the vector move together.
+		// site, and §5.1 independently agrees. Routed to arch as A-6 E1. If
+		// arch rules for `path`, the struct and the vector move together.
 		return dispatchMergeHandler(ctx, hctx, choice.handlerPath, base, local, remote)
 
 	default:

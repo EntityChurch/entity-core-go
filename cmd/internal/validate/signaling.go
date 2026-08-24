@@ -117,7 +117,7 @@ func runSignaling(ctx context.Context, clientA *PeerClient, addr string) []Check
 			return FailCheck("advertise EXECUTE: " + err.Error())
 		}
 		if status == 403 {
-			return SkipCheck("node returned 403 (capability_denied) on advertise — the caller's connection grant does not cover system/signaling. A public introducer must seed it on connect; the standalone entity-signaling-node binary installs no seed policy (main.rs omits .with_seed_policy — only the Rust live tests' wildcard_seed grants it). Start the node with a seed policy covering system/signaling:{offer,collect,advertise} and re-run. See docs/validation/reports/2026-07-30-signaling-go-client-vs-rust-node.md.")
+			return SkipCheck("node returned 403 (capability_denied) on advertise — the caller's connection grant does not cover system/signaling. A public introducer must seed it on connect; the standalone entity-signaling-node binary installs no seed policy (main.rs omits .with_seed_policy — only the Rust live tests' wildcard_seed grants it). Start the node with a seed policy covering system/signaling:{offer,collect,advertise} and re-run.")
 		}
 		// §2.1 / §11.3: "The server role is OPTIONAL for a conformant
 		// implementation. The client role is the conformance surface." SIGNALING
@@ -178,7 +178,7 @@ func runSignaling(ctx context.Context, clientA *PeerClient, addr string) []Check
 		}
 		if advLimits.TTLSeconds == 0 || advLimits.MaxBlobBytes == 0 || advLimits.MaxBucketBlobs == 0 {
 			return WarnCheck(fmt.Sprintf(
-				"advertise-result limits decoded all/partly zero (ttl_seconds=%d max_blob_bytes=%d max_bucket_blobs=%d) — the node likely still emits the pre-§4.5 shape (bucket_ttl_ms/max_message_bytes/max_messages_per_key), which decodes to zero under the committed field names. Re-diff the node's advertise emission to §4.5. See docs/validation/reports/2026-07-31-signaling-redigest-and-punch-stage2-to-arch.md (F2).",
+				"advertise-result limits decoded all/partly zero (ttl_seconds=%d max_blob_bytes=%d max_bucket_blobs=%d) — the node likely still emits the pre-§4.5 shape (bucket_ttl_ms/max_message_bytes/max_messages_per_key), which decodes to zero under the committed field names. Re-diff the node's advertise emission to §4.5.",
 				advLimits.TTLSeconds, advLimits.MaxBlobBytes, advLimits.MaxBucketBlobs))
 		}
 		return PassCheck(fmt.Sprintf("advertise-result limits match §4.5 shape (ttl_seconds=%d max_blob_bytes=%d max_bucket_blobs=%d)",

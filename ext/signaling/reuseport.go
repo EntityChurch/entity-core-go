@@ -20,7 +20,32 @@ import (
 // reuseport_unsupported.go a stub elsewhere). For an implementer in another
 // language, the interoperable requirement is only the shared-local-port binding;
 // the exact sockopt spelling is platform-local and MAY diverge (§7.2 / §7.3).
-// See docs/architecture/guides/PUNCH-SOCKET-REQUIREMENTS.md.
+//
+// WHY THIS IS A SOCKET OPTION AND NOT DISCIPLINE. On UDP/QUIC "dial from the
+// endpoint the reflector observed" is one socket reused, and costs nothing. On
+// TCP it cannot be bought with careful sequencing at all, for two independent
+// reasons: the reflector connection must CLOSE before the punch can dial, and
+// re-binding that same local port is refused without SO_REUSEADDR; and the
+// §7.1 step-4 crossing wants that one port to DIAL and LISTEN concurrently
+// (see listenReusePort below), which is refused without SO_REUSEPORT. So the
+// requirement is SO_REUSEADDR + SO_REUSEPORT plus an explicit LocalAddr bind
+// on BOTH the reflector dial and the punch dial — no ordering, retry, or
+// hold-open trick substitutes for the options.
+//
+// AND THE FAILURE WEARS ANOTHER FAILURE'S COSTUME. A srflx gathered on one
+// ephemeral socket and punched from another is a hole that will never open,
+// but the symptom is only "the punch didn't land" — indistinguishable from a
+// mistimed open, whose fire_at delay is a sanctioned local tunable and so is
+// the tempting thing to adjust. On a first cross-implementation punch failure,
+// bisect the socket binding before touching the timing.
+//
+// Resolve SO_REUSEPORT from the platform's own headers, never as a literal:
+// the constant is 0x0F on Linux and 0x0200 on macOS/*BSD, and Windows has no
+// SO_REUSEPORT at all (its SO_REUSEADDR is the nearest analogue). The value is
+// not on the wire, so two peers need not agree on it. A platform without the
+// option is conformant-DEGRADED, not broken: it simply cannot offer the
+// direct-path optimization, and ErrReusePortUnsupported below routes it to the
+// §10 relay fallback.
 
 // ErrReusePortUnsupported is returned by the punch transport on a platform where
 // SO_REUSEPORT is not wired. The §7.3 same-socket TCP punch cannot be honored

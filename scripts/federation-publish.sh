@@ -8,7 +8,7 @@
 # consumer then walks MANIFEST_GET → verify → TREE_GET → CONTENT_GET against it
 # across a real TCP hop — one implementation publishing, a DIFFERENT one
 # consuming, which is the half a single-impl rig (however many hosts) can't
-# exercise. See docs/handoffs/2026-08-20-C7-cross-impl-federation-leg.md.
+# exercise.
 #
 #   bash scripts/federation-publish.sh up      # build + start; STDOUT = evalable contract
 #   bash scripts/federation-publish.sh probe   # verify the origin from a container on the bridge

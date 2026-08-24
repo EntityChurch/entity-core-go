@@ -38,8 +38,8 @@ import (
 // type, and system/signature (core/types/crypto.go) does not fit: it carries
 // Signer as a HASH, which is not self-contained for a stranger, which is the
 // whole point of the §6.3 exception. Inventing a container here would be
-// inventing a cross-peer wire format in an implementation repo. Routed instead:
-// docs/validation/spec-issues/2026-08-03-signaling-6.3-envelope-unpinned.md.
+// inventing a cross-peer wire format in an implementation repo. Routed to arch
+// instead, 2026-08-03: the §6.3 coordination envelope is unpinned.
 
 // SessionIDMinLen is the §6.5 MUST floor for session_id: freshly random and at
 // least 16 bytes. The consequence of a weak or colliding value is not a failed

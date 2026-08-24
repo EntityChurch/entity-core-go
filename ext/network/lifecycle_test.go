@@ -10,8 +10,8 @@ package network
 // on_error routing to the managed-namespace backoff seam, so a failed
 // reconnect ROUTES instead of binding a marker per attempt. The proposal's §4
 // needs a different natural subject — a chain that fails with no on_error by
-// design, rather than one whose missing on_error was the defect. See
-// docs/validation/spec-issues/2026-07-16-backoff-one-shot-clobber.md.
+// design, rather than one whose missing on_error was the defect. Routed to
+// arch 2026-07-16 with the §4.1 one-shot backoff clobber.
 
 import (
 	"context"

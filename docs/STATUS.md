@@ -7,6 +7,12 @@ rather than appended to, and the only status document that publishes. The dated
 snapshots beside it in `docs/status/` (`HANDOFF-`, `CHECKPOINT-`, `ROUTING-`,
 `TRACKER-`, `PEER-PACKET-`) are internal working memory and publish nothing;
 they are immutable once written, and nothing here should be inferred from them.
+The same holds for `docs/reviews/`, `docs/validation/reports/` and
+`docs/validation/spec-issues/`. **So the citations below that name a file under
+one of those directories will not resolve in the published source mirror** — the
+release filter drops non-canonical prose, deliberately. Each is cited for
+provenance, and every claim it supports is stated here in full; nothing in this
+file depends on opening one.
 
 ## Where it is
 

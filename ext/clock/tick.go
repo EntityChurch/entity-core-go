@@ -22,8 +22,8 @@ package clock
 // the tick lands on one overwritten path, so every watcher wakes on every tick
 // and filters for itself. That is the spec as it stands; the gap and a proposed
 // shape (addressable ticks, so a subscription on a path that names a future
-// fires exactly once) are routed in
-// docs/validation/spec-issues/2026-07-22-clock-has-no-scheduler.md.
+// fires exactly once) were routed to arch 2026-07-22 as "clock has no
+// scheduler".
 
 import (
 	"context"

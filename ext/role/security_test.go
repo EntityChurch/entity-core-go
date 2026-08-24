@@ -20,7 +20,7 @@ import (
 )
 
 // Security-edge tests for the role extension. Each test maps to a SEC-N
-// item in docs/validation/PLAN-LIFECYCLE-INTEGRATION-VALIDATION.md.
+// item in the lifecycle-integration validation plan (internal).
 // The tests are in-process Go assertions covering invariants that the
 // cross-impl wire harness can't reach (forged caps, race-adjacent
 // post-state checks). Each impl mirrors the canonical case set in its

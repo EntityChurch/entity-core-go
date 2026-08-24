@@ -43,8 +43,8 @@ type session struct {
 	// transport error on an established connection does). Without a local
 	// stamp its pacing would restart from min_ms on every attempt. Whether
 	// a failed dial against a MAINTAINED peer should itself write a §3.13
-	// demotion is a real cross-impl question — see
-	// docs/validation/spec-issues/2026-07-16-failing-since-never-connected.md.
+	// demotion is a real cross-impl question, routed to arch 2026-07-16
+	// ("failing_since when never connected").
 	// Until it is ruled, this keeps the never-connected curve growing without
 	// inventing a write site.
 	failingSince uint64

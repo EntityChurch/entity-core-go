@@ -606,8 +606,8 @@ func compareHLC(a, b types.ClockHLCData) string {
 // seconds instead of causal events is no longer a logical clock, and every
 // causal comparison built on it silently degrades.
 //
-// Routed to arch to be added to §4.3's enumeration
-// (docs/validation/spec-issues/2026-07-22-clock-has-no-scheduler.md).
+// Routed to arch 2026-07-22 to be added to §4.3's enumeration, with the
+// observation that CLOCK specifies no scheduler.
 func isClockEnginePath(barePath string) bool {
 	return barePath == "system/clock/logical" ||
 		barePath == "system/clock/vector" ||

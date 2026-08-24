@@ -84,8 +84,8 @@ const (
 //
 // NOT cohort-pinned. Ruling 1 requires every impl to seed the SAME default, and
 // §8 anchor 1 requires the same hop count on every impl pair, but the proposal
-// names no magnitude. 512 is Go's choice pending that pin; see
-// docs/validation/spec-issues/2026-07-19-chain-ttl-seed-magnitude-unpinned.md.
+// names no magnitude. 512 is Go's choice pending that pin, routed to arch
+// 2026-07-19 as the unpinned chain-TTL seed magnitude.
 // Operators override per-peer via continuation.WithChainTTLSeed.
 const DefaultChainTTL uint64 = 512
 

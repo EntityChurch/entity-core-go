@@ -57,7 +57,8 @@ const (
 	// trip is at SEEDS.md §5 step 4, and step 4 is architecture's.
 	//
 	//   step 2 (Go)          DONE — six derived expectations, one root cause,
-	//                        in docs/validation/spec-issues/2026-08-11-d-v767-m3-m6-restamp-proposal.md
+	//                        routed to arch 2026-08-11 as the v767 M3/M6
+	//                        re-stamp proposal
 	//   step 3 (rust + py)   DONE, 3-of-3 byte-equal — py re-derived all six
 	//                        independently at entity-core-py da5e820 (`test(v767):
 	//                        re-derive M3/M6 under §4.5a item 1a — byte-equal to

@@ -249,9 +249,9 @@ func (h *Handler) installReconnectContinuations(hctx *handler.HandlerContext, se
 // on_error fires the retry immediately and the count is the only brake.
 // Residency is bounded by the session: release-peer deletes the graph.
 //
-// The underlying defect is in the §4.1 graph, not in Go, so it is routed
-// rather than patched over here:
-// docs/validation/spec-issues/2026-07-16-backoff-one-shot-clobber.md
+// The underlying defect is in the §4.1 graph, not in Go, so it was routed to
+// arch 2026-07-16 (the one-shot backoff clobber) rather than patched over
+// here.
 func (h *Handler) installBackoffContinuation(hctx *handler.HandlerContext, sess *session) error {
 	sess.mu.Lock()
 	params := sess.params

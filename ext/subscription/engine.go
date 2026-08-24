@@ -235,8 +235,9 @@ func (e *Engine) debugf(format string, args ...any) {
 // Must be called after SetLocationIndex and before StartDelivery. Safe to
 // call multiple times — Register is idempotent on (SubscriptionID).
 //
-// See docs/architecture/proposals/active/DESIGN-SQLITE-PERSISTENCE.md §4.3
-// and the extension-persistence-classification feedback.
+// Rationale: subscriptions are classified as PERSISTENT extension state, so
+// the durable copy in the tree is authoritative and the runtime index is a
+// derived cache that must be rebuilt on boot.
 func (e *Engine) Load() {
 	e.mu.RLock()
 	li := e.locationIndex
