@@ -41,23 +41,25 @@ import (
 	"go.entitychurch.org/entity-core-go/ext/continuation"
 	"go.entitychurch.org/entity-core-go/ext/discovery"
 	discoverymdns "go.entitychurch.org/entity-core-go/ext/discovery/mdns"
-	"go.entitychurch.org/entity-core-go/ext/relay"
-	relaypeer "go.entitychurch.org/entity-core-go/ext/relay/peerwiring"
 	"go.entitychurch.org/entity-core-go/ext/handlers"
 	"go.entitychurch.org/entity-core-go/ext/history"
+	"go.entitychurch.org/entity-core-go/ext/httplive"
 	"go.entitychurch.org/entity-core-go/ext/identity"
 	"go.entitychurch.org/entity-core-go/ext/inbox"
 	"go.entitychurch.org/entity-core-go/ext/localfiles"
 	extnetwork "go.entitychurch.org/entity-core-go/ext/network"
 	"go.entitychurch.org/entity-core-go/ext/publishedroot"
 	"go.entitychurch.org/entity-core-go/ext/query"
+	"go.entitychurch.org/entity-core-go/ext/quorum"
 	"go.entitychurch.org/entity-core-go/ext/registry"
 	"go.entitychurch.org/entity-core-go/ext/registry/localname"
 	"go.entitychurch.org/entity-core-go/ext/registry/peerissued"
-	"go.entitychurch.org/entity-core-go/ext/quorum"
+	"go.entitychurch.org/entity-core-go/ext/relay"
+	relaypeer "go.entitychurch.org/entity-core-go/ext/relay/peerwiring"
 	"go.entitychurch.org/entity-core-go/ext/revision"
-	"go.entitychurch.org/entity-core-go/ext/httplive"
 	"go.entitychurch.org/entity-core-go/ext/role"
+	"go.entitychurch.org/entity-core-go/ext/signaling"
+	signalingnode "go.entitychurch.org/entity-core-go/ext/signaling/node"
 	storagesubstitutehttp "go.entitychurch.org/entity-core-go/ext/storagesubstitutehttp"
 	storagesubstitutesources "go.entitychurch.org/entity-core-go/ext/storagesubstitutesources"
 	"go.entitychurch.org/entity-core-go/ext/subscription"
@@ -97,6 +99,7 @@ func main() {
 	keyType := flag.String("key-type", "ed25519", "ephemeral keypair algorithm: ed25519 (default) | ed448. Ignored when --name selects a persistent identity (algorithm comes from the on-disk PEM header).")
 	hashType := flag.String("hash-type", "sha256", "content_hash_format used for entities this peer authors: sha256 (default, 0x00) | sha384 (0x01). Received entities verify under their claimed algorithm regardless (v7.67 §2.3 format-code interpretation).")
 	validate := flag.Bool("validate", false, "enable GUIDE-CONFORMANCE §7a test handlers (system/validate/echo + system/validate/dispatch-outbound) for validate-peer probing. OFF by default — these handlers expose §6.13(a)/§6.13(b) for black-box wire attestation and MUST NOT be on in production (dispatch-outbound originates outbound).")
+	signalingNode := flag.Bool("signaling-node", false, "EXTENSION-SIGNALING §4/§5: serve the system/signaling rendezvous node (offer/collect/advertise) — the opaque per-key blob store for NAT-introduction and the §7 punch. OFF by default; the caller's grant must cover system/signaling:{offer,collect,advertise} (use --open-access or a seed policy). Endpoint advertised is --addr.")
 	publishRoot := flag.Bool("publish-root", false, "PROPOSAL-PEER-MANIFEST-STATIC-HANDSHAKE §4 (LOCKED): on every tree-root change, mint a signed system/peer/published-root pointer at system/peer/published-root/{peer_id_hex}, bind its signature at the invariant-pointer, and serve it as MANIFEST_GET's body via the http-poll listener. Requires a serving-mode posture (--http-poll-addr or --http-poll-mount-on-live) to be reachable on the wire; produces the entity unconditionally so other consumers can read it from the local tree.")
 	discoveryAnnounce := flag.String("discovery-announce", "", "EXTENSION-DISCOVERY §3: announce self on the mDNS backend (`_entity-core._udp.local.`). Value is the transport profile_ref to advertise (the {profile-id} under system/peer/transport/{peer}/...). Empty disables. Requires --addr (TCP profile) or --http-addr (HTTP-live profile) to provide a reachable port.")
 	inboxRelayRegistry := flag.String("inbox-relay-registry", "", "EXTENSION-RELAY §3.5 REGISTRY-served inbox-relay decl chain: comma-separated peer-ids to consult (in order) before the local-tree fallback. Each registry peer must have a published transport profile in this peer's tree so the remote tree:get can dial. Empty disables (local-tree only).")
@@ -495,6 +498,16 @@ func main() {
 		)
 		log.Printf("Conformance handlers enabled (--validate): %s + %s (§7a opt-in)",
 			conformance.PatternEcho, conformance.PatternDispatchOutbound)
+	}
+	// EXTENSION-SIGNALING §4/§5 rendezvous node — runtime opt-in. OFF by default
+	// (a peer is a signaling CLIENT by default; only a deployed introducer serves
+	// the node). Endpoint advertised is the peer's listen addr. Authority is the
+	// caller's grant over system/signaling — seed it (--open-access / seed policy)
+	// or offer/collect/advertise return capability_denied.
+	if *signalingNode {
+		opts = append(opts, peer.WithHandler(signaling.HandlerPattern,
+			signalingnode.New(signalingnode.WithEndpoint(*addr))))
+		log.Printf("Signaling rendezvous node enabled (--signaling-node): %s (EXTENSION-SIGNALING §4/§5)", signaling.HandlerPattern)
 	}
 	if sqliteStore != nil {
 		opts = append(opts, peer.WithCloseFunc(func() {

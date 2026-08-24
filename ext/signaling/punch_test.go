@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -154,6 +155,96 @@ func TestPunchLoopbackDirectPath(t *testing.T) {
 	}
 	if got := bRes.conn.LocalAddr().(*net.TCPAddr).Port; got != bAddr.Port {
 		t.Errorf("responder bound local port %d, want advertised srflx port %d", got, bAddr.Port)
+	}
+}
+
+// recordingDial wraps dialReusePort with a flag that records whether this party
+// ever fired an outbound dial. It performs the REAL dial so the punch still
+// completes — the recorder is a tap, not a stub.
+func recordingDial(dialed *atomic.Bool) DialFunc {
+	return func(ctx context.Context, local *net.TCPAddr, remote string) (net.Conn, error) {
+		dialed.Store(true)
+		return dialReusePort(ctx, local, remote)
+	}
+}
+
+// TestPunchBothSidesDial is G1's load-bearing assertion and its own negative
+// control: under the §7.1-step-4 dual-hole fix, BOTH parties MUST fire an
+// outbound dial (each side's connect opens ITS OWN NAT mapping). Loopback cannot
+// observe a missing hole — a listen-only side passes an ordinary punch test
+// unchanged (exactly how the retracted lower-dials/higher-listens shape slipped
+// past both impls) — so the guarantee is asserted at the DialFunc seam instead.
+// peer-A < peer-B, so pre-fix peer-B (the higher id) would listen-only and never
+// dial; this test fails on that regression.
+func TestPunchBothSidesDial(t *testing.T) {
+	carrier := newMemCarrier()
+	key := make([]byte, 33)
+
+	aAddr := freeLoopbackPort(t)
+	bAddr := freeLoopbackPort(t)
+
+	var aDialed, bDialed atomic.Bool
+	mkParty := func(self string, local *net.TCPAddr, dialed *atomic.Bool) *PunchParty {
+		return &PunchParty{
+			Carrier: carrier,
+			Key:     key,
+			SelfID:  self,
+			LocalCands: []types.NetworkCandidateData{
+				{Type: types.CandidateTypeSrflx, Substrate: types.CandidateSubstrateTCP, Address: local.String()},
+			},
+			LocalAddr:       local,
+			Dial:            recordingDial(dialed),
+			Poll:            20 * time.Millisecond,
+			CrossingRetries: 40,
+			DialTimeout:     300 * time.Millisecond,
+		}
+	}
+	aParty := mkParty("peer-A", aAddr, &aDialed)
+	bParty := mkParty("peer-B", bAddr, &bDialed)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	aCh := make(chan result, 1)
+	bCh := make(chan result, 1)
+	go func() {
+		c, err := aParty.Initiate(ctx, "peer-B")
+		aCh <- result{conn: c, err: err}
+	}()
+	go func() {
+		c, _, err := bParty.Respond(ctx)
+		bCh <- result{conn: c, err: err}
+	}()
+
+	aRes := <-aCh
+	bRes := <-bCh
+	if aRes.conn != nil {
+		defer aRes.conn.Close()
+	}
+	if bRes.conn != nil {
+		defer bRes.conn.Close()
+	}
+	if aRes.err != nil {
+		if errors.Is(aRes.err, ErrReusePortUnsupported) {
+			t.Skip("SO_REUSEPORT not supported on this platform")
+		}
+		t.Fatalf("initiator: %v", aRes.err)
+	}
+	if bRes.err != nil {
+		t.Fatalf("responder: %v", bRes.err)
+	}
+
+	// The whole point: neither side is listen-only. A false here is the dual-hole
+	// regression — the peer's mapping never opens under real NAT.
+	if !aDialed.Load() {
+		t.Error("initiator (peer-A, lower id) never dialed — regressed to listen-only, its NAT hole never opens")
+	}
+	if !bDialed.Load() {
+		t.Error("responder (peer-B, higher id) never dialed — regressed to listen-only, its NAT hole never opens")
 	}
 }
 

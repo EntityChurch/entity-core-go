@@ -42,6 +42,7 @@ func cmdStart(args []string) {
 	hashType := fs.String("hash-type", "sha256", "content_hash_format / home format the peer authors content + substrate under: sha256 (default, 0x00) | sha384 (0x01). V7 v7.70 §1.2. Honored by Go (--hash-type), Rust (--hash-type, post-v7.70 0616727), Python (--hash-type).")
 	inboxRelayRegistry := fs.String("inbox-relay-registry", "", "EXTENSION-RELAY §3.5 REGISTRY-served inbox-relay decl chain (Go-only initially): comma-separated peer-names of registries to consult (in order). The names are translated to peer-ids from state. Forwarded as --inbox-relay-registry to entity-peer.")
 	validate := fs.Bool("validate", false, "GUIDE-CONFORMANCE §7a: enable system/validate/echo + system/validate/dispatch-outbound test handlers (unblocks concurrency.t1_2_concurrent_reentry). MUST NOT be on in production. Honored by all three impls.")
+	signalingNode := fs.Bool("signaling-node", false, "EXTENSION-SIGNALING §4/§5: serve the system/signaling rendezvous node (offer/collect/advertise) for the punch gate. Go-only; forwarded as -signaling-node to entity-peer. Pairs with the default --open-access so the caller's grant covers system/signaling.")
 	publishRoot := fs.Bool("publish-root", false, "PROPOSAL-PEER-MANIFEST §4: mint signed system/peer/published-root on every tree-root change + serve via http-poll. Pair with --http-poll-addr to expose the manifest on the wire. Honored by all three impls.")
 	serveClosureRoot := fs.Bool("serve-closure-root", false, "EXTENSION-NETWORK §6.5.6 Amendment 10: scope served set to the transitive trie-node closure reachable from system/peer/published-root. Pair with --publish-root so a consumer's signed-root hash-chain walk does not 404 on a CHAMP interior node. Mutually exclusive with --serve-namespace / --serve-scope-whole-store. Honored by Go + Python (Rust impl pending).")
 	publishDescriptors := fs.Bool("publish-descriptors", false, "DOMAIN-LOCAL-FILES v1.3 §10.5 V3: configure the --files root with publish_descriptors=true so file reads write `system/content/descriptor/{hash}` entities into the tree. Arms local_files.v3_descriptor_publish_exercised. Honored by Go; Rust + Python impl pending.")
@@ -84,6 +85,7 @@ func cmdStart(args []string) {
 		serveWholeStore:    *serveWholeStore,
 		serveClosureRoot:   *serveClosureRoot,
 		validate:           *validate,
+		signalingNode:      *signalingNode,
 		publishRoot:        *publishRoot,
 		publishDescriptors: *publishDescriptors,
 	}
@@ -171,6 +173,7 @@ type chunkEFlags struct {
 	// Beyond Chunk E, but plumbed alongside since the orchestrator path
 	// (validate-peers-green.sh) brings them up as a bundle.
 	validate           bool
+	signalingNode      bool
 	publishRoot        bool
 	publishDescriptors bool
 }
@@ -308,6 +311,9 @@ func startGoPeer(name, addr string, debug, openAccess bool, files, history, stor
 	}
 	if poll.validate {
 		cmdArgs = append(cmdArgs, "-validate")
+	}
+	if poll.signalingNode {
+		cmdArgs = append(cmdArgs, "-signaling-node")
 	}
 	if poll.publishRoot {
 		cmdArgs = append(cmdArgs, "-publish-root")
@@ -674,7 +680,7 @@ func startPythonPeer(name, addr string, debug, openAccess bool, history, files, 
 		name:       name,
 		image:      pyImage,
 		homeEntity: "/home/entity/.entity", // python runtime image runs as USER entity
-		userns:     true,                    // map host uid 1000 → container `entity` (1000) so the bind-mount is writable
+		userns:     true,                   // map host uid 1000 → container `entity` (1000) so the bind-mount is writable
 		filesArg:   files,
 		args:       cmdArgs,
 		addr:       addr,

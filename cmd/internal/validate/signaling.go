@@ -163,6 +163,10 @@ func runSignaling(ctx context.Context, clientA *PeerClient, addr string) []Check
 	meet("signaling_meet_lobby", "lobby", func() ([]byte, error) { return signaling.LobbyKey(lobbyConst) })
 	meet("signaling_meet_pair", "pair(A,B)", func() ([]byte, error) { return signaling.PairKey(idA, idB) })
 
+	// The §7 punch on top of the same live carrier — coordination + socket
+	// choreography end to end (everything but traversal, which needs real NAT).
+	runSignalingPunch(ctx, r, sigA, sigB)
+
 	return r.Results()
 }
 

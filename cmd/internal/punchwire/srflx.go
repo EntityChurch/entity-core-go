@@ -108,3 +108,42 @@ func observeAddress(ctx context.Context, conn *peer.Connection) (string, error) 
 	}
 	return obs.ObservedAddress, nil
 }
+
+// ObserveSRFLXFrom discovers this peer's srflx mapping by dialing reflectorAddr
+// from the EXACT local endpoint the punch will bind, and returns the address the
+// reflector observed (§6.7.1 observe-address).
+//
+// The pinned local socket is the whole point, and it is what separates this from
+// SRFLXGatherer: that gatherer lets the OS pick the port (nil bind) and then
+// hands the caller the port it got, which is correct when the caller punches from
+// whatever it is given. A cross-impl driver cannot work that way — the harness
+// pins --local-addr so it can put a KNOWN endpoint behind a NAT, so the gather
+// must happen on that same endpoint or the observed mapping names a socket the
+// punch never binds. Advertising that is the §6.7.3 violation, and it is
+// undetectable from the advertising side: the hole simply never opens.
+//
+// REUSEPORT is what makes the sequence legal — this connection closes and the
+// punch re-binds the same address immediately after.
+//
+// Errors are fatal to the caller by design; there is deliberately no fallback to
+// the bind address. Behind SNAT the bind address is private, so a silent degrade
+// would advertise an unreachable candidate — a lie the counterpart spends its
+// whole crossing budget on.
+func ObserveSRFLXFrom(ctx context.Context, p *peer.Peer, local *net.TCPAddr, reflectorAddr string) (string, error) {
+	raw, err := signaling.DialReusePort(ctx, local, reflectorAddr)
+	if err != nil {
+		return "", fmt.Errorf("dial reflector %s from %s: %w", reflectorAddr, local, err)
+	}
+	conn := p.ConnectVia(raw)
+	// The punch re-binds `local` right after this returns, so the reflector
+	// connection must not linger holding the port.
+	defer conn.Close()
+	if err := conn.PerformConnect(ctx); err != nil {
+		return "", fmt.Errorf("handshake to reflector %s: %w", reflectorAddr, err)
+	}
+	srflx, err := observeAddress(ctx, conn)
+	if err != nil {
+		return "", err
+	}
+	return srflx, nil
+}

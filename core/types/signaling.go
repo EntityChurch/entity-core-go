@@ -11,11 +11,11 @@ import (
 // the committed EXTENSION-SIGNALING.md (§4 handler/operations, §6 coordination
 // messages, §7 the punch).
 //
-// entity-core-go builds the CLIENT of this surface; the server/node role is
-// Rust's (see docs and the rust→cohort brief). These structs are the shared
-// codec: a future Go handler and the client both marshal through them, and the
-// validate harness builds them inline the same way it builds network/relay
-// types. Absent optional fields stay absent (pointer + omitempty), never null.
+// These structs are the shared codec for BOTH roles: the client (ext/signaling)
+// and the Go node (ext/signaling/node) marshal through them, as does the Rust
+// node, and the validate harness builds them inline the same way it builds
+// network/relay types. Absent optional fields stay absent (pointer + omitempty),
+// never null.
 //
 // SOURCE OF TRUTH NOTE: reconciled against the committed EXTENSION-SIGNALING.md
 // (2026-07-31 re-diff). The §6.1 coordination messages carry candidates of type
@@ -176,6 +176,14 @@ func toSignalingEntity(entityType string, d any) (entity.Entity, error) {
 // OfferRequestDataFromEntity decodes an offer-request entity's data.
 func OfferRequestDataFromEntity(e entity.Entity) (OfferRequestData, error) {
 	var d OfferRequestData
+	err := ecf.Decode(e.Data, &d)
+	return d, err
+}
+
+// CollectRequestDataFromEntity decodes a collect-request entity's data — the
+// node/server side of §4.1 (the client builds the request; the node reads it).
+func CollectRequestDataFromEntity(e entity.Entity) (CollectRequestData, error) {
+	var d CollectRequestData
 	err := ecf.Decode(e.Data, &d)
 	return d, err
 }

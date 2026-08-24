@@ -5,20 +5,37 @@
 *.so
 *.dylib
 
-# Built CLI binaries (from accidental `go build` without -o)
-/entity-peer
-/entity-sync
-/peer-manager
-/validate-peer
+# Built CLI binaries (from accidental `go build` without -o).
+# One entry per cmd/ dir — ADD A LINE WHEN YOU ADD A cmd/. This list drifted
+# behind cmd/ twice; a missed entry shows up as a multi-MB untracked binary at
+# the repo root (caught 2026-08-01 with /signaling-punch).
+/bench-localfiles
 /compare-types
 /dump-messages
-/bench-localfiles
-/entity-shell
-/probe-peer
-/probe-files
-/probe-grant
 /dump-types
 /entity-cli
+/entity-peer
+/entity-shell
+/entity-sync
+/fetch-published-fixture
+/peer-manager
+/peerissued-fixtures
+/probe-files
+/probe-grant
+/probe-hello
+/probe-ingest
+/probe-peer
+/probe-signaling
+/publish-fixture
+/registry-issue-binding
+/registry-request-binding
+/relay-fixtures
+/scan-probe
+/signaling-meet
+/signaling-punch
+/v767-corpus-verify
+/v767-phase2-pins
+/validate-peer
 /wire-conformance
 
 # Test binary

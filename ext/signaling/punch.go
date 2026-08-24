@@ -207,20 +207,38 @@ func (pp *PunchParty) Respond(ctx context.Context) (net.Conn, string, error) {
 }
 
 // fire sleeps until the scheduled instant, then opens the direct path to target
-// from the shared local socket (§7.1 step 4). Both peers dial — that is what
-// opens both NAT holes — AND both listen on the same REUSEPORT port, so a peer's
-// dial always lands rather than being refused between our own dial attempts
-// (pure both-only-dial simultaneous-open connects only in the fragile instant
-// both sockets are in SYN_SENT). Two connections can form (each side's dial
-// lands on the other's listener); a deterministic tiebreak keeps exactly ONE on
-// both sides: the connection the LOWER peer-id dialed survives. So the smaller
-// id keeps its DIALED conn and the larger keeps its ACCEPTED conn — the two ends
-// of the same TCP connection. peerID is the counterpart's id for that compare.
-// Context cancel aborts throughout (the §10.3 cancellable-seam delta).
+// from the shared local socket (§7.1 step 4). It de-conflates three layers the
+// pre-G1 code fused into one peer-id compare:
 //
-// The entity handshake role is independent of which end dialed: the caller
-// applies its fixed role (initiator → PerformConnect, responder → serve) over
-// whichever end it kept.
+//   - Hole-opening (§7.1 step 4, MUST): BOTH sides always dial outbound. A NAT
+//     opens a mapping only for a socket that has SENT a packet, so a listen-only
+//     side never opens its hole and the counterpart's SYN hits a wall. This is
+//     invisible on loopback (no NAT), which is exactly how the retracted
+//     lower-dials/higher-listens shape passed both impls — so the correctness of
+//     both-fire cannot be observed here, only asserted (the both-dialed test).
+//   - Crossing reliability: BOTH sides also listen on the same REUSEPORT port, so
+//     a dial lands on a listener rather than depending on the fragile instant both
+//     sockets are in SYN_SENT together. Simultaneous-open can therefore yield TWO
+//     sockets (each side's dial landing on the other's listener).
+//   - Socket-selection: KEEP WHICHEVER connection formed. Under §7.3's shared
+//     REUSEPORT socket the two directions share ONE 4-tuple, so exactly one
+//     connection exists — reached via this side's connect() (simultaneous-open, or
+//     a dial that landed on the peer's listener) OR via this side's accept() (the
+//     peer's dial landing on our listener). A given side cannot predict which, so
+//     it takes the one that formed, however it came. Both ends then hold the two
+//     halves of that single connection — it converges without a tie-break. The
+//     peer-id compare is retained ONLY for the distinct-4-tuple racing case (a
+//     side holding BOTH a dialed and an accepted socket — not reachable on the
+//     reuseport substrate, kept as defense): lower id keeps its dialed end, higher
+//     keeps its accepted end, and the loser is closed. Nil on both paths → punch
+//     failed, fall through to relay (§10.3).
+//
+// peerID is the counterpart's id for the tie-break. Context cancel aborts
+// throughout (the §10.3 cancellable-seam delta). The entity handshake role
+// (§7.4.1) is independent of all of this: the caller applies its fixed signaling
+// role (initiator → PerformConnect, responder → serve) over whichever end it
+// kept. "Responder serves" governs the HELLO on the already-open socket, not who
+// dialed on the wire — on the wire both dial.
 func (pp *PunchParty) fire(ctx context.Context, fireAt time.Time, target, peerID string) (net.Conn, error) {
 	if err := sleepUntil(ctx, fireAt); err != nil {
 		return nil, err
@@ -228,28 +246,67 @@ func (pp *PunchParty) fire(ctx context.Context, fireAt time.Time, target, peerID
 	fireCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Deterministic role split so both sides converge on ONE connection without
-	// depending on the fragile instant both SYNs cross in flight: the LOWER
-	// peer-id dials the counterpart's srflx from the shared REUSEPORT socket; the
-	// HIGHER listens on that same port and accepts. Either outcome binds each
-	// side's advertised srflx port (§7.3) and is bidirectional, so the entity
-	// handshake role (initiator→PerformConnect, responder→serve) applies over it
-	// unchanged — the TCP dialer/acceptor split is independent of who sends HELLO.
-	//
-	// This is the loopback-reliable establishment. §7.5 cross-NAT gate: under real
-	// NAT the LISTENING side must also emit an outbound packet toward the dialer's
-	// srflx to open its OWN mapping before the dial arrives — the dual-hole
-	// sequencing (and its TCP 4-tuple hazards) is hardened against real NAT there,
-	// not on loopback where there is no mapping to open. See
-	// docs/architecture/guides/PUNCH-SOCKET-REQUIREMENTS.md.
-	if pp.SelfID < peerID {
-		conn := pp.dialLoop(fireCtx, target)
-		if conn == nil {
-			return nil, fmt.Errorf("punch: dial to %s failed after %d crossing retries (%v)", target, pp.crossingRetries(), context.Cause(fireCtx))
+	// Both fire: dial (opens OUR hole, §7.1 step 4) AND listen (catches the peer's
+	// dial). Each goroutine sends EXACTLY ONE value (a conn or nil) to its buffered
+	// channel and exits, so both are always collectable without leaking a socket.
+	dialedCh := make(chan net.Conn, 1)
+	acceptedCh := make(chan net.Conn, 1)
+	go func() { dialedCh <- pp.dialLoop(fireCtx, target) }() // nil on exhaustion/cancel
+	go func() {
+		c, err := pp.listenAccept(fireCtx, target)
+		if err != nil {
+			c = nil
 		}
-		return conn, nil
+		acceptedCh <- c
+	}()
+
+	// Take the first connection from either path, then cancel to wind the other
+	// path down and collect its result (a nil once cancelled, or a genuine racing
+	// socket that had already landed). Either goroutine returns promptly on cancel,
+	// so the second collect does not block. The crossing-retry budget (§7.2.1) is
+	// fully available until the first success, since we only cancel after one lands.
+	var dialed, accepted net.Conn
+	select {
+	case dialed = <-dialedCh:
+		cancel()
+		accepted = <-acceptedCh
+	case accepted = <-acceptedCh:
+		cancel()
+		dialed = <-dialedCh
+	case <-fireCtx.Done():
+		cancel()
+		dialed = <-dialedCh
+		accepted = <-acceptedCh
 	}
-	return pp.listenAccept(fireCtx, target)
+
+	kept, loser := selectSocket(dialed, accepted, pp.SelfID < peerID)
+	if loser != nil {
+		loser.Close()
+	}
+	if kept == nil {
+		return nil, fmt.Errorf("punch: no direct path to %s (%d crossing retries, %v)",
+			target, pp.crossingRetries(), context.Cause(fireCtx))
+	}
+	return kept, nil
+}
+
+// selectSocket picks the surviving connection from a punch's two paths. Normally
+// only one formed (the §7.3 single-4-tuple case) and it is kept whichever way it
+// came. If BOTH formed (distinct-4-tuple racing open), keepDialedOnRace — the
+// peer-id tie-break — keeps one end deterministically and returns the other as
+// the loser to close, so both peers converge on the same connection.
+func selectSocket(dialed, accepted net.Conn, keepDialedOnRace bool) (kept, loser net.Conn) {
+	switch {
+	case dialed != nil && accepted != nil:
+		if keepDialedOnRace {
+			return dialed, accepted
+		}
+		return accepted, dialed
+	case dialed != nil:
+		return dialed, nil
+	default:
+		return accepted, nil // accepted or nil
+	}
 }
 
 // listenAccept binds the shared local port as a listener (SO_REUSEPORT — the
@@ -297,6 +354,14 @@ func (pp *PunchParty) listenAccept(ctx context.Context, target string) (net.Conn
 func (pp *PunchParty) dialLoop(ctx context.Context, target string) net.Conn {
 	dial := pp.dial()
 	for i := 0; i < pp.crossingRetries(); i++ {
+		// Never invoke dial on an already-cancelled context: a cancelled dial is a
+		// no-op that issues no SYN, so calling it would let a dialed_outbound tap
+		// (the §7.1 step-4 both-fire cross-impl signal) fire without a real outbound
+		// connect ever leaving the shared endpoint. Checking here means the tap
+		// records only genuine dial attempts under a live context.
+		if ctx.Err() != nil {
+			return nil
+		}
 		dctx, cancel := context.WithTimeout(ctx, pp.dialTimeout())
 		conn, err := dial(dctx, pp.LocalAddr, target)
 		cancel()

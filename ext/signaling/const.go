@@ -1,7 +1,10 @@
 // Package signaling implements the entity-core-go CLIENT of the rendezvous /
 // NAT-introduction surface (PROPOSAL-CONNECTIVITY-SIGNALING-AND-PUNCH §2.2/§3,
-// PROPOSAL-CONNECTION-NODE). Go leads the client build; the server/node role is
-// Rust's and is deliberately NOT implemented here.
+// PROPOSAL-CONNECTION-NODE). Go leads the client build; the server/node role
+// lives in the sibling subpackage ext/signaling/node (the §4/§5 rendezvous node),
+// added so Go self-hosts the rendezvous for the cross-impl punch gate rather than
+// depending on the Rust entity-signaling-node — a second server is exactly the
+// convergence signal §5 asks for. This package stays client-only.
 //
 // The package is client obligations only — key derivation (§2.2), pool
 // selection (§3.1.1), the §3 coordination messages and their dial ordering,

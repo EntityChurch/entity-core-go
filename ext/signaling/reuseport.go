@@ -44,6 +44,15 @@ func dialReusePort(ctx context.Context, local *net.TCPAddr, remote string) (net.
 	return d.DialContext(ctx, "tcp", remote)
 }
 
+// DialReusePort is the exported default punch dialer — the same reuseport dial
+// PunchParty uses when its Dial seam is nil. It is exported so a cmd-layer driver
+// can wrap it (e.g. to record that this side fired an outbound dial for the §7.1
+// step-4 both-fire cross-impl check) without reaching into the package: the
+// wrapper taps the call and delegates here for the real SO_REUSEPORT dial.
+func DialReusePort(ctx context.Context, local *net.TCPAddr, remote string) (net.Conn, error) {
+	return dialReusePort(ctx, local, remote)
+}
+
 // DialReflector opens a reflector connection for §6.7.1 observe-address discovery
 // from a REUSEADDR/REUSEPORT-bound local socket, and reports the concrete local
 // address it bound. The reflector observes the NAT mapping of THAT socket, so the
