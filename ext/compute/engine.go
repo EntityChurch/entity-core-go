@@ -412,6 +412,21 @@ func (e *Engine) reEvaluate(expressionURI, subgraphPath string, evt store.TreeCh
 
 	result, evalErr := Evaluate(expression, scope, budget, evalCtx)
 
+	// §2131 / (B) v3.23: an error reaching this crossing writes code-only, the
+	// SAME regardless of representation. A minted *ComputeError arrives via
+	// evalErr; an entity-VALUE compute/error (an SA-1 literal at the root, or a
+	// lookup resolving to a stored error) arrives as `result` with evalErr nil —
+	// the value form the handler path already funnels through F10 but this
+	// reactive path did not. Handling only the first is the representation split
+	// py hit at its crossing (2026-08-16): the value form would otherwise reach
+	// wrapResult and be written to result_path verbatim (message intact) — a §2.4
+	// code-only violation and a cross-impl result-hash divergence.
+	if evalErr == nil {
+		if ce, isErr := computeErrorFromValue(result); isErr {
+			evalErr = ce
+		}
+	}
+
 	resultPath := sgData.ResultPath
 	if evalErr != nil {
 		if ce, ok := evalErr.(*ComputeError); ok {
@@ -661,6 +676,26 @@ func auditWalk(ent entity.Entity, result *auditResult, visited map[hash.Hash]boo
 	if ent.Type == types.TypeComputeApply {
 		var d types.ComputeApplyData
 		if err := ecf.Decode(ent.Data, &d); err == nil && d.Path != "" {
+			// §2.1 (Q23, arch 67708b1 / ROUTING-2026-08-16-j): a builtin-path
+			// apply dispatches no EXECUTE, so capability/resource have no
+			// referent. This is a SHAPE check, decidable at install for a
+			// static-literal builtin path (the apply path IS a literal here),
+			// so install-time audit MUST reject it — the same conservative-
+			// static/dynamic-runtime split §2.1 applies to store builtin paths,
+			// applied to the structural class F5 is in. It runs BEFORE F5 and
+			// subsumes it for builtins (capability-only was caught by F5 alone;
+			// capability+resource and resource-only installed clean, the gap the
+			// ruling closes). Mirrors evalApply's reject-early runtime ordering.
+			if IsBuiltinPath(d.Path) && (!d.Capability.IsZero() || !d.Resource.IsZero()) {
+				if result.Err == nil {
+					result.Err = &auditError{
+						Status:  400,
+						Code:    ErrInvalidExpression,
+						Message: "compute/apply on a builtin path MUST NOT carry capability or resource",
+					}
+				}
+				return
+			}
 			// F5 install-time enforcement: capability override without resource
 			// is a static structural error, regardless of whether the resource
 			// would be statically resolvable.

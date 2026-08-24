@@ -107,6 +107,20 @@ sweep_cases, spec_version, vectors[]}`, and each vector:
 **2. Evaluate and reduce to the boundary.** Load every entity into a content store, install the tree
 preconditions, bind the root scope, evaluate the root under the vector's budget. Then reduce:
 
+> **The `worked/error/store-materializes-code-only-*` vectors need a `system/tree:put` dispatcher AND
+> a tree GET.** They call the SA-9 `store` builtin, which dispatches its write via `system/tree:put`
+> (wire a minimal in-process handler — the Go harness's `corpusTreePut` is the reference), and they
+> carry `Vector.BoundaryPath`: the boundary is the content hash of the entity WRITTEN to that path,
+> read out of band (in-process: the location index; wire: a `TreeGet`), **not the eval result.**
+>
+> That indirection is the whole point. §2.4 requires the *written* error be content-hashed over `code`
+> alone, and that is a property of the stored bytes — invisible in the eval result, which reduces a
+> `compute/error` to error-kind (keyed on `code`, blind to `message`) and which F10 re-wraps with a
+> fresh message over the wire. Reading the stored entity makes a non-code-only or non-materializing
+> store a hard divergence. The 2026-08-16 three-way proved it: go wrote the code-only entity; rust and
+> py wrote nothing (they propagate the error), and the vector went RED (`ONE-DIFFERS`) — where the
+> older result-reading form had reported LOCKED because the codes agreed.
+
 | Result | Emit |
 |---|---|
 | entity-kind | `{kind: "entity", boundary: <33-byte content hash, algorithm byte included>}` |
@@ -120,11 +134,14 @@ reference's own path is what makes the boundary authoritative instead of a secon
 renders `value:%T:<hex>`; that field is not portable and is redundant, since the canonical bytes
 already carry the distinction it stood in for.
 
-**3. Emit.** `Emission{impl, impl_version, engine, engine_role, fallbacks, corpus_sha256,
+**3. Emit.** `Emission{impl, impl_version, git_commit, engine, engine_role, fallbacks, corpus_sha256,
 corpus_version, spec_version, results{id → outcome}, skipped{id → reason}}`. `corpus_sha256` is the
 SHA-256 of the artifact bytes and is checked — an emission cannot be compared against a corpus it was
 not produced from. A vector your impl declines goes in `skipped` with a reason, never omitted: a skip
-counts as a failure.
+counts as a failure. **`git_commit` stamps the source revision the emission ran at (ADR-0012):** a
+published lock cites `N·0F @ <oracle-commit>`, so a lock over unstamped emissions is not publishable —
+`cross-bless` prints each emission's `impl/engine @ commit` and flags any that is `UNSTAMPED`. For a
+wire-driven emission the stamp is the *driver's* commit; record the peer's revision separately.
 
 **4. (Optional) Run the generator.** §7c.4(1) asks that each impl be able to run the seeded generator,
 not merely replay the frozen output. The PRNG is **SplitMix64**, specified in `prng.go` — six lines of

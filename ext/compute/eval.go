@@ -141,6 +141,36 @@ func evaluateInner(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalCon
 	}
 }
 
+// evalOperand evaluates a sub-expression whose result will be CONSUMED — read
+// for its value by an arithmetic/compare/logic/field/index/cast/if-condition/
+// construct-field/apply-arg site — and enforces §2131 (v3.23) "error
+// short-circuit normative": an is_error operand short-circuits and propagates,
+// it is never read for its fields.
+//
+// This is the one chokepoint that unifies the two error representations Go
+// carries — the reason a single missed consumer is how the representation split
+// stays invisible (py, 2026-08-16: ~300 tests covered only the minted form). A
+// minted *ComputeError arrives as a Go error and passes straight through; an
+// entity-VALUE compute/error (an SA-1 literal, or a `compute/lookup/hash`
+// resolving to a stored error) arrives as a value with nil error, and
+// computeErrorFromValue converts it to the *ComputeError to propagate.
+//
+// Use this — NOT bare Evaluate — at every value-consuming site. Producers that
+// must return an error AS A VALUE (the top-level result surfaced via F10; a
+// `let`/scope binding that flows the value onward until a later consumer reads
+// it) call Evaluate directly, keeping the spec's "errors are values that flow
+// and are detected at consumers" model (§2128, the NaN analogy) intact.
+func evalOperand(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalContext) (interface{}, error) {
+	v, err := Evaluate(ent, scope, budget, ctx)
+	if err != nil {
+		return nil, err
+	}
+	if ce, isErr := computeErrorFromValue(v); isErr {
+		return nil, ce
+	}
+	return v, nil
+}
+
 func evalLiteral(ent entity.Entity) (interface{}, error) {
 	var d types.ComputeLiteralData
 	if err := ecf.Decode(ent.Data, &d); err != nil {
@@ -241,7 +271,7 @@ func evalIf(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalContext) (
 	if err != nil {
 		return nil, err
 	}
-	condition, err := Evaluate(condTarget, scope, budget, ctx)
+	condition, err := evalOperand(condTarget, scope, budget, ctx)
 	if err != nil {
 		return nil, err
 	}

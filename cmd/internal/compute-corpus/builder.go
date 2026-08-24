@@ -202,6 +202,26 @@ func (b *irBuilder) builtin(path string, args map[string]hash.Hash) hash.Hash {
 	return b.add(types.ComputeApplyData{Path: path, Operation: "eval", Args: args})
 }
 
+// builtinCarrying builds a compute/apply on a builtin path that ILLEGALLY carries a
+// capability or resource field — the Q23 negative case (§2.1, arch 7fdeea7). Both
+// fields are parameters of the dispatched EXECUTE, which a builtin never dispatches,
+// so a conformant impl MUST return invalid_expression. Each carried hash references a
+// BENIGN literal that evaluates cleanly, so the vector locks identically under either
+// rejection ordering — early (all three impls today: reject on presence) or the
+// pseudocode's late placement (evaluate the benign field, it does not short-circuit,
+// then reject). It therefore gates the rejection WITHOUT entangling spec-issue
+// 2026-08-16-d, which needs an error-valued field to tell the two orderings apart.
+func (b *irBuilder) builtinCarrying(path string, args map[string]hash.Hash, capability, resource *hash.Hash) hash.Hash {
+	d := types.ComputeApplyData{Path: path, Operation: "eval", Args: args}
+	if capability != nil {
+		d.Capability = *capability
+	}
+	if resource != nil {
+		d.Resource = *resource
+	}
+	return b.add(d)
+}
+
 func (b *irBuilder) mapB(collection, fn hash.Hash) hash.Hash {
 	b.feature("closure")
 	return b.builtin(compute.BuiltinMap, map[string]hash.Hash{"collection": collection, "fn": fn})
@@ -222,6 +242,13 @@ func (b *irBuilder) foldB(collection, initial, fn hash.Hash) hash.Hash {
 // applyClosure invokes a closure/lambda by hash with args keyed by param name.
 func (b *irBuilder) applyClosure(fn hash.Hash, args map[string]hash.Hash) hash.Hash {
 	return b.add(types.ComputeApplyData{Fn: fn, Args: args})
+}
+
+// storeB is the SA-9 store builtin — writes `value` to `path` via
+// system/tree:put (the harness wires corpusTreePut for it). Used by the §2.4
+// write-site vectors: a compute/error stored here materializes code-only.
+func (b *irBuilder) storeB(path, value hash.Hash) hash.Hash {
+	return b.builtin(compute.BuiltinStore, map[string]hash.Hash{"path": path, "value": value})
 }
 
 // --- Freezing ---

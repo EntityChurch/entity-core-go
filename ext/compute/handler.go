@@ -105,6 +105,18 @@ func (h *Handler) handleEval(ctx context.Context, req *handler.Request) (*handle
 		return handler.NewErrorResponse(500, "internal", err.Error())
 	}
 
+	// (B) v3.23: a compute/error arriving as the top-level VALUE (a root literal,
+	// or a lookup resolving to a stored error) surfaces via the SAME F10 error-
+	// as-value path — status 200, message intact — not materialize(), which post-
+	// v3.23 rejects errors outright.
+	if ce, isErr := computeErrorFromValue(result); isErr {
+		errEnt, entErr := ce.ToEntity()
+		if entErr != nil {
+			return handler.NewErrorResponse(500, "internal", "Failed to create error entity")
+		}
+		return &handler.Response{Status: 200, Result: errEnt}, nil
+	}
+
 	// v3.19c Part A M3 boundary 1: materialize before crossing the compute→
 	// non-compute boundary. An in-flight *constructedValue becomes a bare
 	// entity.Entity per M1 / V7 §1.4 (byte-identical to a hand-built one).
@@ -403,6 +415,16 @@ func (h *Handler) EvaluateAtPath(ctx context.Context, exprPath string, req *hand
 			return &handler.Response{Status: 200, Result: errEnt}, nil
 		}
 		return handler.NewErrorResponse(500, "internal", err.Error())
+	}
+
+	// (B) v3.23: same as boundary 1 — a top-level compute/error VALUE surfaces via
+	// the F10 error-as-value path, not materialize().
+	if ce, isErr := computeErrorFromValue(result); isErr {
+		errEnt, entErr := ce.ToEntity()
+		if entErr != nil {
+			return handler.NewErrorResponse(500, "internal", "Failed to create error entity")
+		}
+		return &handler.Response{Status: 200, Result: errEnt}, nil
 	}
 
 	// v3.19c Part A M3 boundary 2: materialize before crossing back to the

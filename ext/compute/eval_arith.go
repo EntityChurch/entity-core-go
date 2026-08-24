@@ -19,7 +19,7 @@ func evalArithmetic(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalCo
 	if err != nil {
 		return nil, err
 	}
-	left, err := Evaluate(leftTarget, scope, budget, ctx)
+	left, err := evalOperand(leftTarget, scope, budget, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -28,7 +28,7 @@ func evalArithmetic(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalCo
 	if err != nil {
 		return nil, err
 	}
-	right, err := Evaluate(rightTarget, scope, budget, ctx)
+	right, err := evalOperand(rightTarget, scope, budget, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +50,7 @@ func evalCompare(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalConte
 	if err != nil {
 		return nil, err
 	}
-	left, err := Evaluate(leftTarget, scope, budget, ctx)
+	left, err := evalOperand(leftTarget, scope, budget, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +59,7 @@ func evalCompare(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalConte
 	if err != nil {
 		return nil, err
 	}
-	right, err := Evaluate(rightTarget, scope, budget, ctx)
+	right, err := evalOperand(rightTarget, scope, budget, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +81,7 @@ func evalLogic(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalContext
 	if err != nil {
 		return nil, err
 	}
-	left, err := Evaluate(leftTarget, scope, budget, ctx)
+	left, err := evalOperand(leftTarget, scope, budget, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +97,7 @@ func evalLogic(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalContext
 	if err != nil {
 		return nil, err
 	}
-	right, err := Evaluate(rightTarget, scope, budget, ctx)
+	right, err := evalOperand(rightTarget, scope, budget, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +127,7 @@ func evalNumericCast(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalC
 	if err != nil {
 		return nil, err
 	}
-	val, err := Evaluate(valTarget, scope, budget, ctx)
+	val, err := evalOperand(valTarget, scope, budget, ctx)
 	if err != nil {
 		return nil, err
 	}

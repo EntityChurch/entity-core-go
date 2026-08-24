@@ -92,3 +92,36 @@ func IsComputeError(err error) bool {
 	_, ok := err.(*ComputeError)
 	return ok
 }
+
+// computeErrorFromValue is the §4.1 `is_error(v)` predicate for a consumed
+// sub-evaluation result — kind-based, per COMPUTE v3.23: it is true iff the
+// value's kind is `compute/error`, regardless of whether evaluation
+// "succeeded" (an SA-1 literal or a lookup resolving to a stored error
+// evaluates fine and is STILL an error for every consumer). When true it
+// returns the `*ComputeError` to propagate: the §4.1 / §7.2 `[MUST]`
+// short-circuit returns the error unchanged rather than embedding it.
+//
+// This is the code face of arch's ruling (B): a `compute/error` reaching a
+// `compute/construct` field, a `compute/apply` arg, or a scope binding
+// PROPAGATES — it is never materialized there. An error materializes only
+// where it is WRITTEN (§7.2 `result_path` / SA-9 `store`, via
+// ToMaterializedEntity), never where it is consumed. N1 listed those three
+// consumption sites as embed-and-reference and was wrong at all three
+// (corrected v3.23).
+func computeErrorFromValue(v interface{}) (*ComputeError, bool) {
+	ent, ok := v.(entity.Entity)
+	if !ok || ent.Type != types.TypeComputeError {
+		return nil, false
+	}
+	d, err := types.ComputeErrorDataFromEntity(ent)
+	if err != nil {
+		// A malformed compute/error still short-circuits — surfaced loudly as a
+		// decode failure rather than embedded as a broken value.
+		return newComputeError(ErrInvalidExpression, "malformed compute/error value: "+err.Error()), true
+	}
+	ce := &ComputeError{Code: d.Code, Message: d.Message, At: d.At}
+	if d.Expression != nil {
+		ce.Expression = *d.Expression
+	}
+	return ce, true
+}

@@ -20,7 +20,7 @@ func evalField(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalContext
 	if err != nil {
 		return nil, err
 	}
-	target, err := Evaluate(targetRef, scope, budget, ctx)
+	target, err := evalOperand(targetRef, scope, budget, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -144,17 +144,20 @@ func materialize(v interface{}, cs store.ContentStore) (interface{}, error) {
 		}
 		return out, nil
 	case entity.Entity:
-		// Q1 (ARCH-RESPONSE-COMPUTE-CORPUS-FIRST-RUN §2.4): a compute/error
-		// crossing to materialized form is content-hashed over `code` ALONE.
-		// message/at/expression are diagnostic and MUST NOT be in the bytes V7
-		// content-addresses, or two impls that raised the same code with
-		// different prose would produce different tree hashes — breaking dedup,
-		// cross-peer sync, and every reactive consumer keyed on that hash. The
-		// in-flight dispatch-boundary form (handler status-200, which bypasses
-		// materialize()) keeps its message; this materialized path strips it.
-		// Any other entity is already bare — pass through.
+		// (B) INVARIANT (COMPUTE v3.23): a compute/error must NEVER reach
+		// materialize(). Every consumption site short-circuits it as an error
+		// first (§4.1 is_error [MUST] — construct field, apply arg, top-level
+		// result), and the one place an error legitimately materializes — where
+		// it is WRITTEN (§7.2 result_path / SA-9 store) — goes through
+		// ToMaterializedEntity directly (engine.go), not here. Pre-v3.23 this
+		// branch code-only-materialized an error into a construct field: that was
+		// behaviour (A), which the ruling reversed. If an error arrives now, a
+		// short-circuit was missed upstream — fail loudly rather than silently
+		// re-embedding it. Any other entity is already bare — pass through.
 		if t.Type == types.TypeComputeError {
-			return types.MaterializeErrorEntity(t)
+			return nil, fmt.Errorf(
+				"internal: compute/error reached materialize() — a §4.1 is_error short-circuit was missed " +
+					"(COMPUTE v3.23 ruling B: an error propagates from a consumption site, it never materializes there)")
 		}
 		return v, nil
 	default:
@@ -181,7 +184,13 @@ func evalConstruct(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalCon
 		if err != nil {
 			return nil, err
 		}
-		value, err := Evaluate(valueTarget, scope, budget, ctx)
+		// §4.1 is_error [MUST] + N1 (corrected v3.23, ruling B): a compute/error
+		// reaching a construct FIELD short-circuits (via evalOperand) — the whole
+		// construct evaluation yields the error. It is NOT embedded and
+		// materialized here; an error materializes only where it is written (§7.2
+		// result_path / SA-9 store). This is the reversal of the pre-v3.23
+		// behaviour (A) core-go shipped and pre-committed to flipping.
+		value, err := evalOperand(valueTarget, scope, budget, ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -205,7 +214,7 @@ func evalIndex(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalContext
 	if err != nil {
 		return nil, err
 	}
-	arrVal, err := Evaluate(arrTarget, scope, budget, ctx)
+	arrVal, err := evalOperand(arrTarget, scope, budget, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +228,7 @@ func evalIndex(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalContext
 	if err != nil {
 		return nil, err
 	}
-	idxVal, err := Evaluate(idxTarget, scope, budget, ctx)
+	idxVal, err := evalOperand(idxTarget, scope, budget, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +271,7 @@ func evalLength(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalContex
 	if err != nil {
 		return nil, err
 	}
-	arrVal, err := Evaluate(arrTarget, scope, budget, ctx)
+	arrVal, err := evalOperand(arrTarget, scope, budget, ctx)
 	if err != nil {
 		return nil, err
 	}

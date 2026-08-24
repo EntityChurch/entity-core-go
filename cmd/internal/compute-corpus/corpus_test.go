@@ -20,6 +20,7 @@ import (
 
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/hash"
+	"go.entitychurch.org/entity-core-go/ext/compute"
 )
 
 // buildTestCorpus builds the full corpus once for the tests that need it.
@@ -281,6 +282,19 @@ func TestWorkedErrorVectorsRaiseTheirCode(t *testing.T) {
 		"worked/numeric-intent/cast-type-mismatch": "type_mismatch",
 		"worked/scope/unbound-name":                "not_found",
 		"worked/budget/exhausted-deterministic":    "budget_exhausted",
+		// v3.23 ruling (B): an error at a construct field propagates as the
+		// construct's result, error-kind — same family as the others now.
+		"worked/error/materialized-into-construct": "corpus_materialized_error",
+		// §2131 value-form family: a value-form compute/error short-circuits at
+		// every consumer, so the outcome is error-kind carrying its own code.
+		"worked/value-error/arithmetic-short-circuits":   "value_form_error",
+		"worked/value-error/compare-short-circuits":      "value_form_error",
+		"worked/value-error/logic-short-circuits":        "value_form_error",
+		"worked/value-error/field-short-circuits":        "value_form_error",
+		"worked/value-error/index-short-circuits":        "value_form_error",
+		"worked/value-error/if-condition-short-circuits": "value_form_error",
+		"worked/value-error/apply-fn-short-circuits":     "value_form_error",
+		"worked/value-error/lookup-tree-short-circuits":  "stored_value_form_error",
 	}
 	for id, code := range want {
 		o := mustOutcome(t, os, id)
@@ -294,23 +308,69 @@ func TestWorkedErrorVectorsRaiseTheirCode(t *testing.T) {
 	}
 }
 
-// TestMaterializedErrorIsCodeOnly is §2.4 as an executable claim, and the
-// invariant the worked/error/materialized-into-construct vector carries into the
-// cross-impl corpus. A compute/error materialized into a construct field is
-// content-hashed over `code` ALONE (PROPOSAL-COMPUTE-ERROR-MATERIALIZATION-
-// DETERMINISM). So the construct's entity-kind boundary must turn on the error's
-// CODE and be blind to its (in-flight-only) `message`.
+// TestStoreCrossingMaterializesCodeOnly is §2.4's SA-9 store gate (arch
+// ROUTING-2026-08-16-b item 2), now gateable because the store vectors carry
+// HashErrorResult: their boundary is the WRITTEN error's entity hash, not its
+// code. §2.4 requires that entity be content-hashed over `code` alone, so go's
+// boundary MUST equal the hash of the bare {code} error — for both the minted
+// (division_by_zero) and value-form (stored_before_write) representations. An
+// impl that leaves `message` in the stored bytes produces a different hash and
+// diverges (which is exactly what surfaces the rust/py non-conformance the
+// error-kind reduction used to mask — see docs/validation/reports/2026-08-16-c).
+func TestStoreCrossingMaterializesCodeOnly(t *testing.T) {
+	c := buildTestCorpus(t)
+	os := outcomes(t, c)
+
+	codeOnly := func(t *testing.T, code string) []byte {
+		t.Helper()
+		ent, err := (&compute.ComputeError{Code: code}).ToMaterializedEntity()
+		if err != nil {
+			t.Fatalf("materialize %q: %v", code, err)
+		}
+		h, err := hash.Compute(ent.Type, ent.Data)
+		if err != nil {
+			t.Fatalf("hash %q: %v", code, err)
+		}
+		return h.Bytes()
+	}
+
+	cases := map[string]string{
+		"worked/error/store-materializes-code-only-minted":     "division_by_zero",
+		"worked/error/store-materializes-code-only-value-form": "stored_before_write",
+	}
+	for id, code := range cases {
+		o := mustOutcome(t, os, id)
+		if o.Kind != OutcomeEntity {
+			t.Errorf("%s: expected an entity-kind boundary (the written entity's hash), got %s", id, o)
+			continue
+		}
+		if want := codeOnly(t, code); !bytes.Equal(o.Boundary, want) {
+			t.Errorf("%s: store crossing did not materialize code-only (§2.4)\n  got  %x\n  want %x (bare {code:%s})\n"+
+				"a non-code-only store leaked message/at into the content-addressed write", id, o.Boundary, want, code)
+		}
+	}
+}
+
+// TestErrorInConstructPropagates is COMPUTE v3.23 ruling (B) as an executable
+// claim, and the invariant the worked/error/materialized-into-construct vector
+// now carries into the cross-impl corpus. A compute/error reaching a
+// compute/construct field PROPAGATES as the construct's result (§4.1 is_error
+// [MUST] + N1 corrected v3.23) — error-kind, NOT an embedded/materialized
+// entity-kind boundary. This is the reversal of the pre-v3.23 behaviour (A)
+// core-go shipped and pre-committed to flipping; the vector now expects rust's
+// original outcome.
 //
-// This is what makes the corpus vector load-bearing rather than decorative: it
-// asserts, from both directions, exactly the divergence the vector exists to
-// catch three-way — an impl that folds `message` into the materialized hash fails
-// the same-code half; an impl that hashes a constant regardless of code fails the
-// different-code half.
-func TestMaterializedErrorIsCodeOnly(t *testing.T) {
-	boundary := func(code, message string) []byte {
+// The propagated outcome discriminates on `code` and is blind to the in-flight
+// `message` — the same property the old materialized-hash test asserted, now at
+// the propagation surface. The code-only MATERIALIZATION invariant did not
+// disappear: it moved to the write site (§7.2 result_path / SA-9 store), covered
+// by ext/compute TestMaterializeRejectsErrorEntity + the ToMaterializedEntity
+// leg there.
+func TestErrorInConstructPropagates(t *testing.T) {
+	outcome := func(code, message string) Outcome {
 		b := newIRBuilder(nil)
 		root := probe(b, errorValue(b, code, message))
-		v, err := b.freeze("test/materialized-error", 0, root, map[string]interface{}{}, stdBudget)
+		v, err := b.freeze("test/error-in-construct", 0, root, map[string]interface{}{}, stdBudget)
 		if err != nil {
 			t.Fatalf("freeze(%q): %v", code, err)
 		}
@@ -318,21 +378,24 @@ func TestMaterializedErrorIsCodeOnly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("eval(%q): %v", code, err)
 		}
-		if o.Kind != OutcomeEntity {
-			t.Fatalf("code %q: expected an entity-kind boundary (a materialized error is a bare entity), got %s", code, o)
+		if o.Kind != OutcomeError {
+			t.Fatalf("code %q: expected the error to PROPAGATE (error-kind outcome, ruling B), got %s", code, o)
 		}
-		return o.Boundary
+		return o
 	}
 
-	sameCodeA := boundary("materialized_code", "message ALPHA — this prose is in-flight only and MUST NOT be hashed")
-	sameCodeB := boundary("materialized_code", "an entirely different message, beta, of a different length")
-	diffCode := boundary("other_code", "message ALPHA — this prose is in-flight only and MUST NOT be hashed")
+	sameCodeA := outcome("materialized_code", "message ALPHA — this prose is in-flight only and MUST NOT drive the outcome")
+	sameCodeB := outcome("materialized_code", "an entirely different message, beta, of a different length")
+	diffCode := outcome("other_code", "message ALPHA — this prose is in-flight only")
 
-	if !bytes.Equal(sameCodeA, sameCodeB) {
-		t.Errorf("same code + different message produced DIFFERENT boundaries — `message` leaked into the materialized hash (§2.4 code-only violated):\n  A: %x\n  B: %x", sameCodeA, sameCodeB)
+	if sameCodeA.Code != sameCodeB.Code {
+		t.Errorf("same code + different message produced DIFFERENT propagated codes — `message` drove the outcome:\n  A: %q\n  B: %q", sameCodeA.Code, sameCodeB.Code)
 	}
-	if bytes.Equal(sameCodeA, diffCode) {
-		t.Errorf("different code produced the SAME boundary — the materialized error is not discriminating on `code` (§2.4):\n  both: %x", sameCodeA)
+	if sameCodeA.Code != "materialized_code" {
+		t.Errorf("propagated code = %q, want the error's own code (the construct yields the error unchanged)", sameCodeA.Code)
+	}
+	if sameCodeA.Code == diffCode.Code {
+		t.Errorf("different code produced the SAME propagated code %q — the outcome is not discriminating on `code`", sameCodeA.Code)
 	}
 }
 

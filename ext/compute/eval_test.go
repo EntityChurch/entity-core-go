@@ -1861,6 +1861,97 @@ func TestBuiltinStoreWithoutDispatch(t *testing.T) {
 	}
 }
 
+// TestBuiltinApplyRejectsCapabilityOrResource is Q23 (§2.1, ROUTING-2026-08-16-i /
+// arch 7fdeea7): a compute/apply on a system/compute/builtins/* path carrying
+// capability or resource is invalid_expression — both fields are parameters of the
+// dispatched EXECUTE, which a builtin (evaluated inline, §3.5) never dispatches.
+// Rejection is structural (on presence of the field, before evaluating it) and
+// subsumes the F5 check for a builtin path. This replaces the prior fall-through to
+// handler-mode dispatch, which broke §3.5's inline-alias hash-identity.
+func TestBuiltinApplyRejectsCapabilityOrResource(t *testing.T) {
+	ctx, cs := testCtx()
+	op := litHash(t, cs, "add")
+	left := litHash(t, cs, uint64(3))
+	right := litHash(t, cs, uint64(4))
+	capHash := litHash(t, cs, "cap-ref") // any non-zero hash: rejection is on presence
+	resHash := litHash(t, cs, "res-ref")
+	base := func() types.ComputeApplyData {
+		return types.ComputeApplyData{
+			Path:      BuiltinArithmetic,
+			Operation: "eval",
+			Args:      map[string]hash.Hash{"op": op, "left": left, "right": right},
+		}
+	}
+
+	cases := []struct {
+		name string
+		mut  func(d *types.ComputeApplyData)
+	}{
+		{"capability+resource", func(d *types.ComputeApplyData) { d.Capability = capHash; d.Resource = resHash }},
+		{"resource only", func(d *types.ComputeApplyData) { d.Resource = resHash }},
+		{"capability only (the F5 shape, subsumed here)", func(d *types.ComputeApplyData) { d.Capability = capHash }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := base()
+			tc.mut(&d)
+			apply := mustE(d.ToEntity())
+			_, err := Evaluate(apply, NewScope(), DefaultBudget(), ctx)
+			ce, ok := err.(*ComputeError)
+			if !ok || ce.Code != ErrInvalidExpression {
+				t.Fatalf("builtin apply carrying %s must be invalid_expression, got %v", tc.name, err)
+			}
+		})
+	}
+
+	// Regression: the same builtin apply WITHOUT those fields still evaluates
+	// inline (the §3.5 alias), so the rejection did not narrow the legal path.
+	clean := mustE(base().ToEntity())
+	got, err := Evaluate(clean, NewScope(), DefaultBudget(), ctx)
+	if err != nil {
+		t.Fatalf("clean builtin apply must still evaluate, got err %v", err)
+	}
+	if r, ok := got.(int64); !ok || r != 7 {
+		t.Fatalf("clean builtin apply must evaluate to int64(7), got %v (%T)", got, got)
+	}
+}
+
+// TestBuiltinApplyRejectsBeforeResourceEval is the -d ordering gate (arch
+// 67708b1 / ROUTING-2026-08-16-j §1, now NORMATIVE): the builtin-carrying
+// rejection is a SHAPE check that MUST fire before the resource field is
+// resolved or evaluated. The resource here is an ERROR-VALUED field — a stored
+// compute/error. Under the correct reject-early order the result is
+// invalid_expression; under the buggy reject-late order the resource would be
+// evaluated first and short-circuit to THAT error's code ("shape_probe_error"),
+// so two conformant impls would answer one malformed expression with different
+// codes. This is the case a benign literal cannot distinguish.
+func TestBuiltinApplyRejectsBeforeResourceEval(t *testing.T) {
+	ctx, cs := testCtx()
+	op := litHash(t, cs, "add")
+	left := litHash(t, cs, uint64(3))
+	right := litHash(t, cs, uint64(4))
+
+	// A resource field that, if evaluated, yields a DISTINCT error code.
+	errRes := mustE((&ComputeError{Code: "shape_probe_error", Message: "must never reach eval"}).ToEntity())
+	errResHash, _ := cs.Put(errRes)
+
+	apply := mustE(types.ComputeApplyData{
+		Path:      BuiltinArithmetic,
+		Operation: "eval",
+		Args:      map[string]hash.Hash{"op": op, "left": left, "right": right},
+		Resource:  errResHash,
+	}.ToEntity())
+
+	_, err := Evaluate(apply, NewScope(), DefaultBudget(), ctx)
+	ce, ok := err.(*ComputeError)
+	if !ok {
+		t.Fatalf("expected a *ComputeError, got %v", err)
+	}
+	if ce.Code != ErrInvalidExpression {
+		t.Fatalf("reject-early violated: got code %q (the resource's error), want invalid_expression — the shape check must precede resource evaluation", ce.Code)
+	}
+}
+
 // --- v3.16 rule 11: eager numeric-cast at point of use ---
 
 // Rule 11 positive: cast directly at the operand triggers unsigned div.

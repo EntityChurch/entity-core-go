@@ -27,6 +27,7 @@ import (
 	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/types"
+	"go.entitychurch.org/entity-core-go/ext/compute"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -58,6 +59,10 @@ type workedVector struct {
 	bindings map[string]interface{}
 	budget   VecBudget
 	build    func(b *irBuilder) hash.Hash
+	// boundaryPath sets Vector.BoundaryPath: the boundary is the entity WRITTEN to
+	// this tree path, not the eval result. Set on the store-crossing vectors, whose
+	// point is the written error's BYTES (§2.4 code-only), not the eval result.
+	boundaryPath string
 }
 
 // buildWorked constructs all worked vectors in declaration order.
@@ -82,6 +87,7 @@ func buildWorked(profile string) ([]Vector, error) {
 		if err != nil {
 			return nil, err
 		}
+		v.BoundaryPath = wv.boundaryPath
 		out = append(out, v)
 	}
 	return out, nil
@@ -669,43 +675,206 @@ var workedVectors = []workedVector{
 		},
 	},
 	{
-		// §2.4 materialized-error determinism — the vector arch's ROUTING
-		// 2026-08-13(i) / 2026-08-15(e) names as the ONE thing left gating
-		// PROPOSAL-COMPUTE-ERROR-MATERIALIZATION-DETERMINISM (§2.4, v3.21
-		// provisional) from ratifying. It has to exist here because EVERY other
-		// error vector in this file — division-by-zero, budget/exhausted,
-		// scope/unbound-name, record/index-out-of-range, numeric-intent/cast-* —
-		// produces an error that PROPAGATES OUT of its `probe` as a top-level
-		// {kind:"error", code} outcome. cross-bless compares the `code` string for
-		// those; the error is never content-hashed AS AN ENTITY, so an impl that
-		// materializes a `compute/error` over {code, message} rather than {code}
-		// ALONE (§2.4) is invisible to all of them. Three green impls, one hashing
-		// a different field set, and nothing that would notice — the exact
-		// unexercised divergence the gate calls out.
+		// The vector that forced COMPUTE-ERROR-MATERIALIZATION open, and the one
+		// arch's v3.23 ruling closed. A compute/error is a value-type (SA-1): a
+		// LITERAL error, evaluated, returns as-is rather than propagating on its
+		// own, so it LANDS in a compute/construct FIELD — the only vector that
+		// reaches an error across the construct boundary at all (every other error
+		// vector here propagates out of its `probe` before any construct sees it).
+		// That is what made this the instrument for the embed-vs-propagate question
+		// the §2.4 gate presupposed away.
 		//
-		// This closes it. A compute/error is a value-type (SA-1, eval.go): a
-		// LITERAL error, evaluated, returns as-is instead of propagating, so it
-		// lands in a compute/construct FIELD. When the construct materializes at
-		// the compute→non-compute boundary (§2.3 N1), that field becomes a bare
-		// system/hash ref to a materialized error entity content-hashed over `code`
-		// alone (eval_construct.go materialize() → MaterializeErrorEntity). The
-		// literal carries a LOUD `message`; if any impl folds it into the
-		// materialized hash, this vector's entity-kind boundary diverges three-way
-		// and cross-bless localizes it. All three stripping to `code` is the
-		// ratification evidence §2.4 was waiting on.
+		// Run three-way (report 2026-08-15-d) it did NOT lock: go embedded +
+		// materialized code-only (A), rust propagated (B), py crashed. Routed, not
+		// voted (GUIDE-CONFORMANCE §4 — all three differ, tighten the spec).
 		//
-		// Boundary is entity-kind (a materialized error is a bare entity), NOT
-		// error-kind — that is the point: the error is reached as a materialized
-		// SUBTREE, not as the outcome. The unbound-name/division vectors keep the
-		// error-kind path covered.
+		// arch RULED (B), COMPUTE v3.23: is_error is kind-based (§4.1 [MUST]), so an
+		// error reaching a construct field SHORT-CIRCUITS — the construct evaluation
+		// yields the error. N1 was corrected to drop compute/error from the three
+		// consumption sites; an error materializes only where it is WRITTEN (§7.2
+		// result_path / SA-9 store). So this vector's outcome is now ERROR-KIND (code
+		// `corpus_materialized_error`), matching rust's original result. go flipped
+		// to (B) — eval_construct.go short-circuits and materialize() now REJECTS an
+		// error; the loud `message` below proves the outcome turns on `code` and is
+		// blind to prose. §2.4 ratification waits on this re-running three-way under
+		// (B): go + rust agree; py owes its crash fix.
 		id: "worked/error/materialized-into-construct",
 		build: func(b *irBuilder) hash.Hash {
-			b.feature("error-path", "materialized-error")
+			b.feature("error-path", "propagated-error")
 			errLit := errorValue(b, "corpus_materialized_error",
-				"DIAGNOSTIC PROSE — §2.4 requires this message be stripped before the compute/error is content-addressed; if it appears in the entity-kind boundary hash, the impl folded message into the materialized hash")
+				"DIAGNOSTIC PROSE — v3.23 ruling (B): this error PROPAGATES from the construct field; the outcome is error-kind and turns on `code` alone, never on this message")
 			return probe(b, errLit)
 		},
 	},
+
+	// --- §2131 value-form error family (arch ROUTING-2026-08-16-b, item 1) ----
+	//
+	// A compute/error is a value (SA-1), and is_error is KIND-based (§4.1
+	// [MUST]), so a value-form error MUST short-circuit at every consumer exactly
+	// as a minted one does — the outcome is error-kind, turning on `code` alone.
+	// The pre-existing worked/error/materialized-into-construct vector exercises
+	// the value form at ONE consumer (a construct field); this family covers the
+	// rest of §2148's short-circuit list — arithmetic, compare, logic, field,
+	// index, if-condition, apply — the consumers a three-green board sat on top
+	// of while two impls independently reached 0% value-form coverage (AP-14).
+	//
+	// Each vector's root IS the consumer (no `probe` wrapper): wrapping would add
+	// a construct consumer and test that instead of the one named. The loud
+	// `message` proves the outcome is blind to prose — cross-bless keys error
+	// outcomes on `code` alone (crossbless.go signature()).
+
+	{
+		id: "worked/value-error/arithmetic-short-circuits",
+		build: func(b *irBuilder) hash.Hash {
+			b.feature("error-path", "value-form-error")
+			return b.arith("add", vfErrorLit(b), b.lit(int64(1)))
+		},
+	},
+	{
+		id: "worked/value-error/compare-short-circuits",
+		build: func(b *irBuilder) hash.Hash {
+			b.feature("error-path", "value-form-error")
+			return b.compare("lt", vfErrorLit(b), b.lit(int64(1)))
+		},
+	},
+	{
+		id: "worked/value-error/logic-short-circuits",
+		build: func(b *irBuilder) hash.Hash {
+			b.feature("error-path", "value-form-error")
+			t := b.lit(true)
+			return b.logic("and", vfErrorLit(b), &t)
+		},
+	},
+	{
+		id: "worked/value-error/field-short-circuits",
+		build: func(b *irBuilder) hash.Hash {
+			b.feature("error-path", "value-form-error")
+			// The trap this pins: a field consumer that reads `.code` off the error
+			// instead of short-circuiting would return "value_form_error" as a value.
+			return b.field("code", vfErrorLit(b))
+		},
+	},
+	{
+		id: "worked/value-error/index-short-circuits",
+		build: func(b *irBuilder) hash.Hash {
+			b.feature("error-path", "value-form-error")
+			return b.index(vfErrorLit(b), b.lit(int64(0)))
+		},
+	},
+	{
+		id: "worked/value-error/if-condition-short-circuits",
+		build: func(b *irBuilder) hash.Hash {
+			b.feature("error-path", "value-form-error")
+			then := b.lit(int64(1))
+			els := b.lit(int64(2))
+			return b.ifE(vfErrorLit(b), then, &els)
+		},
+	},
+	{
+		id: "worked/value-error/apply-fn-short-circuits",
+		build: func(b *irBuilder) hash.Hash {
+			b.feature("error-path", "value-form-error")
+			// The apply target (fn) is an error — the closure-mode apply MUST
+			// short-circuit before attempting to load a scope from it.
+			return b.applyClosure(vfErrorLit(b), map[string]hash.Hash{"x": b.lit(int64(1))})
+		},
+	},
+	{
+		// The SECOND SA-1 form arch named: not a literal, but a lookup/tree
+		// resolving to a STORED compute/error. It must short-circuit identically —
+		// a literal that works and a lookup that doesn't would be the same
+		// two-representation split one indirection deeper.
+		id: "worked/value-error/lookup-tree-short-circuits",
+		build: func(b *irBuilder) hash.Hash {
+			b.feature("error-path", "value-form-error", "tree-lookup")
+			errH := errorValue(b, "stored_value_form_error",
+				"PROSE from a STORED error resolved via lookup/tree — the outcome is code-only")
+			b.at("corpus/value-error/stored", errH)
+			return b.arith("mul", b.lookupTree("corpus/value-error/stored"), b.lit(int64(2)))
+		},
+	},
+
+	// --- SA-9 store crossing materializes code-only (§2.4 write-site gate) -----
+	//
+	// The store crossing, and the §2.4 code-only property ON it — item 2 of arch's
+	// ROUTING-2026-08-16-b, the half the proposal waits on. Store an error, read it
+	// back; the read-back IS the written entity. §2.4 requires that entity be
+	// content-hashed over `code` ALONE — message/at MUST NOT enter the bytes, or
+	// two peers writing the same error to the same path get different hashes
+	// (breaking AE-1, dedup, cross-peer sync).
+	//
+	// These carry boundaryPath: the boundary is the entity actually WRITTEN to the
+	// store path, read back out of band (not the eval result). That is what makes
+	// code-only gateable. Reading the eval result cannot: over the wire an error
+	// result is re-wrapped by F10 with a fresh message (so it is NOT the stored
+	// entity), and under the error-kind reduction cross-bless keys on `code` and is
+	// blind to `message` anyway — which is how the 2026-08-16 three-way reported
+	// LOCKED while go stored code-only and rust/py stored with-message. Hashing the
+	// stored entity turns a message-leaking store into a hard divergence from a
+	// code-only one.
+	//
+	// Two vectors = the two-representation pair at the crossing (AP-14): the minted
+	// form (division_by_zero) and the value form. Both go through builtinStore's
+	// write, which 61b431c fixed to materialize code-only for either form. The root
+	// is just the store — the write is the whole point; the boundary is its result.
+	{
+		id:           "worked/error/store-materializes-code-only-minted",
+		boundaryPath: "corpus/error/store-minted",
+		build: func(b *irBuilder) hash.Hash {
+			b.feature("error-path", "store-crossing", "materialized-error")
+			minted := b.arith("div", b.lookupScope("n"), b.lit(int64(0)))
+			return b.storeB(b.lit("corpus/error/store-minted"), minted)
+		},
+	},
+	{
+		id:           "worked/error/store-materializes-code-only-value-form",
+		boundaryPath: "corpus/error/store-vf",
+		build: func(b *irBuilder) hash.Hash {
+			b.feature("error-path", "store-crossing", "materialized-error", "value-form-error")
+			verr := errorValue(b, "stored_before_write",
+				"LOUD PROSE that MUST NOT survive the SA-9 store write — §2.4 code-only")
+			return b.storeB(b.lit("corpus/error/store-vf"), verr)
+		},
+	},
+
+	// Q23 (§2.1, arch 7fdeea7 / ROUTING-2026-08-16-i): a builtin-path compute/apply
+	// carrying capability or resource is invalid_expression — the fields are
+	// parameters of the dispatched EXECUTE, which a builtin (inline, §3.5) never
+	// dispatches. Two representatives: a PURE builtin rejecting on `resource`, and
+	// the security-critical `store` rejecting on `capability` (the field arch's
+	// fail-closed argument turns on). Both carry a benign literal, so they lock the
+	// same under either rejection ordering — the ordering-sensitive case is
+	// spec-issue 2026-08-16-d, deliberately NOT vectored until arch rules it.
+	{
+		id: "worked/error/builtin-apply-carrying-resource-is-invalid",
+		build: func(b *irBuilder) hash.Hash {
+			b.feature("error-path", "builtin-alias", "invalid-expression")
+			res := b.lit("app/corpus/benign-resource")
+			return b.builtinCarrying(compute.BuiltinArithmetic,
+				map[string]hash.Hash{"op": b.lit("add"), "left": b.lit(int64(3)), "right": b.lit(int64(4))},
+				nil, &res)
+		},
+	},
+	{
+		id: "worked/error/builtin-store-apply-carrying-capability-is-invalid",
+		build: func(b *irBuilder) hash.Hash {
+			b.feature("error-path", "builtin-alias", "invalid-expression", "store-crossing")
+			cap := b.lit("app/corpus/benign-capability")
+			return b.builtinCarrying(compute.BuiltinStore,
+				map[string]hash.Hash{"path": b.lit("corpus/error/q23-store"), "value": b.lit(int64(1))},
+				&cap, nil)
+		},
+	},
+}
+
+// vfErrorLit records one value-form compute/error literal (SA-1) carrying loud
+// diagnostic prose, and returns its hash. The prose is really in the artifact
+// bytes so that "the outcome turns on code alone" is a claim the corpus can
+// actually falsify — an artifact carrying only the code could not tell a
+// short-circuiting impl from one that leaks the message.
+func vfErrorLit(b *irBuilder) hash.Hash {
+	return errorValue(b, "value_form_error",
+		"LOUD PROSE — a value-form compute/error (SA-1) MUST short-circuit at this consumer; the outcome is error-kind and turns on `code` alone, never on this message")
 }
 
 // matchVariant builds the §4d match decomposition for a given tag: construct a

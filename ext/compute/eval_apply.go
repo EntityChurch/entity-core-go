@@ -34,9 +34,24 @@ func evalApplyHandler(d types.ComputeApplyData, applyHash hash.Hash, scope *Scop
 	// have direct access to the evaluator (closures need scope + budget). The
 	// inline-equivalent builtins (arithmetic/compare/...) reuse their inline
 	// evaluators, producing hash-equal results per the §3.5 alias guarantee.
-	// Capability override + resource still need full handling, so we only
-	// shortcut when neither is in play.
-	if IsBuiltinPath(d.Path) && d.Capability.IsZero() && d.Resource.IsZero() {
+	//
+	// §2.1 (Q23, ROUTING-2026-08-16-i / arch 7fdeea7): a builtin path evaluates
+	// inline and dispatches NO EXECUTE, so `capability`/`resource` — defined only
+	// as parameters of the dispatched EXECUTE — have no referent on it. Reject
+	// rather than fall through to a dual-checked handler dispatch: the fall-through
+	// (this repo's prior behavior) would break §3.5's inline-alias hash-identity,
+	// and honoring/ignoring a capability the dual-check can only NARROW would run
+	// `store` (the one impure builtin, §6.2) WIDER than the caller's narrowing
+	// request asked. §6.2 already fixes store's authority via ctx.capability +
+	// check_path_permission — never a field on the expression — so nothing
+	// legitimate is lost. Structural rejection precedes evaluating the (meaningless)
+	// fields, matching the three per-seat actions in ROUTING-i (go/rust/py all reject
+	// early); it also subsumes the F5 check for builtins.
+	if IsBuiltinPath(d.Path) {
+		if !d.Capability.IsZero() || !d.Resource.IsZero() {
+			return nil, newComputeError(ErrInvalidExpression,
+				"compute/apply on a builtin path MUST NOT carry capability or resource")
+		}
 		return evalBuiltin(d, scope, budget, ctx)
 	}
 	if ctx.DispatchExecute == nil {
@@ -71,7 +86,10 @@ func evalApplyHandler(d types.ComputeApplyData, applyHash hash.Hash, scope *Scop
 		if err != nil {
 			return nil, err
 		}
-		value, err := Evaluate(target, scope, budget, ctx)
+		// §4.1 is_error [MUST] + N1 (corrected v3.23, ruling B): a compute/error
+		// reaching an apply ARG short-circuits (via evalOperand) — it propagates,
+		// it is not encoded into the params.
+		value, err := evalOperand(target, scope, budget, ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -106,7 +124,7 @@ func evalApplyHandler(d types.ComputeApplyData, applyHash hash.Hash, scope *Scop
 		if err != nil {
 			return nil, err
 		}
-		resValue, err := Evaluate(resTarget, scope, budget, ctx)
+		resValue, err := evalOperand(resTarget, scope, budget, ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -128,7 +146,7 @@ func evalApplyHandler(d types.ComputeApplyData, applyHash hash.Hash, scope *Scop
 		if err != nil {
 			return nil, err
 		}
-		capValue, err := Evaluate(capTarget, scope, budget, ctx)
+		capValue, err := evalOperand(capTarget, scope, budget, ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -192,7 +210,7 @@ func evalApplyClosure(d types.ComputeApplyData, scope *Scope, budget *Budget, ct
 	if fnTarget.Type == types.TypeComputeClosure {
 		closureEnt = fnTarget
 	} else {
-		fnValue, err := Evaluate(fnTarget, scope, budget, ctx)
+		fnValue, err := evalOperand(fnTarget, scope, budget, ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -226,7 +244,11 @@ func evalApplyClosure(d types.ComputeApplyData, scope *Scope, budget *Budget, ct
 		if err != nil {
 			return nil, err
 		}
-		argVal, err := Evaluate(argTarget, scope, budget, ctx)
+		// §4.1 is_error [MUST] (ruling B): a compute/error reaching a closure ARG
+		// short-circuits (via evalOperand) rather than binding into the new scope.
+		// The scope-binding schema has no error variant (v3.23), so this makes an
+		// error unrepresentable-by-short-circuit rather than silently bound.
+		argVal, err := evalOperand(argTarget, scope, budget, ctx)
 		if err != nil {
 			return nil, err
 		}

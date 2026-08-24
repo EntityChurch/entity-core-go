@@ -27,12 +27,32 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"go.entitychurch.org/entity-core-go/core/ecf"
 )
+
+// resolveGitCommit picks the revision to stamp on an emission (ADR-0012), in
+// precedence order: an explicit --git-commit, then $GIT_COMMIT (how a
+// containerized build injects it), then `git rev-parse HEAD` for a local run.
+// Returns "" if none resolve — an unstamped emission is honest about being
+// unpublishable rather than inventing a revision.
+func resolveGitCommit(flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	if env := os.Getenv("GIT_COMMIT"); env != "" {
+		return env
+	}
+	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -257,6 +277,7 @@ func runEmit(args []string) error {
 		"drive a live peer at host:port over system/compute:eval instead of evaluating in-process (requires a --profile wire corpus)")
 	identity := fs.String("identity", "", "identity name for the peer connection")
 	implLabel := fs.String("impl", "", "impl name to record; defaults to core-go, or the peer address when --peer is used")
+	gitCommit := fs.String("git-commit", "", "source revision to stamp (ADR-0012); defaults to $GIT_COMMIT, then `git rev-parse HEAD`")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -308,6 +329,7 @@ func runEmit(args []string) error {
 	em := &Emission{
 		Impl:          name,
 		ImplVersion:   *implVersion,
+		GitCommit:     resolveGitCommit(*gitCommit),
 		Engine:        engineName,
 		EngineRole:    *engineRole,
 		Fallbacks:     0,
@@ -338,8 +360,12 @@ func runEmit(args []string) error {
 	if err := os.WriteFile(*out, raw, 0o644); err != nil {
 		return fmt.Errorf("write emission: %w", err)
 	}
-	fmt.Printf("wrote %s — %d answered, %d skipped (%s/%s, role %s)\n",
-		*out, len(em.Results), len(em.Skipped), em.Impl, em.Engine, em.EngineRole)
+	commit := em.GitCommit
+	if commit == "" {
+		commit = "UNSTAMPED (not publishable per ADR-0012)"
+	}
+	fmt.Printf("wrote %s — %d answered, %d skipped (%s/%s, role %s) @ %s\n",
+		*out, len(em.Results), len(em.Skipped), em.Impl, em.Engine, em.EngineRole, commit)
 	for _, id := range sortedKeys(em.Skipped) {
 		fmt.Printf("  SKIP %s: %s\n", id, em.Skipped[id])
 	}
@@ -415,6 +441,17 @@ func runCrossBless(args []string) error {
 	verdicts, err := crossBless(c, ems, sum[:])
 	if err != nil {
 		return err
+	}
+	// Provenance first (ADR-0012): a lock is a claim about specific revisions, so
+	// print which impl/engine @ commit each emission came from before the verdict.
+	// An UNSTAMPED emission makes the lock un-citable — surfaced, not hidden.
+	fmt.Printf("emissions over corpus %s:\n", hex.EncodeToString(sum[:8]))
+	for _, em := range ems {
+		commit := em.GitCommit
+		if commit == "" {
+			commit = "UNSTAMPED (not publishable per ADR-0012)"
+		}
+		fmt.Printf("  %s/%s (role %s) @ %s\n", em.Impl, em.Engine, em.EngineRole, commit)
 	}
 	report, locked := summarize(verdicts)
 	fmt.Print(report)

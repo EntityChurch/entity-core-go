@@ -683,3 +683,63 @@ func TestAuditSubgraphF5RejectsCapabilityWithoutResource(t *testing.T) {
 		t.Fatalf("expected invalid_expression code, got %q", result.Err.Code)
 	}
 }
+
+// Install-time Q23 (arch 67708b1 / ROUTING-2026-08-16-j §2): a static-literal
+// builtin-path apply carrying capability/resource MUST be rejected at INSTALL,
+// not just at eval — the shape is decidable statically. All three sub-shapes
+// reject uniformly; before the ruling, capability+resource and resource-only
+// installed clean (only capability-only was caught, incidentally, by F5). This
+// is the install-time complement of TestBuiltinApplyRejectsCapabilityOrResource.
+func TestAuditSubgraphRejectsBuiltinApplyCarryingCapabilityOrResource(t *testing.T) {
+	cs := store.NewMemoryContentStore()
+	capLit := mustE(types.ComputeLiteralData{Value: "cap-ref"}.ToEntity())
+	capHash, _ := cs.Put(capLit)
+	resLit := mustE(types.ComputeLiteralData{
+		Value: types.ResourceTarget{Targets: []string{"/peer/system/x"}},
+	}.ToEntity())
+	resHash, _ := cs.Put(resLit)
+
+	cases := []struct {
+		name string
+		mut  func(d *types.ComputeApplyData)
+	}{
+		{"capability+resource", func(d *types.ComputeApplyData) { d.Capability = capHash; d.Resource = resHash }},
+		{"resource only", func(d *types.ComputeApplyData) { d.Resource = resHash }},
+		{"capability only (the F5 shape, now on the builtin path)", func(d *types.ComputeApplyData) { d.Capability = capHash }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := types.ComputeApplyData{
+				Path:      BuiltinStore, // security-critical impure builtin
+				Operation: "eval",
+			}
+			tc.mut(&d)
+			apply := mustE(d.ToEntity())
+			cs.Put(apply)
+			result := auditSubgraph(apply, cs, "", "", auditConfig{})
+			if result.Err == nil {
+				t.Fatalf("builtin apply carrying %s must be rejected at install", tc.name)
+			}
+			if result.Err.Code != ErrInvalidExpression {
+				t.Fatalf("expected invalid_expression, got %q", result.Err.Code)
+			}
+		})
+	}
+
+	// Negative control 1: a clean builtin apply (no capability/resource) still
+	// installs — the reject did not narrow the legal builtin path.
+	cleanBuiltin := mustE(types.ComputeApplyData{Path: BuiltinArithmetic, Operation: "eval"}.ToEntity())
+	cs.Put(cleanBuiltin)
+	if r := auditSubgraph(cleanBuiltin, cs, "", "", auditConfig{}); r.Err != nil {
+		t.Fatalf("clean builtin apply must install, got %v", r.Err)
+	}
+
+	// Negative control 2: a HANDLER-path apply legitimately carries a resource
+	// (it dispatches a real EXECUTE) and must still install — the reject is
+	// scoped to builtin paths, not all applies with a resource.
+	handlerApply := mustE(types.ComputeApplyData{Path: "system/tree", Operation: "get", Resource: resHash}.ToEntity())
+	cs.Put(handlerApply)
+	if r := auditSubgraph(handlerApply, cs, "", "", auditConfig{}); r.Err != nil {
+		t.Fatalf("handler-path apply carrying a resource must install, got %v", r.Err)
+	}
+}

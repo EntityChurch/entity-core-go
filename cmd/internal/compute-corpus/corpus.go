@@ -105,6 +105,21 @@ type Vector struct {
 	// prove the corpus is non-vacuous BEFORE anyone runs it, and an impl can
 	// report an honest skip against a named tag instead of a bare failure.
 	Requires []string `cbor:"requires,omitempty"`
+	// BoundaryPath makes the boundary the content hash of the entity WRITTEN to
+	// this tree path after evaluation, instead of the evaluation result. Set it on
+	// the SA-9 store vectors: §2.4 requires the written error be content-hashed
+	// over `code` alone, and that is a property of the STORED entity, not the eval
+	// result. Reading the eval result cannot see it — over the wire an error result
+	// is re-wrapped by F10 (a fresh diagnostic message), and under the default
+	// error-kind reduction cross-bless keys on `code` and is blind to `message`
+	// either way. Reading the stored entity directly (in-process: the location
+	// index; wire: a tree GET) observes exactly the bytes §2.4 governs, so a
+	// message-leaking store is a hard divergence from a code-only one. The path is
+	// peer-relative like Tree (qualified to /{peer_id}/… by a live peer). If the
+	// store did not write (an impl that propagates instead of materializing), the
+	// path is empty and the boundary falls back to the eval result — still a
+	// divergence from a writer, surfaced not masked.
+	BoundaryPath string `cbor:"boundary_path,omitempty"`
 }
 
 // Corpus is the frozen artifact. Its SHA-256 is the MANIFEST hash-pin
@@ -179,6 +194,13 @@ const (
 type Emission struct {
 	Impl        string `cbor:"impl"`
 	ImplVersion string `cbor:"impl_version"`
+	// GitCommit is the source revision the emission was produced at. ADR-0012:
+	// a published conformance number cites `N·0F @ <oracle-commit>`, so a lock is
+	// not publishable without pinning the commit each emission was run at — a
+	// tree-state pin (which the first three-way lock fell back to) is not a
+	// citable revision. For a wire-driven emission this is the DRIVER's commit,
+	// not the peer's; the peer's revision must be recorded alongside separately.
+	GitCommit string `cbor:"git_commit,omitempty"`
 	// Engine names the evaluator (e.g. "stage1", "axis1"); EngineRole says
 	// whether it is the reference or the engine under test.
 	Engine     string `cbor:"engine"`

@@ -153,6 +153,25 @@ func (d *peerDriver) evalVectorOnPeer(ctx context.Context, v Vector) (Outcome, e
 	if err != nil {
 		return Outcome{}, fmt.Errorf("decode execute response: %w", err)
 	}
+
+	// BoundaryPath (SA-9 store vectors): the boundary is the entity the peer WROTE
+	// to that path, read back with a tree GET — not the eval result, which F10
+	// re-wraps into a fresh diagnostic error and which the error-kind reduction
+	// keys on `code` regardless. A tree GET sees the exact stored bytes §2.4
+	// governs. Fall through to the result reduction if the peer wrote nothing (it
+	// propagated instead of materializing) — still a divergence from a writer.
+	if v.BoundaryPath != "" {
+		qualified := "/" + d.peerID + "/" + v.BoundaryPath
+		ent, _, gerr := d.client.TreeGet(ctx, qualified)
+		if gerr == nil && !ent.ContentHash.IsZero() {
+			h, herr := hash.Compute(ent.Type, ent.Data)
+			if herr != nil {
+				return Outcome{}, fmt.Errorf("hash written entity at %q: %w", qualified, herr)
+			}
+			return Outcome{Kind: OutcomeEntity, Boundary: h.Bytes()}, nil
+		}
+	}
+
 	return outcomeFromEvalResponse(respData)
 }
 

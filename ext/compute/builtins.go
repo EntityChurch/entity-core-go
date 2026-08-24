@@ -358,27 +358,67 @@ func builtinStore(d types.ComputeApplyData, scope *Scope, budget *Budget, ctx *E
 		return nil, err
 	}
 	valueVal, err := Evaluate(valueTarget, scope, budget, ctx)
+
+	// §2.4 (v3.23 ruling B; N1 §2.3 / §2148): SA-9 store is a WRITE /
+	// materialization site, not a consumed position — a compute/error reaching
+	// store's value materializes code-only and is written to the path, the
+	// imperative analog of the §7.2 reactive result_path crossing in engine.go.
+	// It never re-embeds message/at (those would leak impl prose into the
+	// content-addressed result and break cross-peer convergence). is_error is
+	// kind-based, so BOTH in-language representations funnel here identically:
+	//   - minted:     Evaluate returns a *ComputeError (Go-error);
+	//   - value-form: Evaluate returns a compute/error VALUE (SA-1, nil Go-error) —
+	//                 a literal, or a lookup onto a stored error.
+	// A non-ComputeError Go error is an infra fault, not a compute value — it
+	// propagates. Route both error forms through the same code-only
+	// ToMaterializedEntity path; the value form would otherwise fall through to
+	// materialize() below, which rejects a compute/error entity post-v3.23.
+	//
+	// NOTE (spec-issue 2026-08-16, store-value: write vs short-circuit): §2137's
+	// "error short-circuit normative" lists compute/apply (handler mode) among the
+	// consumers that short-circuit, while N1/§2.4/§2148 list SA-9 store among the
+	// WRITE sites where an error materializes. The store builtin is a handler-mode
+	// apply, so the two rules point opposite ways for store's value. This impl
+	// follows the write-site taxonomy (materialize code-only) per arch's gate; the
+	// tension is routed for a worked example.
+	var storeErr *ComputeError
 	if err != nil {
-		return nil, err
-	}
-	// v3.19c Part A M3 boundary 3: store→tree crosses the compute→non-compute
-	// boundary. Materialize an in-flight *constructedValue to a bare entity.
-	valueVal, err = materialize(valueVal, ctx.ContentStore)
-	if err != nil {
-		return nil, err
-	}
-	valueEnt, ok := valueVal.(entity.Entity)
-	if !ok {
-		// Wrap a bare primitive in primitive/any so it has an entity form
-		// (mirrors the wire shape primitive/* use for bare values).
-		raw, encErr := ecf.Encode(valueVal)
-		if encErr != nil {
-			return nil, newComputeError(ErrTypeMismatch,
-				fmt.Sprintf("cannot encode store value: %v", encErr))
+		ce, isCE := err.(*ComputeError)
+		if !isCE {
+			return nil, err
 		}
-		valueEnt, err = entity.NewEntity("primitive/any", raw)
+		storeErr = ce
+	} else if ce, isErr := computeErrorFromValue(valueVal); isErr {
+		storeErr = ce
+	}
+
+	var valueEnt entity.Entity
+	if storeErr != nil {
+		valueEnt, err = storeErr.ToMaterializedEntity()
 		if err != nil {
 			return nil, err
+		}
+	} else {
+		// v3.19c Part A M3 boundary 3: store→tree crosses the compute→non-compute
+		// boundary. Materialize an in-flight *constructedValue to a bare entity.
+		valueVal, err = materialize(valueVal, ctx.ContentStore)
+		if err != nil {
+			return nil, err
+		}
+		var ok bool
+		valueEnt, ok = valueVal.(entity.Entity)
+		if !ok {
+			// Wrap a bare primitive in primitive/any so it has an entity form
+			// (mirrors the wire shape primitive/* use for bare values).
+			raw, encErr := ecf.Encode(valueVal)
+			if encErr != nil {
+				return nil, newComputeError(ErrTypeMismatch,
+					fmt.Sprintf("cannot encode store value: %v", encErr))
+			}
+			valueEnt, err = entity.NewEntity("primitive/any", raw)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
