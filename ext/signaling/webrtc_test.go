@@ -2,8 +2,11 @@ package signaling
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"testing"
+
+	"github.com/mr-tron/base58"
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/types"
@@ -233,6 +236,102 @@ func TestVerifyCoordinationSignatureRejectsWrongKeyAndTamper(t *testing.T) {
 	}
 }
 
+// One key MUST yield exactly one peer-id, and verification MUST derive it
+// rather than decode it from the wire.
+//
+// This pins Go against a procedure the DRAFT coordination-envelope proposal
+// specifies literally: "decode `signer` → (key_type, hash_type, digest); check
+// digest == Hash_{hash_type}(public_key)". Taking hash_type from the envelope
+// makes the peer-id MALLEABLE — one Ed25519 key satisfies that check under both
+// `0x01‖0x00‖pk` (identity, canonical) and `0x01‖0x01‖SHA-256(pk)`. Two ids,
+// one key, and the holder picks which. Everything downstream sorts peer-ids:
+// PairKey picks the bucket, Impolite picks the glare winner, §6.4 skip-own
+// decides whether an entity is your own. A peer that can choose its id can
+// choose its negotiation role, split the rendezvous bucket, and fail to
+// recognize its own offer.
+//
+// Go is immune because VerifyCoordinationSignature derives via
+// PeerIDFromPublicKey, which uses CanonicalHashType(key_type) and never reads a
+// wire-supplied hash_type. That immunity is incidental today — nothing states
+// it — so it gets a test before we build the envelope parser to that text.
+func TestPeerIDIsDerivedCanonicallyNotDecodedFromTheWire(t *testing.T) {
+	kp, canonical := testKeypair(t)
+	pub := kp.PublicKeyBytes()
+
+	// The alternate encoding, hand-built: Go has NO exported API that mints it
+	// (PeerIDFromPublicKeyWithHashType refuses a non-identity hash_type for
+	// Ed25519), which is the SPEC-AMBIGUITIES #67 finding in executable form —
+	// an id §6.3's literal names and this implementation cannot produce.
+	sum := sha256.Sum256(pub)
+	alt := base58.Encode(append([]byte{crypto.KeyTypeEd25519, crypto.HashTypeSHA256}, sum[:]...))
+
+	if alt == canonical {
+		t.Fatal("the two encodings collided; this test's premise is gone")
+	}
+	// Logged so `go test -run ... -v` doubles as the reproduction routed to
+	// arch: one key, two ids that both satisfy the draft's step 2.
+	t.Logf("one Ed25519 key, two §1.5 encodings that both satisfy a wire-hash_type check:")
+	t.Logf("  canonical (0x01||0x00||pk)      = %s", canonical)
+	t.Logf("  alternate (0x01||0x01||sha(pk)) = %s", alt)
+
+	sid, err := GenerateSessionID()
+	if err != nil {
+		t.Fatalf("GenerateSessionID: %v", err)
+	}
+	e, err := types.WebRTCOfferData{SDP: "v=0", SessionID: sid}.ToEntity()
+	if err != nil {
+		t.Fatalf("ToEntity: %v", err)
+	}
+	sig := kp.Sign(e.ContentHash.Bytes())
+
+	// A genuinely-signed blob still resolves to the canonical id and nothing
+	// else. There is no input by which a holder of this key reaches `alt`.
+	signer, err := VerifyCoordinationSignature(e, pub, kp.KeyType, sig)
+	if err != nil {
+		t.Fatalf("VerifyCoordinationSignature: %v", err)
+	}
+	if signer.PeerID != canonical {
+		t.Fatalf("derived %q, want the canonical %q", signer.PeerID, canonical)
+	}
+	if signer.PeerID == alt {
+		t.Fatal("verification resolved to the SHA-256-form id — the wire hash_type was honored")
+	}
+
+	// And the §6.1 claim path refuses the alternate rather than accepting it as
+	// an equally-valid spelling of the same identity.
+	if _, err := VerifyClaimedSigner(e, pub, kp.KeyType, sig, alt); !errors.Is(err, ErrSignerMismatch) {
+		t.Errorf("claim under the alternate encoding = %v, want ErrSignerMismatch", err)
+	}
+
+	// The consequence, stated where it bites. Both encodings are the same
+	// length, so neither is a prefix of the other and one strictly precedes the
+	// other; a counterpart sorting between them therefore yields OPPOSITE glare
+	// roles for the same key. Constructed rather than sampled — a random
+	// counterpart lands between them only sometimes, and a test that only
+	// sometimes demonstrates its point is not a test.
+	lo, hi := canonical, alt
+	if hi < lo {
+		lo, hi = hi, lo
+	}
+	between := lo + "\x00" // > lo, and < hi since they differ before the end
+	if !(between > lo && between < hi) {
+		t.Fatalf("constructed counterpart is not between the two encodings")
+	}
+	asLo, err := Impolite(lo, between)
+	if err != nil {
+		t.Fatalf("Impolite: %v", err)
+	}
+	asHi, err := Impolite(hi, between)
+	if err != nil {
+		t.Fatalf("Impolite: %v", err)
+	}
+	if asLo == asHi {
+		t.Fatalf("both encodings gave impolite=%v; the sort divergence should be total here", asLo)
+	}
+	// asLo=true, asHi=false: one key, two ids, and the holder picks whether its
+	// offer wins the glare. That is what a wire-supplied hash_type would buy.
+}
+
 // The native §6.1 path additionally cross-checks the payload's claimed
 // initiator/responder against the derived id. The §6.5 payloads have no such
 // field, which is exactly why the signature is their only identity source.
@@ -339,6 +438,85 @@ func TestBucketReadsAreSessionScoped(t *testing.T) {
 	}
 	if got := CollectWebRTCCandidates(bucket, absent); got == nil || len(got) != 0 {
 		t.Errorf("CollectWebRTCCandidates(absent) = %v, want a non-nil empty slice", got)
+	}
+}
+
+// --- trickle gating (the provisional-session window) ------------------------
+
+// The predicate, stated as the table of every state a peer can actually be in.
+// The row that matters is offered+rollback: a two-term `offered || answered`
+// gate passes it, which is the gap this test exists to hold closed.
+func TestMayTrickleOnlyUnderASettledSession(t *testing.T) {
+	cases := []struct {
+		name  string
+		state TrickleState
+		want  bool
+		why   string
+	}{
+		{"prospective answerer, nothing sent", TrickleState{}, false,
+			"session is provisional; the counterpart will never query it"},
+		{"offered, no glare", TrickleState{Offered: true}, true,
+			"my offer carries my session; the counterpart correlates on it"},
+		{"answered after adopting theirs", TrickleState{Answered: true}, true,
+			"adopted the offerer's session; final"},
+		{"offered, glare, I am polite and conceding", TrickleState{Offered: true, Rollback: true}, false,
+			"my session is already abandoned; `offered || answered` would let these out"},
+		{"rolled back and answered", TrickleState{Offered: true, Answered: true, Rollback: true}, true,
+			"adoption completed; Rollback is stale once Answered"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := MayTrickle(tc.state); got != tc.want {
+				t.Errorf("MayTrickle(%+v) = %v, want %v — %s", tc.state, got, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+// The consequence itself, pinned independently of the predicate. This is the
+// test that would still fail if MayTrickle were deleted and its callers went
+// back to posting eagerly: a candidate posted under a session that is later
+// abandoned is not late, it is gone — the settled-session read cannot see it,
+// and nothing anywhere reports an error.
+func TestCandidatesPostedUnderAnAbandonedSessionAreLostNotLate(t *testing.T) {
+	mine, err := GenerateSessionID()
+	if err != nil {
+		t.Fatalf("GenerateSessionID: %v", err)
+	}
+	theirs, err := GenerateSessionID()
+	if err != nil {
+		t.Fatalf("GenerateSessionID: %v", err)
+	}
+
+	// I offered, so `offered || answered` is already true. Then I collect their
+	// offer and ResolveGlare makes me the polite one: my session is abandoned.
+	lo, hi := "peer-aaa", "peer-zzz"
+	outcome, err := ResolveGlare(hi, lo)
+	if err != nil {
+		t.Fatalf("ResolveGlare: %v", err)
+	}
+	if outcome != GlareRollBack {
+		t.Fatalf("ResolveGlare(hi, lo) = %v, want GlareRollBack — the premise of this test", outcome)
+	}
+	if MayTrickle(TrickleState{Offered: true, Rollback: true}) {
+		t.Fatal("MayTrickle allowed a post under the session being rolled back")
+	}
+
+	// Post anyway — this is the defect being reproduced, not the intended path.
+	bucket := []CollectedMessage{
+		{Kind: KindWebRTCOffer, WebRTCOffer: &types.WebRTCOfferData{SDP: "theirs", SessionID: theirs}},
+		{Kind: KindWebRTCCandidate, WebRTCCandidate: &types.WebRTCCandidateData{Candidate: "c-premature", SessionID: mine}},
+	}
+
+	// After adoption the exchange is correlated by THEIR session.
+	if got := CollectWebRTCCandidates(bucket, theirs); len(got) != 0 {
+		t.Fatalf("collected %d candidates under the adopted session, want 0 — "+
+			"the premature post is stranded under the abandoned one", len(got))
+	}
+	// And it is not an error anywhere: the offer still reads fine. That silence
+	// is the whole hazard.
+	if _, ok := FindWebRTCOffer(bucket, theirs); !ok {
+		t.Fatal("the counterpart's offer must still be found — the loss is silent, not a fault")
 	}
 }
 

@@ -54,6 +54,8 @@ type Coordinator struct {
 	carrier CarrierFunc
 	keyFor  KeyFunc
 
+	trust signaling.VerificationPolicy
+
 	poll            time.Duration
 	crossingRetries int
 	dialTimeout     time.Duration
@@ -81,12 +83,56 @@ func WithExchangeTimeout(d time.Duration) Option {
 	return func(c *Coordinator) { c.exchangeTimeout = d }
 }
 
+// WithTrust overrides the §6.3 collect posture for this coordinator's punches.
+// See DefaultTrust for why the default is what it is and when it moves.
+func WithTrust(p signaling.VerificationPolicy) Option {
+	return func(c *Coordinator) { c.trust = p }
+}
+
+// DefaultTrust is the §6.3 posture of the native punch, named once here rather
+// than defaulted inside the party — the Go counterpart of entity-core-rust's
+// `PUNCH_TRUST` (core/peer/src/punch_establisher.rs).
+//
+// **THE §6.1 FLAG DAY IS CLOSED. This was the last line in it.** An unsealed
+// coordination message is now refused, which is what §6.3's MUST asks for and
+// what the tolerant window existed to reach without breaking anyone on the way.
+//
+// What licensed the flip, in order:
+//
+//   - Both implementations read AND seal. Go at `d56a690`, rust immediately
+//     after; the migration window it existed for is over.
+//   - rust raised their `PUNCH_TRUST` first, on a live cross-impl sealed punch
+//     with both seats over the agreed CLI/JSON contract.
+//   - Our own collector was then proven to ENFORCE, not merely to interoperate:
+//     `signaling-punch --trust require` completes Go↔Go over a live node, and a
+//     bare depositor built from our own pre-flip commit is refused BY NAME
+//     rather than by timeout. A tolerant run could never have shown this — it
+//     admits an unsealed counterpart, so it cannot distinguish a peer that
+//     sealed from one that never did. Require is the assay.
+//   - The refusal is observable. `core/peer`'s §10.3 seam used to discard the
+//     reason entirely, which would have made this flip present as a NAT problem
+//     the first time it fired. Fixed before flipping, not after.
+//
+// **`entity-core-py` is unaffected**: it implements the §4 signaling client but
+// does not punch (`signaling/coordination.py` says so, and carries no
+// signed-blob support), so it never enters the path this constant governs. When
+// Python does build the punch it will need to seal from the start — there is no
+// tolerant window left to arrive into, and that is deliberate.
+//
+// The bound this replaces is worth keeping in view rather than deleting, since
+// it is why the window was survivable at all: THE KEY INTRODUCES, IT NEVER
+// AUTHORIZES. A punched connection still runs the full §7.4 handshake and the
+// capability flow, so even a forged coordination message only ever bought a
+// wasted dial, never an authorized stranger. That made the migration safe; it
+// was never a reason to leave it open.
+const DefaultTrust = signaling.VerifyRequire
+
 // New builds a Coordinator for p. A nil keyFor defaults to pair mode.
 func New(p *peer.Peer, gather GatherFunc, carrier CarrierFunc, keyFor KeyFunc, opts ...Option) *Coordinator {
 	if keyFor == nil {
 		keyFor = DefaultKeyFunc
 	}
-	c := &Coordinator{peer: p, gather: gather, carrier: carrier, keyFor: keyFor}
+	c := &Coordinator{peer: p, gather: gather, carrier: carrier, keyFor: keyFor, trust: DefaultTrust}
 	for _, o := range opts {
 		o(c)
 	}
@@ -140,7 +186,7 @@ func (c *Coordinator) Establish(ctx context.Context, peerID crypto.PeerID) (*pee
 // initiator's peer-id. A background loop calls this repeatedly to stay reachable;
 // an exchange timeout (no request arrived) is a normal, non-fatal outcome.
 func (c *Coordinator) Respond(ctx context.Context, key []byte) (crypto.PeerID, error) {
-	party, err := c.partyForKey(ctx, c.peer.PeerID(), key)
+	party, err := c.partyForKey(ctx, key)
 	if err != nil {
 		return "", err
 	}
@@ -170,12 +216,12 @@ func (c *Coordinator) party(ctx context.Context, self, peerID crypto.PeerID) (*s
 	if err != nil {
 		return nil, fmt.Errorf("punch: derive rendezvous key for %s: %w", peerID, err)
 	}
-	return c.partyForKey(ctx, self, key)
+	return c.partyForKey(ctx, key)
 }
 
 // partyForKey assembles a PunchParty for an already-derived key: it gathers this
 // peer's candidates + shared bind and builds the carrier.
-func (c *Coordinator) partyForKey(ctx context.Context, self crypto.PeerID, key []byte) (*signaling.PunchParty, error) {
+func (c *Coordinator) partyForKey(ctx context.Context, key []byte) (*signaling.PunchParty, error) {
 	local, cands, err := c.gather(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("punch: gather candidates: %w", err)
@@ -185,9 +231,15 @@ func (c *Coordinator) partyForKey(ctx context.Context, self crypto.PeerID, key [
 		return nil, fmt.Errorf("punch: build carrier: %w", err)
 	}
 	return &signaling.PunchParty{
-		Carrier:         carrier,
-		Key:             key,
-		SelfID:          self.String(),
+		Carrier: carrier,
+		Key:     key,
+		// The signing key and the identity are ONE source — the peer's own
+		// keypair, which is also what `self` was derived from. The party derives
+		// its id from it rather than being handed a string beside it, so a
+		// coordinator cannot wire a peer that signs as one identity and addresses
+		// itself as another.
+		Identity:        c.peer.Keypair(),
+		Trust:           c.trust,
 		LocalCands:      cands,
 		LocalAddr:       local,
 		Poll:            c.poll,

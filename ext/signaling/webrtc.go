@@ -130,7 +130,10 @@ const (
 	// same assignment — one role decision, not two.
 	GlareKeepMine GlareOutcome = iota
 	// GlareRollBack — I am `hi` (polite): I roll back my own offer and answer
-	// theirs.
+	// theirs. Rolling back ABANDONS my session_id: from here the exchange is
+	// correlated by the offerer's, and anything I already posted under mine is
+	// stranded where no counterpart will look for it. That is what MayTrickle
+	// exists to prevent — see its comment for why the loss is silent.
 	GlareRollBack
 )
 
@@ -169,6 +172,74 @@ func PairShouldWaitForOffer(myPeerID, theirPeerID string) (bool, error) {
 		return false, err
 	}
 	return !impolite, nil
+}
+
+// TrickleState is what a peer knows about its OWN session at the moment it is
+// about to post gathered ICE candidates. The three flags are the only inputs
+// the rule needs; they are a struct rather than three positional bools because
+// a caller that transposes two of them gets a silent candidate leak, not a
+// compile error.
+type TrickleState struct {
+	// Offered — this peer has posted its own offer, under its own session_id.
+	Offered bool
+	// Answered — this peer has adopted the counterpart's session_id and
+	// answered their offer. Once true the session is final, however it was
+	// reached (never offered, or offered and rolled back).
+	Answered bool
+	// Rollback — this peer holds an un-answered offer of its own AND has
+	// collected a counterpart's offer that ResolveGlare resolved as
+	// GlareRollBack. Meaningful only while Offered && !Answered; it marks the
+	// window in which this peer's own session_id is already doomed but the
+	// counterpart's has not been adopted yet.
+	Rollback bool
+}
+
+// MayTrickle reports whether this peer's session_id is SETTLED — i.e. whether a
+// candidate posted now will be correlated by the counterpart, or silently lost.
+//
+// WHY THIS IS A RULE AND NOT A CALLER'S DETAIL. Candidates correlate on exact
+// session_id (CollectWebRTCCandidates), and gathering is driven by the ICE
+// agent's clock, not by the signaling exchange — so a peer can have candidates
+// in hand BEFORE its session is final. Posting them then is not "early", it is
+// LOST: the counterpart queries the settled session and never asks for the
+// provisional one, and a substrate that drains its gathering queue destructively
+// has no second chance to re-post them. Every individual step reports success —
+// the post succeeds, the collect succeeds and returns the offer, the handshake
+// simply never completes — which is the §6.4 failure class the spec calls
+// miserable to diagnose.
+//
+// THE TWO WINDOWS. There are exactly two ways to hold a session nobody will
+// query, and they are reached from opposite directions:
+//
+//  1. Never offered. A prospective answerer minted a session for the offer it
+//     has not made, and will adopt the offerer's the moment it collects one.
+//     (Reported by entity-core-rust, 67e6d96, and fixed there as
+//     `!offered && !answered`.)
+//  2. Offered, then conceding. A peer that DID offer, hit a glare, and drew
+//     GlareRollBack: its session is already abandoned in favor of the
+//     offerer's, but it has not answered yet. `offered || answered` reads TRUE
+//     across this whole window, so a two-term gate lets candidates out under a
+//     session the peer itself is in the middle of discarding.
+//
+// Window 2 is unreachable in `pair` mode — PairShouldWaitForOffer pre-assigns
+// the roles, so exactly one peer offers and no glare occurs — which is why it
+// does not appear in a pair-scoped negotiation loop. It opens in tag / secret /
+// lobby, where the counterpart is unknown until it speaks and ResolveGlare is
+// the only thing standing between two offers.
+//
+// Browsers happen to gather only after setLocalDescription, which lands after
+// adoption on both paths, so both windows are latent against a browser
+// substrate and immediate against anything that pre-gathers. That is a property
+// of the substrate's timing, not of this rule — which is exactly why the rule
+// is stated here rather than left to hold by accident.
+func MayTrickle(s TrickleState) bool {
+	if s.Answered {
+		return true
+	}
+	if !s.Offered {
+		return false
+	}
+	return !s.Rollback
 }
 
 // VerifiedSigner is proof that §6.3's two checks passed for one coordination

@@ -56,6 +56,16 @@ type CollectedMessage struct {
 	WebRTCOffer     *types.WebRTCOfferData
 	WebRTCAnswer    *types.WebRTCAnswerData
 	WebRTCCandidate *types.WebRTCCandidateData
+
+	// Signer is the §6.3-verified signer, set only by ClassifyCollected and only
+	// when the blob arrived as a container that verified. An empty PeerID means
+	// the message was NOT authenticated — either it arrived bare during the
+	// migration window, or it was classified by a path that does not verify.
+	//
+	// This is the ONLY identity source for the §6.5 payloads: offer, answer and
+	// candidate carry no peer-id field, so before the container existed §6.4's
+	// skip-own had no referent for them at all.
+	Signer VerifiedSigner
 }
 
 // ToBlob serializes a coordination entity into the opaque blob the node stores
@@ -128,33 +138,63 @@ func Classify(e entity.Entity) CollectedMessage {
 	}
 }
 
+// authorOf returns the peer-id §6.4's skip-own is evaluated against, and whether
+// that id was VERIFIED (§6.3) rather than merely asserted.
+//
+// THE VERIFIED SIGNER WINS WHENEVER THERE IS ONE. `initiator` / `responder` are
+// wire fields any depositor can write, so before the container existed the
+// claimed field was the only referent available and skip-own was a check against
+// a string the counterpart chose. It is not a check that FAILS in the ordinary
+// case — it is a check that an adversary can trivially pass or trivially force,
+// and a verified identity is sitting right beside it once a container opens.
+//
+// The two can never disagree on a verified message: ClassifyCollected's step 3
+// refuses the blob before it ever reaches here if they do. So this is not a
+// tie-break, it is a preference for the sourced value over the asserted one, and
+// the bool lets a caller apply a policy to the difference rather than silently
+// treating the two as equivalent.
+func authorOf(m CollectedMessage) (peerID string, verified bool) {
+	if m.Signer.PeerID != "" {
+		return m.Signer.PeerID, true
+	}
+	claim, _ := claimedPeerID(m)
+	return claim, false
+}
+
 // FindResponse finds the response to MY exchange in a collected bucket (§4.5),
 // applying two MUSTs: nonce echo (in lobby/tag the bucket is shared, so someone
 // else's response is not mine, and a fresh answer is not one processed two polls
 // ago) AND not-my-own-peer-id (a peer that answered its own request would
 // "succeed" at meeting itself — miserable to diagnose, every step reports
 // success). Returns the first match in bucket order (deposit order, oldest
-// first).
-func FindResponse(messages []CollectedMessage, myNonce []byte, myPeerID string) (*types.ConnectResponseData, bool) {
+// first), together with its verified signer — empty when the message arrived
+// bare, which is what a caller's VerificationPolicy acts on.
+func FindResponse(messages []CollectedMessage, myNonce []byte, myPeerID string) (*types.ConnectResponseData, VerifiedSigner, bool) {
 	for _, m := range messages {
-		if m.Kind == KindConnectResponse &&
-			bytes.Equal(m.Response.Nonce, myNonce) &&
-			m.Response.Responder != myPeerID {
-			return m.Response, true
+		if m.Kind != KindConnectResponse || !bytes.Equal(m.Response.Nonce, myNonce) {
+			continue
 		}
+		if author, _ := authorOf(m); author == myPeerID {
+			continue
+		}
+		return m.Response, m.Signer, true
 	}
-	return nil, false
+	return nil, VerifiedSigner{}, false
 }
 
 // FindRequest finds a request addressed at this rendezvous that I should answer
-// — anyone's but my own (§4.5). Returns the first match in bucket order; a lobby
-// bucket may hold several, and which to answer is peer policy this layer does
-// not decide.
-func FindRequest(messages []CollectedMessage, myPeerID string) (*types.ConnectRequestData, bool) {
+// — anyone's but my own (§4.5). Returns the first match in bucket order together
+// with its verified signer; a lobby bucket may hold several, and which to answer
+// is peer policy this layer does not decide.
+func FindRequest(messages []CollectedMessage, myPeerID string) (*types.ConnectRequestData, VerifiedSigner, bool) {
 	for _, m := range messages {
-		if m.Kind == KindConnectRequest && m.Request.Initiator != myPeerID {
-			return m.Request, true
+		if m.Kind != KindConnectRequest {
+			continue
 		}
+		if author, _ := authorOf(m); author == myPeerID {
+			continue
+		}
+		return m.Request, m.Signer, true
 	}
-	return nil, false
+	return nil, VerifiedSigner{}, false
 }

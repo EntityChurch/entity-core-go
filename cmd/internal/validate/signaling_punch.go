@@ -66,8 +66,8 @@ func runSignalingPunch(ctx context.Context, r *CheckRunner, sigA, sigB *signalin
 			return FailCheck("derive pair key: " + err.Error())
 		}
 		var dialedA, dialedB atomic.Bool
-		partyA := punchParty(sigA, key, idA, localA, &dialedA)
-		partyB := punchParty(sigB, key, idB, localB, &dialedB)
+		partyA := punchParty(sigA, key, peerA.Keypair(), localA, &dialedA)
+		partyB := punchParty(sigB, key, peerB.Keypair(), localB, &dialedB)
 
 		// Bound the punch so a stall never hangs the whole validator.
 		pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -180,11 +180,16 @@ func reserveLoopbackPort() (*net.TCPAddr, error) {
 // punchParty assembles a PunchParty on the given carrier with a recording dial
 // (so both-fire is observable) and the same tight loopback tunables the punch
 // tests use.
-func punchParty(carrier signaling.Carrier, key []byte, selfID string, local *net.TCPAddr, dialed *atomic.Bool) *signaling.PunchParty {
+func punchParty(carrier signaling.Carrier, key []byte, identity crypto.Keypair, local *net.TCPAddr, dialed *atomic.Bool) *signaling.PunchParty {
 	return &signaling.PunchParty{
 		Carrier: carrier,
 		Key:     key,
-		SelfID:  selfID,
+		// The party derives its own id from this keypair and seals every §6.1
+		// deposit with it (§6.3). Tolerant on the read side for the duration of
+		// the flag day — this check has to keep meeting a counterpart that has
+		// not flipped.
+		Identity: identity,
+		Trust:    signaling.VerifyTolerant,
 		LocalCands: []types.NetworkCandidateData{
 			{Type: types.CandidateTypeSrflx, Substrate: types.CandidateSubstrateTCP, Address: local.String()},
 		},

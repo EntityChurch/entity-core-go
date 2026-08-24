@@ -28,26 +28,31 @@ type memCarrier struct {
 
 func newMemCarrier() *memCarrier { return &memCarrier{buckets: make(map[string][][]byte)} }
 
-func (m *memCarrier) OfferMessage(_ context.Context, key []byte, e entity.Entity) (uint, error) {
-	blob, err := signaling.ToBlob(e)
-	if err != nil {
-		return 0, err
-	}
+func (m *memCarrier) Offer(_ context.Context, key, message []byte) (uint, error) {
 	m.mu.Lock()
-	m.buckets[string(key)] = append(m.buckets[string(key)], blob)
+	m.buckets[string(key)] = append(m.buckets[string(key)], append([]byte(nil), message...))
 	m.mu.Unlock()
 	return 200, nil
 }
 
-func (m *memCarrier) CollectMessages(_ context.Context, key []byte) (uint, []signaling.CollectedMessage, error) {
+// CollectMessagesVerified runs the real §6.4 read path over the stored bytes,
+// keyed by the bucket they are filed under — the stub stores blobs and verifies
+// nothing itself, exactly like the node it stands in for (§4.4).
+func (m *memCarrier) CollectMessagesVerified(_ context.Context, key []byte) (uint, []signaling.CollectedMessage, []error, error) {
 	m.mu.Lock()
 	blobs := append([][]byte(nil), m.buckets[string(key)]...)
 	m.mu.Unlock()
 	msgs := make([]signaling.CollectedMessage, 0, len(blobs))
+	var skipped []error
 	for _, b := range blobs {
-		msgs = append(msgs, signaling.ClassifyBlob(b))
+		msg, err := signaling.ClassifyCollected(b, key)
+		if err != nil {
+			skipped = append(skipped, err)
+			continue
+		}
+		msgs = append(msgs, msg)
 	}
-	return 200, msgs, nil
+	return 200, msgs, skipped, nil
 }
 
 func buildPeer(t *testing.T, name string) *peer.Peer {

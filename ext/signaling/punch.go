@@ -3,10 +3,12 @@ package signaling
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"time"
 
+	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/types"
 )
@@ -29,19 +31,47 @@ import (
 // (PerformConnect), the responder serves (ServeConn), so exactly one HELLO is
 // sent.
 
+// ErrNoIdentity reports a party with no signing keypair. Every §6.1 deposit is
+// sealed, so a punch without an identity cannot make its first move — and the
+// failure is raised at preflight rather than at the deposit, where it would read
+// as a carrier fault.
+var ErrNoIdentity = errors.New("signaling: punch party has no Identity keypair — every §6.1 deposit is sealed (§6.3)")
+
+// ErrUnverifiedCounterpart reports a message that WAS ours to act on and did not
+// arrive sealed, under a party demanding §6.3.
+//
+// IT IS RAISED, NOT SKIPPED, AND THAT IS THE WHOLE POINT OF ITS EXISTENCE. §6.4
+// skips a blob that fails a check, and for a stranger's blob in a shared bucket
+// that is right — it cannot be allowed to end someone else's exchange. But a
+// message that already passed the nonce echo and the expected-peer filter is not
+// a stranger's: it is OUR answer, arriving in the framing we no longer accept.
+// Skipping it leaves the initiator polling a bucket that already holds its reply
+// and eventually reporting a timeout — which reads as "nobody replied", which
+// reads as a NAT problem, and gets diagnosed a week later as a migration state
+// nobody was looking at. The policy is therefore applied AFTER the filters, so
+// only a message that was ours to act on can raise this. (entity-core-rust's
+// `VerificationUnavailable`, b1eb4b5 — same rule, same reasoning.)
+var ErrUnverifiedCounterpart = errors.New("signaling: counterpart deposited an unsealed §6.1 message and this party requires §6.3")
+
 // DialFunc dials remote over TCP from the bound local address. Production passes
 // dialReusePort (SO_REUSEPORT, §7.3); tests inject a loopback dial. A nil DialFunc
 // in PunchParty defaults to dialReusePort.
 type DialFunc func(ctx context.Context, local *net.TCPAddr, remote string) (net.Conn, error)
 
-// Carrier is the punch's view of the rendezvous service (§4): deposit a
-// coordination entity as an opaque blob, and read a bucket back classified. The
-// live signaling *Client satisfies it directly (OfferMessage / CollectMessages),
-// and an in-memory stub satisfies it for tests — the node is "an opaque blob
-// store" (§4.4), so a minimal conforming store is a faithful stand-in.
+// Carrier is the punch's view of the rendezvous service (§4): deposit an opaque
+// blob, and read a bucket back classified AND verified. The live signaling
+// *Client satisfies it directly (Offer / CollectMessagesVerified), and an
+// in-memory stub satisfies it for tests — the node is "an opaque blob store"
+// (§4.4), so a minimal conforming store is a faithful stand-in.
+//
+// IT DEPOSITS BYTES, NOT AN ENTITY, and that is the shape of the flag day. The
+// punch now seals every deposit into a §6.3 container itself (see deposit), so
+// handing the carrier an entity to frame would put the framing decision in the
+// one place that does not hold the signing key. The carrier stayed an entity
+// interface for exactly as long as the deposit was bare.
 type Carrier interface {
-	OfferMessage(ctx context.Context, key []byte, e entity.Entity) (uint, error)
-	CollectMessages(ctx context.Context, key []byte) (uint, []CollectedMessage, error)
+	Offer(ctx context.Context, key, message []byte) (uint, error)
+	CollectMessagesVerified(ctx context.Context, key []byte) (uint, []CollectedMessage, []error, error)
 }
 
 // Punch tunables. All are §7.2 implementation-defined (local, MAY diverge) —
@@ -70,12 +100,40 @@ const (
 // PunchParty is one side's inputs to a punch. LocalCands are this peer's gathered
 // candidates (host/srflx/relay, §6.7.3) to advertise; LocalAddr is the shared
 // local endpoint the punch dials MUST bind — the SAME socket whose mapping
-// produced the srflx (§7.3), or the srflx candidate is a lie. Carrier, Key, and
-// SelfID come from rendezvous (§3).
+// produced the srflx (§7.3), or the srflx candidate is a lie. Carrier and Key
+// come from rendezvous (§3).
 type PunchParty struct {
-	Carrier    Carrier
-	Key        []byte
-	SelfID     string
+	Carrier Carrier
+	Key     []byte
+
+	// Identity is this peer's keypair — BOTH who it says it is and what it signs
+	// with, deliberately not two fields.
+	//
+	// entity-core-rust reached the same place from the other side: they take the
+	// signing key from the carrier's own identity rather than a second injected
+	// keypair, and added an `IdentitySkew` refusal for a party whose `self_id`
+	// and signing key disagree. The failure that check exists to catch is vicious
+	// precisely because it is invisible from either end alone — a peer signs its
+	// offers as one identity while the node logs `caller=` another, the node sees
+	// one id, the counterpart sees the other, and every individual step reports
+	// success while the bucket is derived from one id and the signature proves a
+	// different one. Silent never-meet, `included_count=0`, nothing in the error
+	// path.
+	//
+	// Go had a `SelfID string` beside the key, which is exactly the two-source
+	// shape that makes the check necessary. Removing it is strictly better than
+	// checking it: the id is DERIVED here (selfID), so there is no second source
+	// to disagree, and the skew is not refused at runtime — it is unrepresentable.
+	// This is the same argument as OpenBlob's derived-not-decoded peer-id, applied
+	// to our own end of the wire.
+	Identity crypto.Keypair
+
+	// Trust is the §6.3 posture for everything this party COLLECTS. Required —
+	// the zero value is not a policy (ErrPolicyUnset). Deposits are not governed
+	// by it: this party always seals (see deposit), because a flag day where the
+	// depositor is configurable is a flag day that never ends.
+	Trust VerificationPolicy
+
 	LocalCands []types.NetworkCandidateData
 	LocalAddr  *net.TCPAddr
 	Dial       DialFunc // nil → dialReusePort
@@ -97,6 +155,74 @@ type PunchParty struct {
 	// harness asserting "the tie-break executed" without this is asserting a
 	// negative it cannot see.
 	OnSelect func(dialedFormed, acceptedFormed, keptDialed bool)
+
+	// OnSkip observes each blob the §6.4 read rules dropped, with its taxonomy
+	// error. Nil-default and purely observational.
+	//
+	// The folded §6.3 says the skip is wire-silent but SHOULD be locally
+	// observable, and this is that SHOULD. The reason it is worth a hook rather
+	// than a dropped return value: the Ed448 hardcode in a sibling impl survived
+	// precisely BECAUSE a failed check is skipped and never raised — it locked
+	// out an identity that implementation itself minted, and stayed invisible
+	// until a vector row crossed it. Silence in the implementation is how that
+	// class of defect lives.
+	OnSkip func(error)
+}
+
+// selfID is this peer's canonical id, derived from Identity rather than stored.
+// See the Identity field: one source, so there is nothing to disagree with.
+func (pp *PunchParty) selfID() string { return pp.Identity.PeerID().String() }
+
+// preflight refuses a party that cannot run, before it deposits anything.
+//
+// Both checks catch omissions — a zero keypair and a zero policy are what a
+// struct literal produces when a field is forgotten — so they are raised at the
+// entry points where a human wrote the literal, not deep inside a poll where
+// they would surface as "nobody replied."
+func (pp *PunchParty) preflight() error {
+	if pp.Identity.IsZero() {
+		return ErrNoIdentity
+	}
+	if pp.Trust != VerifyTolerant && pp.Trust != VerifyRequire {
+		return ErrPolicyUnset
+	}
+	return nil
+}
+
+// deposit seals one coordination entity into a bucket-bound §6.3 container and
+// offers it — the §6.1 half of the flag day.
+//
+// EVERY §6.1 DEPOSIT IS SEALED, unconditionally. §6.1 needs this more than §6.5
+// did, for a reason §6.5 does not have: connect-request and connect-response
+// carry `initiator` / `responder` AS WIRE FIELDS, so an unverified deposit lets
+// anyone assert either id — and the expected-peer filter in awaitResponse is
+// then comparing against a string the attacker wrote. The §6.5 payloads carry no
+// peer-id at all, so there was nothing there to forge.
+func (pp *PunchParty) deposit(ctx context.Context, e entity.Entity) (uint, error) {
+	sealed, err := SealBlob(e, pp.Identity, pp.Key)
+	if err != nil {
+		return 0, fmt.Errorf("punch: seal deposit: %w", err)
+	}
+	blob, err := SealedToBlob(sealed)
+	if err != nil {
+		return 0, fmt.Errorf("punch: frame sealed deposit: %w", err)
+	}
+	return pp.Carrier.Offer(ctx, pp.Key, blob)
+}
+
+// collect reads the bucket under this party's policy, reporting every skip to
+// OnSkip.
+func (pp *PunchParty) collect(ctx context.Context) ([]CollectedMessage, error) {
+	_, msgs, skipped, err := pp.Carrier.CollectMessagesVerified(ctx, pp.Key)
+	if err != nil {
+		return nil, err
+	}
+	if pp.OnSkip != nil {
+		for _, e := range skipped {
+			pp.OnSkip(e)
+		}
+	}
+	return msgs, nil
 }
 
 func (pp *PunchParty) dial() DialFunc {
@@ -137,6 +263,9 @@ func (pp *PunchParty) exchangeTimeout() time.Duration {
 // identity check. A nil conn with nil error never happens — a failed punch is an
 // error, which the §10.3 seam maps to "fall through to relay."
 func (pp *PunchParty) Initiate(ctx context.Context, expectedID string) (net.Conn, error) {
+	if err := pp.preflight(); err != nil {
+		return nil, fmt.Errorf("punch: %w", err)
+	}
 	nonce, err := GenerateNonce()
 	if err != nil {
 		return nil, fmt.Errorf("punch: nonce: %w", err)
@@ -144,12 +273,12 @@ func (pp *PunchParty) Initiate(ctx context.Context, expectedID string) (net.Conn
 
 	// Step 2 (offer) — record send time for the rtt measurement (§7.2: the
 	// initiator's offer to the collect that returns the response).
-	reqEnt, err := types.ConnectRequestData{Candidates: pp.LocalCands, Initiator: pp.SelfID, Nonce: nonce}.ToEntity()
+	reqEnt, err := types.ConnectRequestData{Candidates: pp.LocalCands, Initiator: pp.selfID(), Nonce: nonce}.ToEntity()
 	if err != nil {
 		return nil, fmt.Errorf("punch: build connect-request: %w", err)
 	}
 	tSent := time.Now()
-	if status, err := pp.Carrier.OfferMessage(ctx, pp.Key, reqEnt); err != nil || status != 200 {
+	if status, err := pp.deposit(ctx, reqEnt); err != nil || status != 200 {
 		return nil, fmt.Errorf("punch: offer connect-request: status %d err %w", status, err)
 	}
 
@@ -167,7 +296,7 @@ func (pp *PunchParty) Initiate(ctx context.Context, expectedID string) (net.Conn
 	if err != nil {
 		return nil, fmt.Errorf("punch: build punch-sync: %w", err)
 	}
-	if status, err := pp.Carrier.OfferMessage(ctx, pp.Key, syncEnt); err != nil || status != 200 {
+	if status, err := pp.deposit(ctx, syncEnt); err != nil || status != 200 {
 		return nil, fmt.Errorf("punch: offer punch-sync: status %d err %w", status, err)
 	}
 	fireAt := time.Now().Add(time.Duration(d) * time.Millisecond)
@@ -185,17 +314,20 @@ func (pp *PunchParty) Initiate(ctx context.Context, expectedID string) (net.Conn
 // caller serves the conn with peer.ServeConn). The request is located by the
 // bucket-read rules (§6.4): a request from anyone but self, oldest first.
 func (pp *PunchParty) Respond(ctx context.Context) (net.Conn, string, error) {
+	if err := pp.preflight(); err != nil {
+		return nil, "", fmt.Errorf("punch: %w", err)
+	}
 	// Await a connect-request addressed at this rendezvous (not our own).
-	req, err := pp.awaitRequest(ctx)
+	req, initiator, err := pp.awaitRequest(ctx)
 	if err != nil {
 		return nil, "", err
 	}
 
-	respEnt, err := types.ConnectResponseData{Candidates: pp.LocalCands, Nonce: req.Nonce, Responder: pp.SelfID}.ToEntity()
+	respEnt, err := types.ConnectResponseData{Candidates: pp.LocalCands, Nonce: req.Nonce, Responder: pp.selfID()}.ToEntity()
 	if err != nil {
 		return nil, "", fmt.Errorf("punch: build connect-response: %w", err)
 	}
-	if status, err := pp.Carrier.OfferMessage(ctx, pp.Key, respEnt); err != nil || status != 200 {
+	if status, err := pp.deposit(ctx, respEnt); err != nil || status != 200 {
 		return nil, "", fmt.Errorf("punch: offer connect-response: status %d err %w", status, err)
 	}
 
@@ -210,11 +342,17 @@ func (pp *PunchParty) Respond(ctx context.Context) (net.Conn, string, error) {
 	if !ok {
 		return nil, "", fmt.Errorf("punch: initiator advertised no dialable candidate")
 	}
-	conn, err := pp.fire(ctx, fireAt, target, req.Initiator)
+	// The initiator id handed onward is the one awaitRequest authenticated — the
+	// §6.3 signer when the request arrived sealed, the claimed `initiator` field
+	// only in the bare window. It is the id the caller runs the §7.4 identity
+	// check against, so sourcing it from the signature rather than from a field
+	// the depositor wrote is the difference between checking an identity and
+	// checking a string somebody sent us.
+	conn, err := pp.fire(ctx, fireAt, target, initiator)
 	if err != nil {
 		return nil, "", err
 	}
-	return conn, req.Initiator, nil
+	return conn, initiator, nil
 }
 
 // fire sleeps until the scheduled instant, then opens the direct path to target
@@ -290,7 +428,7 @@ func (pp *PunchParty) fire(ctx context.Context, fireAt time.Time, target, peerID
 		accepted = <-acceptedCh
 	}
 
-	kept, loser := selectSocket(dialed, accepted, pp.SelfID < peerID)
+	kept, loser := selectSocket(dialed, accepted, pp.selfID() < peerID)
 	if pp.OnSelect != nil {
 		pp.OnSelect(dialed != nil, accepted != nil, kept != nil && kept == dialed)
 	}
@@ -392,20 +530,50 @@ func (pp *PunchParty) dialLoop(ctx context.Context, target string) net.Conn {
 	return nil
 }
 
+// requireSealed applies this party's §6.3 posture to a message that has ALREADY
+// passed every correlation filter — the last gate, never the first.
+//
+// The ordering is the rule, not an implementation detail: policy after the
+// filters means an unsealed blob can only ever raise ErrUnverifiedCounterpart if
+// it was ours to act on. A stranger's unsealed deposit in a shared lobby bucket
+// never reaches here — it fails the nonce echo or the skip-own first and is
+// skipped under §6.4, so it cannot end an exchange it was not part of. Getting
+// this backwards would hand any passer-by a way to kill a punch by depositing a
+// bare entity into a bucket it happened to know.
+func (pp *PunchParty) requireSealed(signer VerifiedSigner, what string) error {
+	if pp.Trust == VerifyRequire && signer.PeerID == "" {
+		return fmt.Errorf("punch: %w (%s)", ErrUnverifiedCounterpart, what)
+	}
+	return nil
+}
+
 // awaitResponse polls the carrier until expectedID's nonce-matched connect-
-// response appears or the exchange deadline elapses.
+// response appears or the exchange deadline elapses. Returns the response and
+// its authenticated responder id.
 func (pp *PunchParty) awaitResponse(ctx context.Context, nonce []byte, expectedID string) (*types.ConnectResponseData, error) {
 	deadline := time.Now().Add(pp.exchangeTimeout())
 	for {
-		_, msgs, err := pp.Carrier.CollectMessages(ctx, pp.Key)
+		msgs, err := pp.collect(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("punch: collect (response): %w", err)
 		}
-		if resp, ok := FindResponse(msgs, nonce, pp.SelfID); ok {
-			if expectedID != "" && resp.Responder != expectedID {
+		if resp, signer, ok := FindResponse(msgs, nonce, pp.selfID()); ok {
+			// The expected-peer filter runs against the SIGNER when the response
+			// arrived sealed. Comparing against `responder` — a field the
+			// depositor wrote — is a filter an impostor passes by typing the
+			// right name into it, which is the §6.1-specific exposure the
+			// container closes.
+			responder := signer.PeerID
+			if responder == "" {
+				responder = resp.Responder
+			}
+			if expectedID != "" && responder != expectedID {
 				// A different peer answered our shared-bucket request; keep waiting
 				// for the one we intend to reach (§6.4 correlate-by-identity).
 			} else {
+				if err := pp.requireSealed(signer, "connect-response"); err != nil {
+					return nil, err
+				}
 				return resp, nil
 			}
 		}
@@ -415,33 +583,50 @@ func (pp *PunchParty) awaitResponse(ctx context.Context, nonce []byte, expectedI
 	}
 }
 
-// awaitRequest polls until a connect-request from a peer other than self appears.
-func (pp *PunchParty) awaitRequest(ctx context.Context) (*types.ConnectRequestData, error) {
+// awaitRequest polls until a connect-request from a peer other than self
+// appears. Returns the request and its authenticated initiator id.
+func (pp *PunchParty) awaitRequest(ctx context.Context) (*types.ConnectRequestData, string, error) {
 	deadline := time.Now().Add(pp.exchangeTimeout())
 	for {
-		_, msgs, err := pp.Carrier.CollectMessages(ctx, pp.Key)
+		msgs, err := pp.collect(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("punch: collect (request): %w", err)
+			return nil, "", fmt.Errorf("punch: collect (request): %w", err)
 		}
-		if req, ok := FindRequest(msgs, pp.SelfID); ok {
-			return req, nil
+		if req, signer, ok := FindRequest(msgs, pp.selfID()); ok {
+			if err := pp.requireSealed(signer, "connect-request"); err != nil {
+				return nil, "", err
+			}
+			initiator := signer.PeerID
+			if initiator == "" {
+				initiator = req.Initiator
+			}
+			return req, initiator, nil
 		}
 		if err := waitPoll(ctx, pp.poll(), deadline); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	}
 }
 
 // awaitSync polls until a punch-sync echoing nonce appears.
+//
+// punch-sync names nobody, so the nonce echo is the whole of the correlation and
+// §6.3 step 3 has nothing to compare — the position all three §6.5 payloads are
+// in. It still decides WHEN THIS PEER FIRES, so an unsealed one is refused under
+// VerifyRequire exactly like the other two: a forged fire_at desynchronizes the
+// crossing just as effectively as a forged candidate misdirects it.
 func (pp *PunchParty) awaitSync(ctx context.Context, nonce []byte) (*types.PunchSyncData, error) {
 	deadline := time.Now().Add(pp.exchangeTimeout())
 	for {
-		_, msgs, err := pp.Carrier.CollectMessages(ctx, pp.Key)
+		msgs, err := pp.collect(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("punch: collect (sync): %w", err)
 		}
 		for _, m := range msgs {
 			if m.Kind == KindPunchSync && bytes.Equal(m.Sync.Nonce, nonce) {
+				if err := pp.requireSealed(m.Signer, "punch-sync"); err != nil {
+					return nil, err
+				}
 				return m.Sync, nil
 			}
 		}

@@ -122,6 +122,40 @@ func (c *Client) CollectMessages(ctx context.Context, key []byte) (uint, []Colle
 	return status, msgs, nil
 }
 
+// CollectMessagesVerified is CollectMessages with §6.3 applied — the read side
+// of the flag day. It is a separate method rather than a parameter on
+// CollectMessages because verification needs the rendezvous key as a SIGNING
+// INPUT, not merely as the bucket to poll: a caller cannot verify what it
+// collected without saying where it collected from, and making that implicit is
+// how a verifier ends up not checking.
+//
+// It applies no VerificationPolicy. Every blob that survives §6.4 comes back,
+// carrying a Signer when it arrived sealed and none when it did not, and the
+// caller's own exchange decides what to do about that — see VerificationPolicy
+// for why the posture cannot be applied this far down.
+//
+// Skipped blobs are dropped from the result and their errors returned
+// alongside, so a caller can log or count them with the taxonomy label. §6.4
+// makes the skip silent on the wire; local silence is what let the Ed448
+// hardcode survive.
+func (c *Client) CollectMessagesVerified(ctx context.Context, key []byte) (uint, []CollectedMessage, []error, error) {
+	status, blobs, err := c.Collect(ctx, key)
+	if err != nil || status != 200 {
+		return status, nil, nil, err
+	}
+	msgs := make([]CollectedMessage, 0, len(blobs))
+	var skipped []error
+	for _, b := range blobs {
+		m, err := ClassifyCollected(b, key)
+		if err != nil {
+			skipped = append(skipped, err)
+			continue
+		}
+		msgs = append(msgs, m)
+	}
+	return status, msgs, skipped, nil
+}
+
 // execute runs one EXECUTE against the node and splits out the status and result
 // entity — the same shape ext/role/sdk uses.
 //

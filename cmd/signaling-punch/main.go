@@ -289,6 +289,24 @@ func runResponder(ctx context.Context, p *peer.Peer, party *signaling.PunchParty
 	return out
 }
 
+// parseTrust maps the --trust string onto the §6.3 posture.
+//
+// There is no default here and an empty string is an error, even though the
+// flag supplies one: signaling.VerificationPolicy's zero value is deliberately
+// not a policy, and a silent fallback in this function would put back exactly
+// the "acquired the weaker posture by forgetting" hole that invalid zero exists
+// to close.
+func parseTrust(s string) (signaling.VerificationPolicy, error) {
+	switch s {
+	case "tolerant":
+		return signaling.VerifyTolerant, nil
+	case "require":
+		return signaling.VerifyRequire, nil
+	default:
+		return signaling.VerifyUnset, fmt.Errorf("--trust %q must be tolerant|require", s)
+	}
+}
+
 // punchOpts is one signaling-punch invocation's inputs.
 type punchOpts struct {
 	node, role, mode, input string
@@ -297,6 +315,7 @@ type punchOpts struct {
 	reflector               string // §6.7.1 reflector to DISCOVER the mapping from; wins over srflx
 	dialFrom                string // NEGATIVE CONTROL: punch from an endpoint that is NOT the advertised one
 	suppressDial            bool   // negative control: never dial (listen-only)
+	trust                   string // §6.3 collect posture: tolerant|require
 	debug                   bool   // peer debug log -> stderr; stdout stays the JSON line
 	timeout                 float64
 }
@@ -412,6 +431,23 @@ func punch(o punchOpts) (map[string]any, error) {
 		}
 	}
 
+	// The §6.3 collect posture. This seat DEPOSITS sealed unconditionally; what
+	// --trust selects is what it ACCEPTS, and only `require` proves anything
+	// about this side: a tolerant collector admits an unsealed counterpart, so a
+	// green tolerant run is equally consistent with the counterpart never having
+	// sealed at all. Require is the assay — it refuses any blob without a §6.3
+	// container, so a green run under it is positive proof the counterpart's
+	// deposits are sealed AND that this collector enforces.
+	//
+	// It was hardcoded to tolerant, which entity-core-rust flagged: everything
+	// their live cross-impl punch measured proved GO'S DEPOSITS seal, and
+	// nothing proved Go's COLLECTOR enforces, because this seat could not be
+	// asked to.
+	trust, err := parseTrust(o.trust)
+	if err != nil {
+		return nil, err
+	}
+
 	// Socket outcome, so a harness can assert the tie-break EXECUTED rather than
 	// infer it from a punch that merely converged.
 	var sockDialed, sockAccepted, keptDialed atomic.Bool
@@ -421,9 +457,13 @@ func punch(o punchOpts) (map[string]any, error) {
 		keptDialed.Store(kd)
 	}
 	party := &signaling.PunchParty{
-		Carrier:         signaling.NewClient(client),
-		Key:             key,
-		SelfID:          peerID,
+		Carrier: signaling.NewClient(client),
+		Key:     key,
+		// One identity: the party derives its own peer-id from this keypair and
+		// signs every §6.1 deposit with it, so the id in the bucket and the id in
+		// the signature cannot drift apart. Tolerant on collect for the flag day.
+		Identity:        kp,
+		Trust:           trust,
 		LocalCands:      []types.NetworkCandidateData{{Type: types.CandidateTypeSrflx, Substrate: types.CandidateSubstrateTCP, Address: srflxAddr}},
 		LocalAddr:       local,
 		Dial:            dial,
@@ -454,6 +494,10 @@ func punch(o punchOpts) (map[string]any, error) {
 		"sockets":      socketsFormed(sockDialed.Load(), sockAccepted.Load()),
 		"kept":         map[bool]string{true: "dialed", false: "accepted"}[keptDialed.Load()],
 		"key":          hex.EncodeToString(key),
+		// Reported so a harness never has to infer the posture from the flags it
+		// believes it passed — a run whose verdict is quoted without it is not
+		// re-checkable.
+		"trust": o.trust,
 	}
 	for k, v := range outcome {
 		result[k] = v
@@ -541,6 +585,7 @@ func main() {
 	dialFrom := flag.String("dial-from", "", "NEGATIVE CONTROL (§7.3/§6.7.3 violation): punch from this endpoint instead of --local-addr, while still listening on --local-addr. Behind a NAT the punch MUST fail; on loopback it produces the distinct-4-tuple race the peer-id tie-break exists for.")
 	natType := flag.Bool("nat-type", false, "PROBE MODE (§6.7.1 / §11.2): consult --reflectors about --local-addr and classify the NAT mapping, then exit. Punches nothing; needs no --node/--role/--mode/--input. This is the G4 precheck — same mapping from every reflector => punchable, differing => symmetric => relay-only.")
 	reflectors := flag.String("reflectors", "", "comma-separated §6.7.1 reflectors for --nat-type. TWO OR MORE: a single reflector is advisory and MUST NOT conclude a NAT type (§6.7.1, §9.3). All are dialed from --local-addr, since a mapping belongs to a socket (§6.7.3).")
+	trust := flag.String("trust", "require", "§6.3 collect posture: tolerant|require. This seat always DEPOSITS sealed; --trust selects what it ACCEPTS. Defaults to `require`, matching the production posture (peerwiring.DefaultTrust) now that the §6.1 flag day is closed. `tolerant` remains for negative controls and for meeting a pre-flip build on purpose.")
 	debug := flag.Bool("debug", false, "log the peer's activity to stderr; stdout stays the JSON line")
 	timeout := flag.Float64("timeout", 20.0, "seconds to run")
 	flag.Parse()
@@ -595,13 +640,15 @@ func main() {
 		fail("--input is required")
 	case *localAddr == "":
 		fail("--local-addr is required")
+	case *trust != "tolerant" && *trust != "require":
+		fail("--trust must be tolerant|require")
 	}
 
 	result, err := punch(punchOpts{
 		node: *node, role: *role, mode: *mode, input: *input,
 		localAddr: *localAddr, srflx: *srflx, reflector: *reflector, suppressDial: *suppressDial,
-		dialFrom: *dialFrom,
-		debug:    *debug, timeout: *timeout,
+		dialFrom: *dialFrom, trust: *trust,
+		debug: *debug, timeout: *timeout,
 	})
 	if err != nil {
 		fail(err.Error())

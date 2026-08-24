@@ -26,12 +26,15 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/mr-tron/base58"
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/ecf"
@@ -60,6 +63,83 @@ type VectorFile struct {
 	// suite of positives. The negatives are what distinguish a verifier from a
 	// stub.
 	Signatures []SignatureVector `cbor:"signatures"`
+
+	// SignedBlobs is surface 5 — the §6.3 container crossing, the fold trigger.
+	//
+	// OPTIONAL ON READ, ALWAYS EMITTED, and the schema string is deliberately
+	// NOT bumped. `webrtc-sdp-ice/1` is pinned into every
+	// system/peer/transport/webrtc profile's negotiation.signaling_schema
+	// (EXTENSION-NETWORK §6.5.2d), so bumping it would be a wire-visible change
+	// announcing a test-harness addition — and both verifiers hard-refuse an
+	// unrecognized schema, so neither impl could land it without a flag day.
+	// An additive optional array is MUST-ignore (ADR-0002) instead.
+	//
+	// Go initially emitted this as a SEPARATE file under its own schema, which
+	// also left the pinned string alone. Converged on rust's placement (0dd1ba3)
+	// because they had already emitted it and a packaging disagreement is not
+	// worth a round trip on the fold trigger — the bytes are what cross, not the
+	// container they ship in.
+	SignedBlobs []SignedBlobVector `cbor:"signed_blobs,omitempty"`
+
+	// SigningInput states, as DATA, exactly what a coordination signature
+	// covers. Go proposed the idea; entity-core-rust adopted it and added the
+	// `sample` block, which is the part that actually pins ORDER — a declarative
+	// component list lets two impls agree on names and lengths and still
+	// concatenate them differently. Optional on read for the same MUST-ignore
+	// reason as signed_blobs.
+	//
+	// It is checked FIRST and separately because a signing-input disagreement
+	// otherwise surfaces as every signature row failing identically, which reads
+	// as "everything is broken" rather than "we disagree about one field."
+	SigningInput *SigningInputSpec `cbor:"signing_input,omitempty"`
+}
+
+// SigningInputSpec is the self-describing statement of the signed message.
+type SigningInputSpec struct {
+	Components []SigningComponent `cbor:"components"`
+	Sample     SigningSample      `cbor:"sample"`
+	TotalLen   uint64             `cbor:"total_len"`
+}
+
+// SigningComponent names one fixed-length part, in concatenation order.
+type SigningComponent struct {
+	Name string `cbor:"name"`
+	Len  uint64 `cbor:"len"`
+}
+
+// SigningSample is a worked example: the emitter's own signing_input over two
+// recognizable, deliberately unreal inputs. A verifier recomputes Bytes from
+// ContentHash and RendezvousKey — which pins the concatenation order
+// operationally rather than by agreeing on a word list.
+type SigningSample struct {
+	Bytes         []byte `cbor:"bytes"`
+	ContentHash   []byte `cbor:"content_hash"`
+	RendezvousKey []byte `cbor:"rendezvous_key"`
+}
+
+// SignedBlobVector is one §6.3 envelope, positive or negative. Field names match
+// entity-core-rust's surface 5 exactly so the two files are mutually readable.
+type SignedBlobVector struct {
+	Name string `cbor:"name"`
+	// Blob is the whole system/signaling/signed-blob container as a bucket
+	// stores it — an entity encoding, not a bare CBOR map, so the type string
+	// stays dispatchable and a signed blob is distinguishable from a legacy
+	// unsigned one during the migration window.
+	Blob []byte `cbor:"blob"`
+	// RendezvousKey is the 33-byte bucket key the signature is bound to. It is
+	// NOT a field of the envelope — it is carried HERE, in the vector row, so
+	// the crossing is decidable regardless of the binding mechanism: a verifier
+	// reproduces these exact bytes or it does not.
+	RendezvousKey []byte `cbor:"rendezvous_key"`
+
+	ClaimedPeerID string `cbor:"claimed_peer_id,omitempty"`
+	ExpectSigner  string `cbor:"expect_signer,omitempty"`
+	// ExpectInnerBlob is the inner entity verbatim — it pins the byte-preservation
+	// MUST *through* the container, which is exactly where a decode+re-encode
+	// would silently invalidate the signature the container carries.
+	ExpectInnerBlob []byte `cbor:"expect_inner_blob,omitempty"`
+	// Expect is ok | unusable_key | bad_signature | signer_mismatch.
+	Expect string `cbor:"expect"`
 }
 
 // EntityVector is one §6.5 entity: the §6.2 blob a bucket would actually hold,
@@ -136,7 +216,19 @@ const (
 	expectOK             = "ok"
 	expectBadSignature   = "bad_signature"
 	expectSignerMismatch = "signer_mismatch"
-	errSelfNegotiation   = "self_negotiation"
+	// expectUnusableKey is the cohort's third taxonomy name: key material that
+	// never reached the signature check. Distinct from signer_mismatch, which is
+	// reserved for the §6.1 claim comparison — filing an unsupported key_type
+	// under "this peer is lying" is the reading that justifies a hardcoded
+	// reject, and a hardcoded reject is what locked out Ed448.
+	expectUnusableKey = "unusable_key"
+	// expectDecodeSkip is a FOURTH outcome, not one of the three names. A blob
+	// that never parsed as a container is normal bucket contents under §6.4 —
+	// legacy unsigned traffic, another impl's message — not a verification
+	// verdict. Filing it under unusable_key would flood the diagnostic channel
+	// with key alarms for blobs that carry no key at all. (rust's, 92897a9.)
+	expectDecodeSkip   = "decode_skip"
+	errSelfNegotiation = "self_negotiation"
 )
 
 func main() {
@@ -209,6 +301,11 @@ func emitFile(path string) error {
 		return err
 	}
 
+	blobs, err := emitSignedBlobs()
+	if err != nil {
+		return err
+	}
+
 	f := VectorFile{
 		Schema:        types.WebRTCSignalingSchema,
 		Emitter:       "core-go",
@@ -217,6 +314,8 @@ func emitFile(path string) error {
 		Roles:         roles,
 		SessionIDs:    emitSessionIDs(),
 		Signatures:    sigs,
+		SignedBlobs:   blobs,
+		SigningInput:  emitSigningInput(),
 	}
 	raw, err := ecf.Encode(f)
 	if err != nil {
@@ -227,20 +326,46 @@ func emitFile(path string) error {
 	}
 	fmt.Printf("wrote %s (%d bytes)\n", path, len(raw))
 	fmt.Printf("  schema=%s emitter=%s commit=%s\n", f.Schema, f.Emitter, f.EmitterCommit)
-	fmt.Printf("  entities=%d roles=%d session_ids=%d signatures=%d\n",
-		len(f.Entities), len(f.Roles), len(f.SessionIDs), len(f.Signatures))
+	fmt.Printf("  entities=%d roles=%d session_ids=%d signatures=%d signed_blobs=%d\n",
+		len(f.Entities), len(f.Roles), len(f.SessionIDs), len(f.Signatures), len(f.SignedBlobs))
 	return nil
 }
 
 // headCommit records provenance. "unknown" rather than a failure: a vector file
 // emitted from a tarball is still verifiable, it just cannot be re-derived, and
 // saying so is better than refusing to emit.
+//
+// A "-dirty" suffix marks an emission whose tree had modified TRACKED files, so
+// the pin cannot silently overclaim: a file naming a commit whose code is not
+// what produced it is unreproducible while looking reproducible. Adopted from
+// entity-core-rust (68e3b0b), including their correction — untracked files are
+// NOT counted. Counting them makes every first emission of a new vector file
+// dirty forever (the file is untracked until it is added), and a marker that
+// fires unconditionally is one nobody reads. Tracked-only is also the honest
+// line: an untracked source file cannot change the emitter without being
+// referenced from a tracked one, which would fail to build at the pinned commit
+// rather than produce a wrong pin.
 func headCommit() string {
 	out, err := exec.Command("git", "rev-parse", "--short", "HEAD").Output()
 	if err != nil {
 		return "unknown"
 	}
-	return strings.TrimSpace(string(out))
+	commit := strings.TrimSpace(string(out))
+	if treeIsDirty() {
+		commit += "-dirty"
+	}
+	return commit
+}
+
+// treeIsDirty reports modified tracked files. On error it reports false: the
+// "unknown" commit case above already covers a non-git tree, and a spurious
+// "-dirty" on every emission would train readers to ignore the marker.
+func treeIsDirty() bool {
+	out, err := exec.Command("git", "status", "--porcelain", "--untracked-files=no").Output()
+	if err != nil {
+		return false
+	}
+	return len(bytes.TrimSpace(out)) > 0
 }
 
 func emitEntities() ([]EntityVector, error) {
@@ -478,6 +603,7 @@ func emitSignatures() ([]SignatureVector, error) {
 type report struct {
 	surface string
 	pass    int
+	warn    int
 	fail    int
 	lines   []string
 }
@@ -486,6 +612,24 @@ func (r *report) ok(name string) { r.pass++; r.lines = append(r.lines, "    ok  
 func (r *report) bad(name, why string) {
 	r.fail++
 	r.lines = append(r.lines, "    FAIL "+name+" — "+why)
+}
+
+// soft records a row that VERIFIED but whose construction means it does not
+// test what its name says — a coverage gap in the row, not a fault in the
+// implementation that emitted it.
+//
+// It exists because the alternative is worse in both directions. Counting such
+// a row as a FAIL reads as "the sibling's implementation is broken" and gates a
+// cycle on a disagreement about what a vector field MEANS; counting it as a
+// pass hides the fact that a named negative is not actually negative. A W is
+// the honest third answer, and it is loud: it prints the row, says what is not
+// being exercised, and is summarized separately so a bare "N·0F" can never
+// absorb it.
+//
+// A W is NOT a skip and does not license one. The row still had to verify.
+func (r *report) soft(name, why string) {
+	r.warn++
+	r.lines = append(r.lines, "    WARN "+name+" — "+why)
 }
 
 func verifyFile(path string) (bool, error) {
@@ -507,25 +651,51 @@ func verifyFile(path string) (bool, error) {
 	fmt.Println()
 
 	reports := []*report{
+		verifySigningInput(f.SigningInput),
 		verifyEntities(f.Entities),
 		verifyRoles(f.Roles),
 		verifySessionIDs(f.SessionIDs),
 		verifySignatures(f.Signatures),
+		verifySignedBlobs(f.SignedBlobs),
 	}
 
-	total, failed := 0, 0
+	total, failed, warned := 0, 0, 0
 	for _, r := range reports {
-		fmt.Printf("  %-24s %d pass / %d fail\n", r.surface, r.pass, r.fail)
+		if r.warn > 0 {
+			fmt.Printf("  %-24s %d pass / %d warn / %d fail\n", r.surface, r.pass, r.warn, r.fail)
+		} else {
+			fmt.Printf("  %-24s %d pass / %d fail\n", r.surface, r.pass, r.fail)
+		}
 		for _, l := range r.lines {
 			fmt.Println(l)
 		}
-		total += r.pass + r.fail
+		total += r.pass + r.warn + r.fail
 		failed += r.fail
+		warned += r.warn
 	}
 	fmt.Println()
 	if failed == 0 {
+		// The W is carried INTO the headline, never averaged away. ADR-0012 says
+		// a published number is P/W/F-broken-out and never a bare percentage;
+		// "42·0F" beside a warned row would be a true number telling a false
+		// story, since the reader's whole question is what was actually tested.
+		if warned > 0 {
+			fmt.Printf("WEBRTC COORDINATION VECTORS: PASS WITH WARNINGS — %d·%dW·0F @ %s (%s)\n",
+				total, warned, f.EmitterCommit, f.Emitter)
+			fmt.Println("  A warned row verified but does not exercise what its name claims — see above.")
+			fmt.Println("  Coordination layer only. NOT evidence that WebRTC transport works (§11.5.1: S5 is).")
+			return true, nil
+		}
 		fmt.Printf("WEBRTC COORDINATION VECTORS: PASS — %d·0F @ %s (%s)\n", total, f.EmitterCommit, f.Emitter)
 		fmt.Println("  Coordination layer only. NOT evidence that WebRTC transport works (§11.5.1: S5 is).")
+		// The silent-zero guard (rust's, adopted): a missing surface must never
+		// read as a crossed one. An all-green summary over four surfaces looks
+		// exactly like an all-green summary over five, and the §6.3 container is
+		// the whole fold trigger — so say it out loud rather than let the number
+		// imply it.
+		if len(f.SignedBlobs) == 0 {
+			fmt.Printf("  §6.3 container NOT crossed: %s emitted no signed_blobs. The fold trigger is unmet.\n", f.Emitter)
+		}
 		return true, nil
 	}
 	fmt.Printf("WEBRTC COORDINATION VECTORS: FAIL — %d checks, %d failed (emitter %s @ %s)\n",
@@ -743,6 +913,578 @@ func verifySignatures(rows []SignatureVector) *report {
 			continue
 		}
 		r.ok(v.Name)
+	}
+	return r
+}
+
+// --- surface 5: the §6.3 container ------------------------------------------
+
+// emitSignedBlobs builds the envelope rows — the crossing that is the §6.3 fold
+// trigger. Every row carries the blob bytes AND the rendezvous key a verifier
+// must supply, so the crossing is decidable from the file alone.
+func emitSignedBlobs() ([]SignedBlobVector, error) {
+	kpA := crypto.FromSeed(seedA)
+	kpB := crypto.FromSeed(seedB)
+	kp448 := crypto.Ed448FromSeed(ed448Seed(0x11))
+
+	idA := crypto.PeerIDFromKeypair(kpA).String()
+	idB := crypto.PeerIDFromKeypair(kpB).String()
+	id448 := crypto.PeerIDFromKeypair(kp448).String()
+
+	bucketAB, err := signaling.PairKey(idA, idB)
+	if err != nil {
+		return nil, err
+	}
+	bucketOther, err := signaling.PairKey(idA, id448)
+	if err != nil {
+		return nil, err
+	}
+
+	offer, err := types.WebRTCOfferData{
+		SDP:       "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\na=fingerprint:sha-256 AB:CD\r\n",
+		SessionID: sid(0x30, 16),
+	}.ToEntity()
+	if err != nil {
+		return nil, err
+	}
+	innerBlob, err := ecf.Encode(offer)
+	if err != nil {
+		return nil, err
+	}
+
+	sealedA, err := signaling.SealBlob(offer, kpA, bucketAB)
+	if err != nil {
+		return nil, err
+	}
+	blobA, err := signaling.SealedToBlob(sealedA)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []SignedBlobVector
+	add := func(v SignedBlobVector) { out = append(out, v) }
+
+	// 1. The positive.
+	add(SignedBlobVector{
+		Name: "ed25519/valid", Blob: blobA, RendezvousKey: bucketAB,
+		Expect: expectOK, ExpectSigner: idA, ExpectInnerBlob: innerBlob,
+	})
+
+	// 2. THE BINDING ROW. The same valid blob under a different bucket key. An
+	// implementation that does not bind passes every other row and fails only
+	// this one, which localizes the disagreement to the mechanism.
+	add(SignedBlobVector{
+		Name: "ed25519/replayed-into-another-bucket", Blob: blobA, RendezvousKey: bucketOther,
+		Expect: expectBadSignature,
+	})
+
+	// 3. Ed448 — the parametric path. A hardcoded key_type fails here while the
+	// Ed25519 rows pass, which localizes rather than merely diffs.
+	offer448, err := types.WebRTCOfferData{SDP: "v=0\r\no=- 2 2 IN IP4 0.0.0.0\r\n", SessionID: sid(0x40, 16)}.ToEntity()
+	if err != nil {
+		return nil, err
+	}
+	inner448, err := ecf.Encode(offer448)
+	if err != nil {
+		return nil, err
+	}
+	bucket448, err := signaling.PairKey(id448, idB)
+	if err != nil {
+		return nil, err
+	}
+	sealed448, err := signaling.SealBlob(offer448, kp448, bucket448)
+	if err != nil {
+		return nil, err
+	}
+	blob448, err := signaling.SealedToBlob(sealed448)
+	if err != nil {
+		return nil, err
+	}
+	add(SignedBlobVector{
+		Name: "ed448/valid", Blob: blob448, RendezvousKey: bucket448,
+		Expect: expectOK, ExpectSigner: id448, ExpectInnerBlob: inner448,
+	})
+
+	// 4. The malleability fence: the alternate §1.5 encoding of the signer's OWN
+	// key. A verifier that dispatches on the wire's hash_type returns ok here.
+	sum := sha256.Sum256(kpA.PublicKeyBytes())
+	altID := base58.Encode(append([]byte{crypto.KeyTypeEd25519, crypto.HashTypeSHA256}, sum[:]...))
+	forged := sealedA
+	forged.Signer = altID
+	blobForged, err := signaling.SealedToBlob(forged)
+	if err != nil {
+		return nil, err
+	}
+	add(SignedBlobVector{
+		Name: "ed25519/non-canonical-hash-type", Blob: blobForged, RendezvousKey: bucketAB,
+		Expect: expectUnusableKey,
+	})
+
+	// 5. Claiming another peer's id with a real signature attached.
+	stolen := sealedA
+	stolen.Signer = idB
+	blobStolen, err := signaling.SealedToBlob(stolen)
+	if err != nil {
+		return nil, err
+	}
+	add(SignedBlobVector{
+		Name: "ed25519/signer-names-another-peer", Blob: blobStolen, RendezvousKey: bucketAB,
+		Expect: expectUnusableKey,
+	})
+
+	// 6. Tampered inner entity — a rewritten SDP is a different DTLS
+	// fingerprint, hence the attacker's own channel.
+	evil, err := types.WebRTCOfferData{SDP: "v=0 EVIL", SessionID: sid(0x30, 16)}.ToEntity()
+	if err != nil {
+		return nil, err
+	}
+	evilBytes, err := ecf.Encode(evil)
+	if err != nil {
+		return nil, err
+	}
+	tampered := sealedA
+	tampered.Entity = evilBytes
+	blobTampered, err := signaling.SealedToBlob(tampered)
+	if err != nil {
+		return nil, err
+	}
+	add(SignedBlobVector{
+		Name: "ed25519/tampered-inner-entity", Blob: blobTampered, RendezvousKey: bucketAB,
+		Expect: expectBadSignature,
+	})
+
+	// 7. Domain separation: a signature over the BARE 33-byte content hash —
+	// what mint and connect sign. Without the domain tag and the bound key, a
+	// signature harvested elsewhere replays as a coordination blob.
+	bare := sealedA
+	bare.Signature = kpA.Sign(offer.ContentHash.Bytes())
+	blobBare, err := signaling.SealedToBlob(bare)
+	if err != nil {
+		return nil, err
+	}
+	add(SignedBlobVector{
+		Name: "ed25519/bare-content-hash-signature", Blob: blobBare, RendezvousKey: bucketAB,
+		Expect: expectBadSignature,
+	})
+
+	// 8. Wrong key: B signs the right message, A's identity is declared.
+	wrong := sealedA
+	wrong.Signature = kpB.Sign(coordinationSigningInput(bucketAB, offer.ContentHash.Bytes()))
+	blobWrong, err := signaling.SealedToBlob(wrong)
+	if err != nil {
+		return nil, err
+	}
+	add(SignedBlobVector{
+		Name: "ed25519/signed-by-another-key", Blob: blobWrong, RendezvousKey: bucketAB,
+		Expect: expectBadSignature,
+	})
+
+	// 9. A sign-incapable key_type. Go DERIVES a peer-id for 0xFE — it has a
+	// canonical hash type and a defined key length — and then cannot verify with
+	// it, which reported as bad_signature until entity-core-rust's row caught it
+	// (92897a9). That is the taxonomy's whole point: the fault is in the key
+	// TYPE, and calling it a bad signature is one inference from the hardcoded
+	// reject that locked out Ed448.
+	exoticPub := bytes.Repeat([]byte{0x7E}, 64)
+	exoticID, err := crypto.PeerIDFromExperimentalTestPublicKey(exoticPub)
+	if err != nil {
+		return nil, err
+	}
+	exotic, err := signaling.SealedToBlob(types.SignedBlobData{
+		Entity:    innerBlob,
+		Signer:    exoticID.String(),
+		PublicKey: exoticPub,
+		Signature: bytes.Repeat([]byte{0x00}, 64), // never reached
+	})
+	if err != nil {
+		return nil, err
+	}
+	add(SignedBlobVector{
+		Name: "unsupported-key-type/0xfe", Blob: exotic, RendezvousKey: bucketAB,
+		Expect: expectUnusableKey,
+	})
+
+	// 10. A bare coordination entity — legacy unsigned traffic or another impl's
+	// blob. §6.4 makes that normal bucket contents, so it is a SKIP and not a
+	// verdict. During the migration window (both impls still deposit bare
+	// entities) this is the common case, and filing it under unusable_key would
+	// bury real key faults in noise.
+	add(SignedBlobVector{
+		Name: "not-a-container", Blob: innerBlob, RendezvousKey: bucketAB,
+		Expect: expectDecodeSkip,
+	})
+
+	// 11-12. §6.3 step 3, the claim comparison. Only this catches a genuinely
+	// valid signature presented under a false identity — every other check
+	// passes such a blob, because nothing about it is forged. The truthful row
+	// exists so the false one cannot pass by a verifier that rejects every
+	// claimed-signer row outright.
+	add(SignedBlobVector{
+		Name: "ed25519/false-claim", Blob: blobA, RendezvousKey: bucketAB,
+		ClaimedPeerID: idB, Expect: expectSignerMismatch,
+	})
+	add(SignedBlobVector{
+		Name: "ed25519/true-claim", Blob: blobA, RendezvousKey: bucketAB,
+		ClaimedPeerID: idA, Expect: expectOK, ExpectSigner: idA, ExpectInnerBlob: innerBlob,
+	})
+
+	// 13-16. THE §6.1 NATIVE ROWS — the ones 11-12 above are not.
+	//
+	// Rows 11-12 wrap a §6.5 OFFER and hand the verifier a synthetic
+	// `claimed_peer_id` in the vector row itself. That exercises the comparison
+	// but not the shape: a §6.5 offer carries no peer-id, so the claim had to be
+	// invented alongside it. §6.1's connect-request and connect-response carry
+	// `initiator` / `responder` AS FIELDS OF THE SIGNED ENTITY, which is the only
+	// place in the protocol where step 3 has a real left-hand side.
+	//
+	// entity-core-rust flagged the honest limit on their own §6.1 read side: it
+	// is SAME-SIDE TESTED. The bytes are cross-verified because it shares
+	// seal/open with the container that crossed at 38·0F / 36·0F — but "a Go peer
+	// seals a §6.1 message and rust reads it" is not, and that row is worth
+	// having BEFORE the §6.1 deposits flip rather than after. These are it.
+	//
+	// `claimed_peer_id` is set on these rows even though the payload already
+	// names its author, and the redundancy is deliberate: a verifier that takes
+	// the claim from the vector row (both impls' current shape) and one that
+	// extracts it from the inner entity (what a real read path does) must reach
+	// the same verdict, and setting both means the file needs no verifier change
+	// on either side to be readable. Go asserts the two agree — see
+	// verifySignedBlobs.
+	reqNonce := sid(0x71, 16)
+	reqCands := []types.NetworkCandidateData{
+		{Type: types.CandidateTypeSrflx, Substrate: types.CandidateSubstrateTCP, Address: "203.0.113.7:9000"},
+	}
+
+	// The honest connect-request: signed by A, naming A.
+	reqTrue, err := types.ConnectRequestData{Candidates: reqCands, Initiator: idA, Nonce: reqNonce}.ToEntity()
+	if err != nil {
+		return nil, err
+	}
+	reqTrueInner, err := ecf.Encode(reqTrue)
+	if err != nil {
+		return nil, err
+	}
+	sealedReqTrue, err := signaling.SealBlob(reqTrue, kpA, bucketAB)
+	if err != nil {
+		return nil, err
+	}
+	blobReqTrue, err := signaling.SealedToBlob(sealedReqTrue)
+	if err != nil {
+		return nil, err
+	}
+	add(SignedBlobVector{
+		Name: "ed25519/connect-request/true-initiator", Blob: blobReqTrue, RendezvousKey: bucketAB,
+		ClaimedPeerID: idA, Expect: expectOK, ExpectSigner: idA, ExpectInnerBlob: reqTrueInner,
+	})
+
+	// The lying connect-request: signed by A, naming B. NOTHING about this blob
+	// is forged — A's key derives A's id honestly and the signature covers this
+	// bucket — so steps 2 and 4 both pass and only the claim comparison catches
+	// it. This is the row that fails against a read path with step 3 unwired,
+	// which is what Go's own was until this cycle.
+	reqLie, err := types.ConnectRequestData{Candidates: reqCands, Initiator: idB, Nonce: reqNonce}.ToEntity()
+	if err != nil {
+		return nil, err
+	}
+	sealedReqLie, err := signaling.SealBlob(reqLie, kpA, bucketAB)
+	if err != nil {
+		return nil, err
+	}
+	blobReqLie, err := signaling.SealedToBlob(sealedReqLie)
+	if err != nil {
+		return nil, err
+	}
+	add(SignedBlobVector{
+		Name: "ed25519/connect-request/initiator-names-another-peer", Blob: blobReqLie, RendezvousKey: bucketAB,
+		ClaimedPeerID: idB, Expect: expectSignerMismatch,
+	})
+
+	// The answering side carries its author in a DIFFERENT field name
+	// (`responder`), so a verifier that hardcoded `initiator` passes the two rows
+	// above and fails this one — which localizes the disagreement to the field
+	// rather than to the mechanism.
+	respTrue, err := types.ConnectResponseData{Candidates: reqCands, Nonce: reqNonce, Responder: idB}.ToEntity()
+	if err != nil {
+		return nil, err
+	}
+	respTrueInner, err := ecf.Encode(respTrue)
+	if err != nil {
+		return nil, err
+	}
+	sealedRespTrue, err := signaling.SealBlob(respTrue, kpB, bucketAB)
+	if err != nil {
+		return nil, err
+	}
+	blobRespTrue, err := signaling.SealedToBlob(sealedRespTrue)
+	if err != nil {
+		return nil, err
+	}
+	add(SignedBlobVector{
+		Name: "ed25519/connect-response/true-responder", Blob: blobRespTrue, RendezvousKey: bucketAB,
+		ClaimedPeerID: idB, Expect: expectOK, ExpectSigner: idB, ExpectInnerBlob: respTrueInner,
+	})
+
+	// punch-sync names NOBODY. It carries no author field at all, so step 3 has
+	// nothing to compare and step 2 is the whole check — the position all three
+	// §6.5 payloads are in. Emitted with no `claimed_peer_id` on purpose: an
+	// implementation that applies the comparison to a message with no claim
+	// compares against the empty string and skips every sync it ever collects,
+	// which is a silent never-fires rather than a visible failure.
+	syncEnt, err := types.PunchSyncData{FireAt: 250, Nonce: reqNonce}.ToEntity()
+	if err != nil {
+		return nil, err
+	}
+	syncInner, err := ecf.Encode(syncEnt)
+	if err != nil {
+		return nil, err
+	}
+	sealedSync, err := signaling.SealBlob(syncEnt, kpA, bucketAB)
+	if err != nil {
+		return nil, err
+	}
+	blobSync, err := signaling.SealedToBlob(sealedSync)
+	if err != nil {
+		return nil, err
+	}
+	add(SignedBlobVector{
+		Name: "ed25519/punch-sync/names-nobody", Blob: blobSync, RendezvousKey: bucketAB,
+		Expect: expectOK, ExpectSigner: idA, ExpectInnerBlob: syncInner,
+	})
+
+	return out, nil
+}
+
+// coordinationSigningInput re-derives the signed message independently of
+// ext/signaling. A negative control built with the code under test can only
+// prove self-agreement; this is the cohort's agreed byte layout spelled out
+// where a reader can check it against the routed spec.
+func coordinationSigningInput(rendezvousKey, contentHash []byte) []byte {
+	msg := make([]byte, 0, len(signaling.SigningDomain)+1+len(rendezvousKey)+len(contentHash))
+	msg = append(msg, signaling.SigningDomain...)
+	msg = append(msg, 0x1F)
+	msg = append(msg, rendezvousKey...)
+	msg = append(msg, contentHash...)
+	return msg
+}
+
+func verifySignedBlobs(rows []SignedBlobVector) *report {
+	r := &report{surface: "5. §6.3 container"}
+	if len(rows) == 0 {
+		// ABSENT, not passed. A surface that reports 0/0 and counts toward a
+		// green summary is the §11.5.1 blindness this whole proposal exists to
+		// end — the number would say "crossed" about something never run.
+		r.lines = append(r.lines, "    ABSENT — the container crossing has NOT happened")
+		return r
+	}
+	for _, v := range rows {
+		// A row carrying claimed_peer_id exercises §6.3 step 3 — the §6.1 claim
+		// comparison. It is a different entry point, not a flag: only that
+		// comparison catches a genuinely valid signature under a false claim,
+		// and every other check passes such a blob because nothing about it is
+		// forged.
+		var signer signaling.VerifiedSigner
+		var inner entity.Entity
+		var err error
+		if v.ClaimedPeerID != "" {
+			signer, inner, err = signaling.OpenBlobBytesClaimed(v.Blob, v.RendezvousKey, v.ClaimedPeerID)
+		} else {
+			signer, inner, err = signaling.OpenBlobBytes(v.Blob, v.RendezvousKey)
+		}
+		got := classifyEnvelopeOutcome(err)
+		if got != v.Expect {
+			r.bad(v.Name, fmt.Sprintf("expected %s, got %s (%v)", v.Expect, got, err))
+			continue
+		}
+
+		// THE SAME ROW THROUGH THE REAL READ PATH, with the claim taken from the
+		// PAYLOAD instead of from the vector row. For a §6.1 message the two must
+		// agree: the row's `claimed_peer_id` is a convenience for a verifier that
+		// has not wired step 3 into its classifier, and if a row could pass one
+		// way and fail the other it would be testing the harness rather than the
+		// implementation. A §6.5 payload names nobody, so the classifier has no
+		// claim to compare and the row-driven check above is the only one —
+		// exactly why the §6.1 rows had to exist.
+		//
+		// EXCLUDING the decode_skip rows, where the two functions disagree BY
+		// DESIGN and must: OpenBlobBytes reports "this was never a container",
+		// while ClassifyCollected goes on to read it as the bare §6.2 entity it
+		// is. That difference is the tolerant framing disposition, not a defect,
+		// and it is what keeps a bare depositor readable across the flag day.
+		//
+		// And only where the PAYLOAD names an author, or where no claim is in
+		// play at all. Rows 11-12 wrap a §6.5 offer with a claim that exists
+		// solely in the vector row: the classifier has nothing to compare there
+		// and correctly returns ok, so cross-checking them would assert that a
+		// synthetic claim is a real one.
+		classified, classifyErr := signaling.ClassifyCollected(v.Blob, v.RendezvousKey)
+		payloadNames := payloadClaim(classified)
+		if v.Expect != expectDecodeSkip && (payloadNames != "" || v.ClaimedPeerID == "") {
+			gotClassified := classifyEnvelopeOutcome(classifyErr)
+			switch {
+			case gotClassified == v.Expect:
+				// The row reads the same way from the wire as from the row.
+
+			// `signer` is the zero value on this branch — the row-driven open
+			// returned the mismatch error — so the verified identity comes from
+			// the classified result, which is the one that succeeded.
+			case v.Expect == expectSignerMismatch && gotClassified == expectOK &&
+				payloadNames != "" && payloadNames == classified.Signer.PeerID:
+				// THE ROW'S NEGATIVE IS NOT NEGATIVE ON THE WIRE. The payload
+				// names its own true signer, so the only false claim is the one
+				// in the vector row's `claimed_peer_id` field. A verifier that
+				// takes the claim from the row catches it; a real §6.1 collector,
+				// which reads `initiator` out of the signed entity, sees a
+				// truthful message and correctly returns ok.
+				//
+				// So the row cannot distinguish a read path with step 3 wired
+				// from one without — which is precisely the gap this repo had.
+				// Flagged, not failed: it is a disagreement about what
+				// `claimed_peer_id` MEANS on a §6.1 row, and the cohort never
+				// pinned that because §6.1 rows did not exist until today.
+				r.soft(v.Name, "the payload names its own signer, so only the row's claimed_peer_id is false — "+
+					"a payload-driven read path sees a truthful message, and this row cannot catch an unwired step 3")
+				continue
+
+			default:
+				r.bad(v.Name, fmt.Sprintf("the row's own claim gives %s but the payload's claim gives %s — the two disagree",
+					v.Expect, gotClassified))
+				continue
+			}
+			if payloadNames != "" && v.ClaimedPeerID != "" && payloadNames != v.ClaimedPeerID {
+				r.bad(v.Name, fmt.Sprintf("payload names %q, row claims %q — the row is self-inconsistent", payloadNames, v.ClaimedPeerID))
+				continue
+			}
+		}
+
+		if v.Expect != expectOK {
+			r.ok(v.Name)
+			continue
+		}
+		if v.ExpectSigner != "" && signer.PeerID != v.ExpectSigner {
+			r.bad(v.Name, fmt.Sprintf("signer %q, expected %q", signer.PeerID, v.ExpectSigner))
+			continue
+		}
+		// Byte fidelity THROUGH the container: this is where a decode+re-encode
+		// would silently invalidate the signature the container carries.
+		if len(v.ExpectInnerBlob) > 0 {
+			gotInner, encErr := ecf.Encode(inner)
+			if encErr != nil {
+				r.bad(v.Name, fmt.Sprintf("re-encode inner: %v", encErr))
+				continue
+			}
+			if !bytes.Equal(gotInner, v.ExpectInnerBlob) {
+				r.bad(v.Name, "inner entity did not survive the container byte-for-byte")
+				continue
+			}
+		}
+		r.ok(v.Name)
+	}
+	return r
+}
+
+// payloadClaim returns the peer-id a classified §6.1 message names as its own
+// author, or "" for anything that names nobody (punch-sync and all three §6.5
+// payloads). A KindUnknown result names nobody either — it never decoded.
+func payloadClaim(m signaling.CollectedMessage) string {
+	switch m.Kind {
+	case signaling.KindConnectRequest:
+		return m.Request.Initiator
+	case signaling.KindConnectResponse:
+		return m.Response.Responder
+	default:
+		return ""
+	}
+}
+
+func classifyEnvelopeOutcome(err error) string {
+	switch {
+	case err == nil:
+		return expectOK
+	case errors.Is(err, signaling.ErrUnusableKey):
+		return expectUnusableKey
+	case errors.Is(err, signaling.ErrBadSignature):
+		return expectBadSignature
+	case errors.Is(err, signaling.ErrSignerMismatch):
+		return expectSignerMismatch
+	case errors.Is(err, signaling.ErrNotAContainer):
+		return expectDecodeSkip
+	default:
+		return fmt.Sprintf("unclassified(%v)", err)
+	}
+}
+
+// --- surface 0: the signing input -------------------------------------------
+
+// Fixed, recognizable, and deliberately not a real key or a real hash: the block
+// describes a LAYOUT, not a signature. Same values entity-core-rust uses, so the
+// two sample.bytes are directly comparable byte-for-byte rather than only
+// mutually recomputable.
+var (
+	sampleRendezvousKey = bytes.Repeat([]byte{0x5A}, signaling.RendezvousKeyLen)
+	sampleContentHash   = bytes.Repeat([]byte{0xC7}, 33)
+)
+
+func emitSigningInput() *SigningInputSpec {
+	msg := coordinationSigningInput(sampleRendezvousKey, sampleContentHash)
+	return &SigningInputSpec{
+		Components: []SigningComponent{
+			{Name: "domain", Len: uint64(len(signaling.SigningDomain))},
+			{Name: "sep", Len: 1},
+			{Name: "rendezvous_key", Len: signaling.RendezvousKeyLen},
+			{Name: "content_hash", Len: 33},
+		},
+		Sample: SigningSample{
+			Bytes:         msg,
+			ContentHash:   sampleContentHash,
+			RendezvousKey: sampleRendezvousKey,
+		},
+		TotalLen: uint64(len(msg)),
+	}
+}
+
+func verifySigningInput(spec *SigningInputSpec) *report {
+	r := &report{surface: "0. signing input"}
+	if spec == nil {
+		// Absent is not passed, for the same reason a missing container surface
+		// is not: it would mean the one field that localizes a signing
+		// disagreement was never compared.
+		r.lines = append(r.lines, "    ABSENT — the signed message layout was not declared")
+		return r
+	}
+
+	want := coordinationSigningInput(spec.Sample.RendezvousKey, spec.Sample.ContentHash)
+	if !bytes.Equal(want, spec.Sample.Bytes) {
+		r.bad("sample/bytes", fmt.Sprintf(
+			"recomputing the emitter's own sample inputs gives different bytes — the two impls sign different messages.\n"+
+				"        emitter: %x\n        ours:    %x", spec.Sample.Bytes, want))
+	} else {
+		r.ok("sample/bytes")
+	}
+
+	if spec.TotalLen != uint64(len(want)) {
+		r.bad("total_len", fmt.Sprintf("emitter signs %d bytes, this build signs %d", spec.TotalLen, len(want)))
+	} else {
+		r.ok("total_len")
+	}
+
+	wantComponents := emitSigningInput().Components
+	if len(spec.Components) != len(wantComponents) {
+		r.bad("components", fmt.Sprintf("emitter declares %d components, this build has %d",
+			len(spec.Components), len(wantComponents)))
+		return r
+	}
+	mismatch := ""
+	for i, c := range spec.Components {
+		if c.Name != wantComponents[i].Name || c.Len != wantComponents[i].Len {
+			mismatch = fmt.Sprintf("component %d: emitter %s(%d), ours %s(%d)",
+				i, c.Name, c.Len, wantComponents[i].Name, wantComponents[i].Len)
+			break
+		}
+	}
+	if mismatch != "" {
+		r.bad("components", mismatch)
+	} else {
+		r.ok("components")
 	}
 	return r
 }

@@ -57,11 +57,16 @@ func TestPunchPeerLevelIdentityCheckAndPing(t *testing.T) {
 	aAddr := freeLoopbackPort(t)
 	bAddr := freeLoopbackPort(t)
 
-	mkParty := func(self string, local *net.TCPAddr) *PunchParty {
+	mkParty := func(identity crypto.Keypair, local *net.TCPAddr) *PunchParty {
 		return &PunchParty{
 			Carrier: carrier,
 			Key:     key,
-			SelfID:  self,
+			// The punch signs with the SAME keypair the peer handshakes with, so
+			// the id proven by the §6.3 signature and the id proven by the §7.4
+			// handshake are the same id. That is the whole point of taking the
+			// identity from the peer rather than injecting a second key.
+			Identity: identity,
+			Trust:    VerifyTolerant,
 			LocalCands: []types.NetworkCandidateData{
 				{Type: types.CandidateTypeSrflx, Substrate: types.CandidateSubstrateTCP, Address: local.String()},
 			},
@@ -79,7 +84,7 @@ func TestPunchPeerLevelIdentityCheckAndPing(t *testing.T) {
 	// as a server so the initiator's PerformConnect completes.
 	bErr := make(chan error, 1)
 	go func() {
-		raw, initiator, err := mkParty(bID, bAddr).Respond(ctx)
+		raw, initiator, err := mkParty(b.Keypair(), bAddr).Respond(ctx)
 		if err != nil {
 			bErr <- fmt.Errorf("respond: %w", err)
 			return
@@ -93,7 +98,7 @@ func TestPunchPeerLevelIdentityCheckAndPing(t *testing.T) {
 	}()
 
 	// Initiator side: punch, wrap, handshake, identity-check.
-	raw, err := mkParty(aID, aAddr).Initiate(ctx, bID)
+	raw, err := mkParty(a.Keypair(), aAddr).Initiate(ctx, bID)
 	if err != nil {
 		t.Fatalf("initiate: %v", err)
 	}

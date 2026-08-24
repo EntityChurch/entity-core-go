@@ -240,7 +240,7 @@ func signalingMeet(ctx context.Context, sigA, sigB *signaling.Client, idA, idB s
 	if !ownPresent {
 		return FailCheck("A's own request absent from its own collect — collect should be non-destructive (§5.2)")
 	}
-	resp, found := signaling.FindResponse(aMsgs, nonce, idA)
+	resp, _, found := signaling.FindResponse(aMsgs, nonce, idA)
 	if !found {
 		return FailCheck(fmt.Sprintf("A collected %d message(s) but found no nonce-matched response from B (%s)", len(aMsgs), label))
 	}

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"go.entitychurch.org/entity-core-go/core/entity"
+	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/types"
 )
 
@@ -27,26 +27,57 @@ func newMemCarrier() *memCarrier {
 	return &memCarrier{buckets: make(map[string][][]byte)}
 }
 
-func (m *memCarrier) OfferMessage(_ context.Context, key []byte, e entity.Entity) (uint, error) {
-	blob, err := ToBlob(e)
-	if err != nil {
-		return 0, err
-	}
+func (m *memCarrier) Offer(_ context.Context, key, message []byte) (uint, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.buckets[string(key)] = append(m.buckets[string(key)], blob)
+	m.buckets[string(key)] = append(m.buckets[string(key)], append([]byte(nil), message...))
 	return 200, nil
 }
 
-func (m *memCarrier) CollectMessages(_ context.Context, key []byte) (uint, []CollectedMessage, error) {
+// CollectMessagesVerified runs the REAL §6.4 read path over the stored bytes —
+// ClassifyCollected against the very key the bucket is filed under, exactly as
+// the live *Client does. The stub stays a blob store and verifies nothing
+// itself, so the bucket binding under test is the real one: a blob sealed for
+// another key fails here for the same reason it would fail against a node.
+func (m *memCarrier) CollectMessagesVerified(_ context.Context, key []byte) (uint, []CollectedMessage, []error, error) {
 	m.mu.Lock()
 	blobs := append([][]byte(nil), m.buckets[string(key)]...)
 	m.mu.Unlock()
 	msgs := make([]CollectedMessage, 0, len(blobs))
+	var skipped []error
 	for _, b := range blobs {
-		msgs = append(msgs, ClassifyBlob(b))
+		msg, err := ClassifyCollected(b, key)
+		if err != nil {
+			skipped = append(skipped, err)
+			continue
+		}
+		msgs = append(msgs, msg)
 	}
-	return 200, msgs, nil
+	return 200, msgs, skipped, nil
+}
+
+// orderedKeypairs returns two real keypairs whose derived peer-ids sort lo < hi.
+//
+// The punch's tie-break and the §6.5 offerer rule are both a byte-wise sort over
+// peer-ids, and the old tests spelled that with the literals "peer-A" / "peer-B".
+// Those cannot survive sealed deposits: the id in `initiator` must equal the id
+// the signature derives (§6.3 step 3), so a party's id is now whatever its key
+// says it is. Sorting two generated keys keeps the roles deterministic — lo is
+// still the impolite/lower side every assertion below means by "peer-A".
+func orderedKeypairs(t *testing.T) (lo, hi crypto.Keypair) {
+	t.Helper()
+	a, err := crypto.Generate()
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+	b, err := crypto.Generate()
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+	if a.PeerID().String() > b.PeerID().String() {
+		return b, a
+	}
+	return a, b
 }
 
 // freeLoopbackPort reserves a free loopback TCP port and returns its address
@@ -79,11 +110,14 @@ func TestPunchLoopbackDirectPath(t *testing.T) {
 	aAddr := freeLoopbackPort(t)
 	bAddr := freeLoopbackPort(t)
 
-	mkParty := func(self string, local *net.TCPAddr) *PunchParty {
+	kpA, kpB := orderedKeypairs(t)
+	idA, idB := kpA.PeerID().String(), kpB.PeerID().String()
+	mkParty := func(identity crypto.Keypair, local *net.TCPAddr) *PunchParty {
 		return &PunchParty{
-			Carrier: carrier,
-			Key:     key,
-			SelfID:  self,
+			Carrier:  carrier,
+			Key:      key,
+			Identity: identity,
+			Trust:    VerifyTolerant,
 			LocalCands: []types.NetworkCandidateData{
 				{Type: types.CandidateTypeSrflx, Substrate: types.CandidateSubstrateTCP, Address: local.String()},
 			},
@@ -95,8 +129,8 @@ func TestPunchLoopbackDirectPath(t *testing.T) {
 			DialTimeout:     300 * time.Millisecond,
 		}
 	}
-	aParty := mkParty("peer-A", aAddr)
-	bParty := mkParty("peer-B", bAddr)
+	aParty := mkParty(kpA, aAddr)
+	bParty := mkParty(kpB, bAddr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -109,7 +143,7 @@ func TestPunchLoopbackDirectPath(t *testing.T) {
 	aCh := make(chan result, 1)
 	bCh := make(chan result, 1)
 	go func() {
-		c, err := aParty.Initiate(ctx, "peer-B")
+		c, err := aParty.Initiate(ctx, idB)
 		aCh <- result{conn: c, err: err}
 	}()
 	go func() {
@@ -138,9 +172,10 @@ func TestPunchLoopbackDirectPath(t *testing.T) {
 	defer aRes.conn.Close()
 	defer bRes.conn.Close()
 
-	// The responder learned the initiator's identity from the exchange.
-	if bRes.remote != "peer-A" {
-		t.Errorf("responder saw initiator %q, want peer-A", bRes.remote)
+	// The responder learned the initiator's identity from the exchange — and now
+	// from the SIGNATURE over it, not from the `initiator` field.
+	if bRes.remote != idA {
+		t.Errorf("responder saw initiator %q, want %q", bRes.remote, idA)
 	}
 
 	// Prove it is ONE connection: a byte written on each side arrives on the
@@ -174,7 +209,7 @@ func recordingDial(dialed *atomic.Bool) DialFunc {
 // observe a missing hole — a listen-only side passes an ordinary punch test
 // unchanged (exactly how the retracted lower-dials/higher-listens shape slipped
 // past both impls) — so the guarantee is asserted at the DialFunc seam instead.
-// peer-A < peer-B, so pre-fix peer-B (the higher id) would listen-only and never
+// A sorts below B, so pre-fix B (the higher id) would listen-only and never
 // dial; this test fails on that regression.
 func TestPunchBothSidesDial(t *testing.T) {
 	carrier := newMemCarrier()
@@ -184,11 +219,14 @@ func TestPunchBothSidesDial(t *testing.T) {
 	bAddr := freeLoopbackPort(t)
 
 	var aDialed, bDialed atomic.Bool
-	mkParty := func(self string, local *net.TCPAddr, dialed *atomic.Bool) *PunchParty {
+	kpA, kpB := orderedKeypairs(t)
+	idB := kpB.PeerID().String()
+	mkParty := func(identity crypto.Keypair, local *net.TCPAddr, dialed *atomic.Bool) *PunchParty {
 		return &PunchParty{
-			Carrier: carrier,
-			Key:     key,
-			SelfID:  self,
+			Carrier:  carrier,
+			Key:      key,
+			Identity: identity,
+			Trust:    VerifyTolerant,
 			LocalCands: []types.NetworkCandidateData{
 				{Type: types.CandidateTypeSrflx, Substrate: types.CandidateSubstrateTCP, Address: local.String()},
 			},
@@ -199,8 +237,8 @@ func TestPunchBothSidesDial(t *testing.T) {
 			DialTimeout:     300 * time.Millisecond,
 		}
 	}
-	aParty := mkParty("peer-A", aAddr, &aDialed)
-	bParty := mkParty("peer-B", bAddr, &bDialed)
+	aParty := mkParty(kpA, aAddr, &aDialed)
+	bParty := mkParty(kpB, bAddr, &bDialed)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -212,7 +250,7 @@ func TestPunchBothSidesDial(t *testing.T) {
 	aCh := make(chan result, 1)
 	bCh := make(chan result, 1)
 	go func() {
-		c, err := aParty.Initiate(ctx, "peer-B")
+		c, err := aParty.Initiate(ctx, idB)
 		aCh <- result{conn: c, err: err}
 	}()
 	go func() {
@@ -241,10 +279,10 @@ func TestPunchBothSidesDial(t *testing.T) {
 	// The whole point: neither side is listen-only. A false here is the dual-hole
 	// regression — the peer's mapping never opens under real NAT.
 	if !aDialed.Load() {
-		t.Error("initiator (peer-A, lower id) never dialed — regressed to listen-only, its NAT hole never opens")
+		t.Error("initiator (lower id) never dialed — regressed to listen-only, its NAT hole never opens")
 	}
 	if !bDialed.Load() {
-		t.Error("responder (peer-B, higher id) never dialed — regressed to listen-only, its NAT hole never opens")
+		t.Error("responder (higher id) never dialed — regressed to listen-only, its NAT hole never opens")
 	}
 }
 

@@ -217,7 +217,7 @@ func meet(ctx context.Context, target node, kpA, kpB crypto.Keypair, idA, idB st
 	if !ownPresent {
 		return fmt.Errorf("A's own request absent from its own collect — should be non-destructive")
 	}
-	resp, found := signaling.FindResponse(aMsgs, nonce, idA)
+	resp, _, found := signaling.FindResponse(aMsgs, nonce, idA)
 	if !found {
 		return fmt.Errorf("A collected %d message(s) but found no nonce-matched response from B", len(aMsgs))
 	}

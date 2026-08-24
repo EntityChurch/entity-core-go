@@ -56,6 +56,13 @@ const (
 	// carrier under §6.2 (blob framing), §6.3 (self-contained signature) and §6.4
 	// (bucket read) UNCHANGED; only the payload differs.
 
+	// TypeSignalingSignedBlob is the §6.3 self-contained coordination envelope —
+	// what a bucket actually holds. §6.2's blob framing is repointed at this:
+	// the coordination entity rides inside it verbatim, and the signature and
+	// public key travel alongside so a stranger can verify with no key lookup.
+	// See SignedBlobData and ext/signaling's SealBlob/OpenBlob.
+	TypeSignalingSignedBlob = "system/signaling/signed-blob"
+
 	// TypeSignalingWebRTCOffer is the SDP offer (§6.5). Which peer sends it is
 	// decided by perfect negotiation, not by a fixed role — see ext/signaling's
 	// ResolveGlare.
@@ -149,6 +156,33 @@ type ConnectResponseData struct {
 type PunchSyncData struct {
 	FireAt uint64 `cbor:"fire_at"`
 	Nonce  []byte `cbor:"nonce"`
+}
+
+// SignedBlobData is the system/signaling/signed-blob payload (§6.3) — the
+// self-contained carrier a bucket holds.
+//
+// Entity is the §6.2 canonical entity encoding of the coordination entity
+// ({type, data, content_hash}), embedded VERBATIM as bytes. It is bytes and not
+// a decoded struct for the same reason §6.2 embeds data verbatim: the signature
+// binds the inner entity's content hash, so a decode/re-encode round trip
+// silently invalidates it. Nothing in this package ever re-encodes it.
+//
+// Signer is the signer's canonical peer-id, and it is a WIRE field, therefore
+// FORGEABLE. It is never trusted as given: ext/signaling's OpenBlob derives the
+// id canonically from (PublicKey, key_type) and requires Signer to match in
+// full, and only the derived value flows downstream. Carrying it anyway is
+// deliberate — it is the referent §3.2's pair key and §6.5's offerer rule
+// consume by name, so call sites re-use one verified value instead of each
+// re-deriving (re-derivation is where the 2026-08-04 id-encoding bug lived).
+//
+// PublicKey is the raw public key: the signature needs it and it is not
+// recoverable from a peer-id whose hash type is a real hash rather than the
+// identity multihash.
+type SignedBlobData struct {
+	Entity    []byte `cbor:"entity"`
+	Signer    string `cbor:"signer"`
+	PublicKey []byte `cbor:"public_key"`
+	Signature []byte `cbor:"signature"`
 }
 
 // WebRTCOfferData is the system/signaling/webrtc/offer payload (§6.5).
@@ -319,6 +353,18 @@ func PunchSyncDataFromEntity(e entity.Entity) (PunchSyncData, error) {
 // WebRTCOfferDataFromEntity decodes a webrtc/offer entity's data.
 func WebRTCOfferDataFromEntity(e entity.Entity) (WebRTCOfferData, error) {
 	var d WebRTCOfferData
+	err := ecf.Decode(e.Data, &d)
+	return d, err
+}
+
+// ToEntity encodes a signed-blob envelope entity.
+func (d SignedBlobData) ToEntity() (entity.Entity, error) {
+	return toSignalingEntity(TypeSignalingSignedBlob, d)
+}
+
+// SignedBlobDataFromEntity decodes a signed-blob entity's data.
+func SignedBlobDataFromEntity(e entity.Entity) (SignedBlobData, error) {
+	var d SignedBlobData
 	err := ecf.Decode(e.Data, &d)
 	return d, err
 }

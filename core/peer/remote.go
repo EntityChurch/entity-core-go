@@ -180,6 +180,32 @@ func (p *Peer) tryEstablishLive(ctx context.Context, peerID crypto.PeerID) remot
 	}
 	conn, err := seam(ctx, peerID)
 	if err != nil || conn == nil {
+		// THE OUTCOME IS UNCHANGED — still nil, still a fall-through to §10.2.
+		// What changes is that the REASON is no longer discarded.
+		//
+		// Every live-establishment failure used to arrive here and vanish: not
+		// logged, not counted, not distinguishable. That is fine while every
+		// failure really is "no direct path" — and stops being fine the moment
+		// a §6.3 collect policy can refuse a counterpart, because a policy
+		// refusal then presents to an operator as a NAT problem and gets
+		// diagnosed as one. entity-core-rust hit exactly this on their own
+		// policy raise (their refusal logged at debug alongside every traversal
+		// failure, driver reporting "no direct path within the deadline") and
+		// fixed it; ours is currently worse, because there is no log at all.
+		//
+		// It is LATENT here rather than live: Go's production posture is
+		// tolerant (peerwiring.DefaultTrust), so no refusal can reach this line
+		// yet. It arms itself the moment that constant flips to Require, which
+		// is the next step of the §6.1 flag day — so this lands before the flip
+		// rather than after it.
+		//
+		// core/peer cannot name the §6.3 sentinel: the DAG forbids core from
+		// importing ext, and ext/signaling is where that error lives. It does
+		// not need to — the error's own text says which check refused, so the
+		// reason travels without this layer knowing the taxonomy.
+		if err != nil {
+			p.debugf("live-establishment seam declined for %s: %v", peerID, err)
+		}
 		return nil
 	}
 	// Pool it as an ordinary transport (§10.3 obligation 1) and start keepalive

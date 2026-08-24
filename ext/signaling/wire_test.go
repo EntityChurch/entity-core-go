@@ -203,7 +203,7 @@ func TestFindResponseRequiresNonceEchoAndSkipsSelf(t *testing.T) {
 		mkResp("me", mine),            // my nonce but MY id — answering myself
 		mkResp("peer-B", mine),        // the real answer
 	}
-	got, ok := FindResponse(msgs, mine, "me")
+	got, _, ok := FindResponse(msgs, mine, "me")
 	if !ok {
 		t.Fatal("FindResponse found nothing, want peer-B's response")
 	}
@@ -212,7 +212,7 @@ func TestFindResponseRequiresNonceEchoAndSkipsSelf(t *testing.T) {
 	}
 
 	// No echo at all → nothing.
-	if _, ok := FindResponse([]CollectedMessage{mkResp("peer-B", other)}, mine, "me"); ok {
+	if _, _, ok := FindResponse([]CollectedMessage{mkResp("peer-B", other)}, mine, "me"); ok {
 		t.Fatal("FindResponse matched a response with the wrong nonce")
 	}
 }
@@ -227,11 +227,11 @@ func TestFindRequestSkipsMyOwn(t *testing.T) {
 		return CollectedMessage{Kind: KindConnectRequest, Request: &d}
 	}
 	msgs := []CollectedMessage{mkReq("me"), mkReq("peer-B")}
-	got, ok := FindRequest(msgs, "me")
+	got, _, ok := FindRequest(msgs, "me")
 	if !ok || got.Initiator != "peer-B" {
 		t.Fatalf("FindRequest returned %v/%q, want peer-B (skipped my own)", ok, initiatorOf(got))
 	}
-	if _, ok := FindRequest([]CollectedMessage{mkReq("me")}, "me"); ok {
+	if _, _, ok := FindRequest([]CollectedMessage{mkReq("me")}, "me"); ok {
 		t.Fatal("FindRequest answered my own request")
 	}
 }

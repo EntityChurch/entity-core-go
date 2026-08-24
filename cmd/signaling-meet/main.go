@@ -108,7 +108,7 @@ func runInitiator(ctx context.Context, sig *signaling.Client, key []byte, peerID
 	}
 	for time.Now().Before(deadline) {
 		if _, msgs, err := sig.CollectMessages(ctx, key); err == nil {
-			if resp, found := signaling.FindResponse(msgs, nonce, peerID); found {
+			if resp, _, found := signaling.FindResponse(msgs, nonce, peerID); found {
 				return map[string]any{
 					"ok":         true,
 					"nonce":      hex.EncodeToString(nonce),
