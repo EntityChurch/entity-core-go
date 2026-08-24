@@ -92,5 +92,6 @@ produce byte-equal CBOR and identical content hashes.
 | **peerissued-fixtures** | Emits the `REG-PEERISSUED-*` byte-equal fixture bundle (`-out <dir>`) for the peer-issued REGISTRY backend. |
 | **relay-fixtures** | Emits the EXTENSION-RELAY v1.0 byte-equal fixtures for the R5 cohort handoff. |
 | **internal/compute-corpus** | The compute differential corpus (GUIDE-CONFORMANCE §7c): `generate` a seeded frozen `(IR, bindings, budget)` set, `emit` boundary outcomes through core-go, `verify` the six anti-vacuity guards, `cross-bless` 2+ impls. Inputs only — Go is the fixture-builder, not the oracle. |
+| **webrtc-vectors** | Emits and verifies the §6.5 WebRTC-coordination differential vectors (`-emit` / `-verify`, CBOR). Four surfaces crossable with no browser, ICE stack, socket or NAT: entity wire shape, offerer/glare decisions, the `session_id` floor, and §6.3 verification. Files live in `docs/validation/vectors/`. A green run crosses the **coordination** layer only — never evidence that WebRTC transport works (§11.5.1: S5 is). |
 | **v767-corpus-verify** | Decodes the v7.67 agility conformance corpus and asserts file hash + structural invariants + cryptographic re-derivation. |
 | **v767-phase2-pins** | Derives the v7.67 Phase-2 matrix (M2/M3/M6) byte tuples from the pinned seeds and prints them as JSON per vector. |

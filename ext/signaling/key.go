@@ -1,8 +1,6 @@
 package signaling
 
 import (
-	"bytes"
-
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/hash"
 
@@ -75,8 +73,12 @@ func Derive(mode string, canonicalInput []byte) ([]byte, error) {
 // concatenation makes sorted("ab","c") and sorted("a","bc") both "abc", so two
 // different pairs would share one bucket.
 func PairKey(peerA, peerB string) ([]byte, error) {
+	// peerIDLess, not an inline compare: §6.5's offerer rule assigns negotiation
+	// roles from THIS ordering, and the spec pins it as the same sort rather than
+	// a second convention. Two copies that agreed today could drift apart later
+	// and desynchronize the key and the role at once.
 	lo, hi := peerA, peerB
-	if bytes.Compare([]byte(peerA), []byte(peerB)) > 0 {
+	if !peerIDLess(peerA, peerB) {
 		lo, hi = peerB, peerA
 	}
 	input := make([]byte, 0, len(lo)+len(hi)+1)

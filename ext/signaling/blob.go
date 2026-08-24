@@ -32,16 +32,30 @@ const (
 	KindConnectRequest
 	KindConnectResponse
 	KindPunchSync
+	// The §6.5 WebRTC-substrate payloads. They share this bucket with the §6.1
+	// native ones by design — same carrier, same framing, same read rules — so a
+	// native peer polling a mixed bucket classifies a webrtc/offer rather than
+	// choking on it, and vice versa.
+	KindWebRTCOffer
+	KindWebRTCAnswer
+	KindWebRTCCandidate
 )
 
 // CollectedMessage is one blob collected from a bucket, classified by which
-// message it is. Exactly one of Request/Response/Sync is non-nil, and only when
-// Kind matches; Kind == KindUnknown leaves all three nil.
+// message it is. Exactly one payload pointer is non-nil, and only when Kind
+// matches; Kind == KindUnknown leaves them all nil.
 type CollectedMessage struct {
 	Kind     MessageKind
 	Request  *types.ConnectRequestData
 	Response *types.ConnectResponseData
 	Sync     *types.PunchSyncData
+
+	// The §6.5 payloads. Offer/Answer deliberately expose no accessor that
+	// hands out SDP unguarded — see AcceptRemoteDescription, which is the only
+	// way §6.5's channel-identity MUST can be discharged.
+	WebRTCOffer     *types.WebRTCOfferData
+	WebRTCAnswer    *types.WebRTCAnswerData
+	WebRTCCandidate *types.WebRTCCandidateData
 }
 
 // ToBlob serializes a coordination entity into the opaque blob the node stores
@@ -87,6 +101,28 @@ func Classify(e entity.Entity) CollectedMessage {
 			return CollectedMessage{Kind: KindUnknown}
 		}
 		return CollectedMessage{Kind: KindPunchSync, Sync: &d}
+	case types.TypeSignalingWebRTCOffer:
+		d, err := types.WebRTCOfferDataFromEntity(e)
+		if err != nil || ValidateSessionID(d.SessionID) != nil {
+			// A short or absent session_id is a §6.5 MUST violation, and the
+			// §6.4 disposition for a message that fails a check is SKIP — the
+			// same treatment as undecodable, never an error. Enforced at
+			// classification so no caller can act on one by forgetting to look.
+			return CollectedMessage{Kind: KindUnknown}
+		}
+		return CollectedMessage{Kind: KindWebRTCOffer, WebRTCOffer: &d}
+	case types.TypeSignalingWebRTCAnswer:
+		d, err := types.WebRTCAnswerDataFromEntity(e)
+		if err != nil || ValidateSessionID(d.SessionID) != nil {
+			return CollectedMessage{Kind: KindUnknown}
+		}
+		return CollectedMessage{Kind: KindWebRTCAnswer, WebRTCAnswer: &d}
+	case types.TypeSignalingWebRTCCandidate:
+		d, err := types.WebRTCCandidateDataFromEntity(e)
+		if err != nil || ValidateSessionID(d.SessionID) != nil {
+			return CollectedMessage{Kind: KindUnknown}
+		}
+		return CollectedMessage{Kind: KindWebRTCCandidate, WebRTCCandidate: &d}
 	default:
 		return CollectedMessage{Kind: KindUnknown}
 	}

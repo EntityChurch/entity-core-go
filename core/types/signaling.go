@@ -49,6 +49,28 @@ const (
 	TypeSignalingConnectResponse = "system/signaling/connect-response"
 	// TypeSignalingPunchSync is the §6 fire-time coordination message (§6.1, §7.2).
 	TypeSignalingPunchSync = "system/signaling/punch-sync"
+
+	// The §6.5 WebRTC-substrate coordination messages (folded 2026-08-02). The
+	// §6.1 shapes above cannot carry an SDP/ICE exchange — they hold a candidates
+	// array and no SDP — so the substrate defines three of its own. They ride the
+	// carrier under §6.2 (blob framing), §6.3 (self-contained signature) and §6.4
+	// (bucket read) UNCHANGED; only the payload differs.
+
+	// TypeSignalingWebRTCOffer is the SDP offer (§6.5). Which peer sends it is
+	// decided by perfect negotiation, not by a fixed role — see ext/signaling's
+	// ResolveGlare.
+	TypeSignalingWebRTCOffer = "system/signaling/webrtc/offer"
+	// TypeSignalingWebRTCAnswer is the responder's SDP answer (§6.5).
+	TypeSignalingWebRTCAnswer = "system/signaling/webrtc/answer"
+	// TypeSignalingWebRTCCandidate is one trickled ICE candidate, either
+	// direction, post-offer/answer (§6.5, RFC 8838).
+	TypeSignalingWebRTCCandidate = "system/signaling/webrtc/candidate"
+
+	// WebRTCSignalingSchema is the §6.5 schema version — the identifier a
+	// system/peer/transport/webrtc profile pins in its signaling_schema field
+	// (EXTENSION-NETWORK §6.5.2d). Declared here so the profile and the messages
+	// it describes name the same constant.
+	WebRTCSignalingSchema = "webrtc-sdp-ice/1"
 )
 
 // OfferRequestData is the system/signaling/offer-request payload (§4.1).
@@ -129,6 +151,58 @@ type PunchSyncData struct {
 	Nonce  []byte `cbor:"nonce"`
 }
 
+// WebRTCOfferData is the system/signaling/webrtc/offer payload (§6.5).
+//
+// SDP is OPAQUE on purpose and is fed VERBATIM to setRemoteDescription — it is
+// RFC 8866 text produced by the browser's own stack, so structuring it here
+// would be wrong (contrast Candidate below, which must be structured). It is
+// also why this type must never be built by decoding and re-encoding a received
+// offer: §6.2 embeds data verbatim because a re-encode round trip silently
+// invalidates the §6.3 signature.
+//
+// SessionID correlates this pairing within one rendezvous key and MUST be
+// freshly random and ≥16 bytes — see signaling.GenerateSessionID. A weak or
+// colliding session_id splices two concurrent pairings' offer/answer/candidates
+// together, which is a silent cross-handshake rather than a visible failure.
+type WebRTCOfferData struct {
+	SDP       string `cbor:"sdp"`
+	SessionID []byte `cbor:"session_id"`
+}
+
+// WebRTCAnswerData is the system/signaling/webrtc/answer payload (§6.5). Same
+// shape as the offer; the TYPE is what distinguishes them on the wire, which is
+// the §6.2 reason the type travels with the blob.
+type WebRTCAnswerData struct {
+	SDP       string `cbor:"sdp"`
+	SessionID []byte `cbor:"session_id"`
+}
+
+// WebRTCCandidateData is the system/signaling/webrtc/candidate payload (§6.5) —
+// one trickled ICE candidate (RFC 8838).
+//
+// STRUCTURED, not a bare line, and NOT system/network/candidate. Two distinct
+// reasons, both load-bearing:
+//
+//   - RTCPeerConnection.addIceCandidate() requires sdp_mid and sdp_mline_index
+//     alongside the line and rejects a bare line, so they are distinct REQUIRED
+//     fields (an S4-implementer finding, not a stylistic choice).
+//   - This is the BROWSER's ICE format, produced and consumed by the browser's
+//     own ICE stack and carried verbatim. It MUST NOT be translated to or from
+//     NetworkCandidateData (EXTENSION-NETWORK §6.7.3), which is entity-core's own
+//     reachability fact — the same non-collapse §9.3 draws for reflection. The
+//     browser's srflx comes from its own STUN, never from observe-address.
+//
+// UsernameFragment is OPTIONAL: pointer + omitempty so an absent value stays
+// absent rather than encoding as an empty string, which addIceCandidate would
+// read as a real (wrong) ufrag.
+type WebRTCCandidateData struct {
+	Candidate        string  `cbor:"candidate"`
+	SDPMid           string  `cbor:"sdp_mid"`
+	SDPMLineIndex    uint64  `cbor:"sdp_mline_index"`
+	SessionID        []byte  `cbor:"session_id"`
+	UsernameFragment *string `cbor:"username_fragment,omitempty"`
+}
+
 // ToEntity encodes an offer-request as a system/signaling/offer-request entity.
 func (d OfferRequestData) ToEntity() (entity.Entity, error) {
 	return toSignalingEntity(TypeSignalingOfferRequest, d)
@@ -167,6 +241,21 @@ func (d ConnectResponseData) ToEntity() (entity.Entity, error) {
 // ToEntity encodes a punch-sync entity.
 func (d PunchSyncData) ToEntity() (entity.Entity, error) {
 	return toSignalingEntity(TypeSignalingPunchSync, d)
+}
+
+// ToEntity encodes a webrtc/offer entity.
+func (d WebRTCOfferData) ToEntity() (entity.Entity, error) {
+	return toSignalingEntity(TypeSignalingWebRTCOffer, d)
+}
+
+// ToEntity encodes a webrtc/answer entity.
+func (d WebRTCAnswerData) ToEntity() (entity.Entity, error) {
+	return toSignalingEntity(TypeSignalingWebRTCAnswer, d)
+}
+
+// ToEntity encodes a webrtc/candidate entity.
+func (d WebRTCCandidateData) ToEntity() (entity.Entity, error) {
+	return toSignalingEntity(TypeSignalingWebRTCCandidate, d)
 }
 
 func toSignalingEntity(entityType string, d any) (entity.Entity, error) {
@@ -223,6 +312,27 @@ func ConnectResponseDataFromEntity(e entity.Entity) (ConnectResponseData, error)
 // PunchSyncDataFromEntity decodes a punch-sync entity's data.
 func PunchSyncDataFromEntity(e entity.Entity) (PunchSyncData, error) {
 	var d PunchSyncData
+	err := ecf.Decode(e.Data, &d)
+	return d, err
+}
+
+// WebRTCOfferDataFromEntity decodes a webrtc/offer entity's data.
+func WebRTCOfferDataFromEntity(e entity.Entity) (WebRTCOfferData, error) {
+	var d WebRTCOfferData
+	err := ecf.Decode(e.Data, &d)
+	return d, err
+}
+
+// WebRTCAnswerDataFromEntity decodes a webrtc/answer entity's data.
+func WebRTCAnswerDataFromEntity(e entity.Entity) (WebRTCAnswerData, error) {
+	var d WebRTCAnswerData
+	err := ecf.Decode(e.Data, &d)
+	return d, err
+}
+
+// WebRTCCandidateDataFromEntity decodes a webrtc/candidate entity's data.
+func WebRTCCandidateDataFromEntity(e entity.Entity) (WebRTCCandidateData, error) {
+	var d WebRTCCandidateData
 	err := ecf.Decode(e.Data, &d)
 	return d, err
 }
