@@ -155,8 +155,23 @@ func (d *Dispatcher) DispatchLocalExecute(ctx context.Context, req LocalExecuteR
 	// handler grant, never on caller cap" applies to sub-dispatch from
 	// inside a handler — this is the entry, so the explicit cap option
 	// supplies the authority.
+	//
+	// WithResource is REQUIRED here and mirrors wire entry, where handleExecute
+	// seeds hctx.Resource = normalizeResourceTargets(execData.Resource) directly
+	// on the handler's context (execute.go). This entry point instead re-dispatches
+	// through makeLocalExecute, whose child context takes its resource from
+	// execOpts.Resource (NOT callerCtx.Resource — the §5.2 sub-dispatch rule that a
+	// child inherits no parent resource). So rootCtx.Resource above never reaches the
+	// handler; without passing it as the opt, every in-process ENTRY dispatch that
+	// names a resource dropped it to nil — the confused inverse of the §5.2 rule,
+	// applied to an entry that is NOT a sub-dispatch. (Found by workbench-go with a
+	// kernel-level reproducer; the gap was invisible because
+	// subdispatch_resource_dimension_test.go exercises both sub-dispatch directions
+	// but never enters through DispatchLocalExecute, which is how every SDK consumer
+	// dispatches.)
 	return rootCtx.Execute(ctx, req.URI, req.Operation, req.Params,
-		handler.WithCapability(req.CallerCapability))
+		handler.WithCapability(req.CallerCapability),
+		handler.WithResource(req.Resource))
 }
 
 // makeLocalExecute returns a closure that dispatches a local Execute request
@@ -218,11 +233,13 @@ func (d *Dispatcher) makeLocalExecute(parentCtx context.Context, callerCtx *hand
 			if d.RemoteExecute == nil {
 				return nil, fmt.Errorf("remote execute not available")
 			}
-			// Pass resource: prefer explicit opt, then inherited from parent.
+			// A sub-dispatch that names no resource has none — the remote child
+			// MUST NOT inherit the parent's (§5.2, 0.8.2; arch ROUTING-2026-08-18-g
+			// §5). The receiving peer authorizes this EXECUTE through its own
+			// dispatch_request check, so the §5.2 dimension binds there; sending an
+			// inherited resource would populate the remote child's context with a
+			// target the caller never named. Explicit opt only, nil otherwise.
 			resource := execOpts.Resource
-			if resource == nil {
-				resource = callerCtx.Resource
-			}
 			// Pass deliver_to for async delivery on the remote peer.
 			// The deliver_token is the handler grant for the inbox handler —
 			// authorizes the remote peer to deliver the result back.
@@ -340,7 +357,28 @@ func (d *Dispatcher) makeLocalExecute(parentCtx context.Context, callerCtx *hand
 			resp, _ := handler.NewErrorResponse(403, "capability_denied", "granter unresolvable: "+gerr.Error())
 			return resp, nil
 		}
-		if !capability.CheckPermission(types.ExecuteData{Operation: operation}, capData, pattern, d.LocalPeerID, granterPeerID) {
+		// Determine the child's resource target BEFORE the L1 check, and hand it
+		// TO the check. §5.2's Dimension 3 tests `resource_target is not null` —
+		// the field, not any wire-entry door — so a sub-dispatch that computes a
+		// resource, propagates it as the child's authorization target (below), and
+		// yet passes the check a literal that omits it has MOVED the resource past
+		// its own scope check (arch ROUTING-2026-08-18-d §2, SA-PY-9). §6.2 assigns
+		// `system/handler:register`'s install-path authorization to exactly this
+		// check, and register always carries a resource (the pattern).
+		//
+		// A sub-dispatch that names NO resource has NO resource (§5.2, normative
+		// 0.8.2; arch ROUTING-2026-08-18-g §5): the child MUST NOT inherit the
+		// parent's resource targets — not into this check (nil → Dimension 3
+		// deferred to the handler, exactly as the wire path when resource is
+		// absent) and not into the child context below. go, py and rust are
+		// aligned on this after go recommended against its own prior inheritance.
+		// Inheritance would manufacture a target the caller never named — a
+		// confused-deputy shape reached from the fix for a confused-deputy shape.
+		// Normalize entity://localPeer/path → path when a resource IS named, so
+		// local-dispatch callers can pass URI-form resources (e.g. continuation
+		// OnError.URI), matching the wire-entry handleExecute behavior above.
+		childResource := normalizeResourceTargets(execOpts.Resource, d.LocalPeerID)
+		if !capability.CheckPermission(types.ExecuteData{Operation: operation, Resource: childResource}, capData, pattern, d.LocalPeerID, granterPeerID) {
 			resp, _ := handler.NewErrorResponse(403, "capability_denied", "insufficient capability for handler scope: "+pattern)
 			return resp, nil
 		}
@@ -359,15 +397,8 @@ func (d *Dispatcher) makeLocalExecute(parentCtx context.Context, callerCtx *hand
 			}
 		}
 
-		// Determine resource: explicit override from opts, or inherit from parent.
-		// Normalize entity://localPeer/path → path so local-dispatch callers can
-		// pass URI-form resources (e.g. continuation OnError.URI), matching the
-		// wire-entry handleExecute behavior at the top of this file.
-		childResource := callerCtx.Resource
-		if execOpts.Resource != nil {
-			childResource = execOpts.Resource
-		}
-		childResource = normalizeResourceTargets(childResource, d.LocalPeerID)
+		// (childResource was resolved above, before the L1 resource-dimension
+		// check, and is reused here as the child context's authorization target.)
 
 		// CallerCapability is the chain initiator and propagates unchanged
 		// across sub-dispatches (V7 §6.8, PROPOSAL-ENTITY-NATIVE-HANDLER-DISPATCH §6.2).

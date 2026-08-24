@@ -51,7 +51,7 @@ func TestClosureScope(t *testing.T) {
 		t.Fatalf("Put publishedRoot: %v", err)
 	}
 
-	li.Set(types.PublishedRootStoragePath(peerID), prEnt.ContentHash)
+	li.Set(types.PublishedRootStoragePath(), prEnt.ContentHash)
 
 	// Synthesize an "authenticating signature" leaf at the invariant pointer
 	// so the closure also covers it.

@@ -121,8 +121,12 @@ func TestPublishedRootHashStability(t *testing.T) {
 }
 
 func TestPublishedRootStoragePath(t *testing.T) {
-	got := PublishedRootStoragePath(fakePeerID)
-	want := "system/peer/published-root/" + fakePeerID
+	// Per-peer singleton at a FIXED relative path — no trailing peer-id segment
+	// (arch 2026-08-18: the namespace already carries the peer; appending base58
+	// named it twice and diverged from rust/py). Qualified form is
+	// /{peer_id}/system/peer/published-root.
+	got := PublishedRootStoragePath()
+	want := "system/peer/published-root"
 	if got != want {
 		t.Fatalf("path: want %q got %q", want, got)
 	}

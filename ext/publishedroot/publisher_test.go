@@ -81,7 +81,7 @@ func TestPublishMintsBindAndSignature(t *testing.T) {
 	}
 
 	// Storage path bound.
-	storagePath := types.PublishedRootStoragePath(pd.PeerID)
+	storagePath := types.PublishedRootStoragePath()
 	got, ok := p.li.Get(storagePath)
 	if !ok {
 		t.Fatalf("published-root not bound at %s", storagePath)
@@ -164,6 +164,64 @@ func TestPublishSeqMonotonicAndPredecessorChain(t *testing.T) {
 	}
 	if curr.ContentHash != e3.ContentHash {
 		t.Fatal("Current() not pointing at the latest publish")
+	}
+}
+
+// TestSetupAuthorityRecoversSeqAcrossRestart pins the §6.5.3.1 rollback
+// defense: a publisher constructed over a store that ALREADY carries a bound
+// head must continue the monotonic seq chain, not restart at 1 from zeroed
+// process memory. Teeth: without the recovery in SetupAuthority, p2's first
+// publish is seq=1 with a nil predecessor and this fails at the seq==4 assert.
+func TestSetupAuthorityRecoversSeqAcrossRestart(t *testing.T) {
+	cs := store.NewMemoryContentStore()
+	li := store.NewMemoryLocationIndex()
+	kp, err := crypto.Generate()
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	identity, err := kp.IdentityEntity()
+	if err != nil {
+		t.Fatalf("identity entity: %v", err)
+	}
+	if _, err := cs.Put(identity); err != nil {
+		t.Fatalf("put identity: %v", err)
+	}
+
+	// First lifetime: publish three heads, seq reaches 3.
+	tracker1 := tree.NewRootTracker(cs, string(kp.PeerID()), nil)
+	p1 := NewPublisher(cs, tracker1, PrefixForLocalPeer, nil)
+	if err := p1.SetupAuthority(li, kp, identity, false); err != nil {
+		t.Fatalf("p1 setup: %v", err)
+	}
+	p1.Publish(fakeRoot(0x01))
+	p1.Publish(fakeRoot(0x02))
+	e3, err := p1.Publish(fakeRoot(0x03))
+	if err != nil {
+		t.Fatalf("p1 publish 3: %v", err)
+	}
+
+	// Restart: a NEW publisher over the SAME store + location index, as would
+	// happen on process restart against persistent storage. Its lastSeq is
+	// zero at construction; SetupAuthority must recover 3 from the bound head.
+	tracker2 := tree.NewRootTracker(cs, string(kp.PeerID()), nil)
+	p2 := NewPublisher(cs, tracker2, PrefixForLocalPeer, nil)
+	if err := p2.SetupAuthority(li, kp, identity, false); err != nil {
+		t.Fatalf("p2 setup: %v", err)
+	}
+
+	e4, err := p2.Publish(fakeRoot(0x04))
+	if err != nil {
+		t.Fatalf("p2 publish 4: %v", err)
+	}
+	d4, err := types.PublishedRootDataFromEntity(e4)
+	if err != nil {
+		t.Fatalf("decode e4: %v", err)
+	}
+	if d4.Seq != 4 {
+		t.Fatalf("post-restart Seq: want 4 (continues the chain), got %d — SetupAuthority did not recover seq from the store", d4.Seq)
+	}
+	if d4.Predecessor == nil || !bytes.Equal(d4.Predecessor.Bytes(), e3.ContentHash.Bytes()) {
+		t.Fatal("post-restart Predecessor should chain to the pre-restart head e3")
 	}
 }
 

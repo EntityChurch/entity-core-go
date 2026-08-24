@@ -126,7 +126,7 @@ func (s *ClosureScope) refresh() {
 	if s.Head != nil {
 		head, ok = s.Head()
 	} else {
-		head, ok = s.Index.Get(types.PublishedRootStoragePath(s.LocalPeerID))
+		head, ok = s.Index.Get(types.PublishedRootStoragePath())
 	}
 
 	s.mu.Lock()

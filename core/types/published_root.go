@@ -97,19 +97,22 @@ func PublishedRootDataFromEntity(e entity.Entity) (PublishedRootData, error) {
 	return d, nil
 }
 
-// PublishedRootStoragePath returns the canonical local storage path for a
-// peer's published-root entity. Pinned to the entity-type path + Base58
-// peer-id segment so a consumer can locate "the current published-root for
-// peer X" without enumerating the type's content-addressed siblings.
+// PublishedRootStoragePath returns the peer-relative storage path for a peer's
+// published-root entity. It is a per-peer SINGLETON at a fixed path, like the
+// issuer-policy — the peer namespace is supplied by qualification, so the
+// qualified form is `/{peer_id}/system/peer/published-root` and a consumer
+// locating peer X's root reads `/{X}/system/peer/published-root`.
 //
-//	system/peer/published-root/{base58_peer_id}
+//	system/peer/published-root
 //
-// Changed from {peer_id_hex} to {base58_peer_id} per Ruling-1: every peer-id
-// surface in the cohort is Base58 since the V7 §1.5 multikey erratum.
-//
-// This is the path MANIFEST_GET resolves against (§4 cross-ref Q5: supersedes
-// the legacy `signed_pointer: "system/peer/published-root"` string in
-// NETWORK §6.5.3 with this entity).
-func PublishedRootStoragePath(peerID string) string {
-	return "system/peer/published-root/" + peerID
+// NO trailing peer-id segment. Appending the Base58 peer-id (the prior form)
+// named the peer TWICE — the namespace already carries it — and diverged from
+// rust and py, which bind at `{peer}/system/peer/published-root`. Ruled
+// 2026-08-18 (arch, from workbench-go's cross-impl run): a path helper MUST NOT
+// re-qualify a namespace the peer prefix already supplies (D12 / the
+// double-qualify foreground invariant). The writer (publisher.go) and reader
+// (closure_scope.go) shared this helper, so Go-on-Go passed deceptively; the
+// cross-impl FAIL against a Rust consumer was the true signal.
+func PublishedRootStoragePath() string {
+	return "system/peer/published-root"
 }

@@ -200,6 +200,24 @@ func (p *Publisher) SetupAuthority(li store.LocationIndex, kp crypto.Keypair, id
 	// setup time and reused for every Publish.
 	p.peerID = string(crypto.PeerIDFromKeypair(kp))
 	p.authorityOK = true
+
+	// Recover seq + predecessor from the store so a restart CONTINUES the
+	// monotonic chain instead of restarting at seq=1 from zeroed process
+	// memory. §6.5.3.1 makes seq monotonicity a rollback defense: a publisher
+	// that restarts at 1 makes every consumer that already saw seq=N reject
+	// the new head as a rollback — the defense working as designed against a
+	// bug. The bound head is the content hash at the canonical head-pointer
+	// path, so it is also the predecessor for the next publish. (Found by
+	// workbench-go's cross-impl run; ROUTING-2026-08-18-p §6.)
+	if h, ok := li.Get(types.PublishedRootStoragePath()); ok {
+		if ent, ok := p.cs.Get(h); ok {
+			if pr, err := types.PublishedRootDataFromEntity(ent); err == nil {
+				p.lastSeq = pr.Seq
+				recovered := h
+				p.lastHash = &recovered
+			}
+		}
+	}
 	p.mu.Unlock()
 
 	if enableTracking {
@@ -364,7 +382,6 @@ func (p *Publisher) publishOnce(rootHash hash.Hash) (entity.Entity, error) {
 	kp := *p.kp
 	cs := p.cs
 	peerIDHash := p.peerIDHash
-	peerID := p.peerID
 	p.mu.Unlock()
 
 	prEntity, err := pr.ToEntity()
@@ -436,7 +453,7 @@ func (p *Publisher) publishOnce(rootHash hash.Hash) (entity.Entity, error) {
 			return entity.Entity{}, fmt.Errorf("bind published-root sig at %s: %w", sigPath, err)
 		}
 	}
-	storagePath := types.PublishedRootStoragePath(peerID)
+	storagePath := types.PublishedRootStoragePath()
 	if cw, ok := li.(store.ContextualWriter); ok {
 		if _, err := cw.SetWithContext(storagePath, prEntity.ContentHash, publisherCtx); err != nil {
 			return entity.Entity{}, fmt.Errorf("bind published-root at %s: %w", storagePath, err)
