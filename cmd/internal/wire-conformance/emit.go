@@ -83,6 +83,35 @@ func runEmitCanonical(args []string) error {
 		return fmt.Errorf("load corpus: %w", err)
 	}
 
+	em := buildEmission(vectors, implVersion)
+
+	out, err := ecf.Encode(em)
+	if err != nil {
+		return fmt.Errorf("encode emission: %w", err)
+	}
+	if err := os.WriteFile(outPath, out, 0644); err != nil {
+		return fmt.Errorf("write emission: %w", err)
+	}
+
+	encodeIDs := sortedKeys(em.EncodeResults)
+	decodeIDs := sortedKeys(em.DecodeResults)
+	errorIDs := sortedKeys(em.Errors)
+	fmt.Printf("emit-canonical: wrote %s (%d bytes)\n", outPath, len(out))
+	fmt.Printf("  encode_results: %d vectors\n", len(encodeIDs))
+	fmt.Printf("  decode_results: %d vectors\n", len(decodeIDs))
+	fmt.Printf("  decode_codes:   %d vectors\n", len(em.DecodeCodes))
+	fmt.Printf("  errors:         %d vectors\n", len(errorIDs))
+	if len(errorIDs) > 0 {
+		fmt.Printf("  errored ids: %s\n", strings.Join(errorIDs, ", "))
+	}
+	return nil
+}
+
+// buildEmission runs every corpus vector through Go's canonical pipeline —
+// encoding encode_equal inputs and strict-decoding decode_reject bytes — into
+// the per-impl emission (GUIDE-CONFORMANCE §3.1). Shared by the emit-canonical
+// CLI and the in-process conformance test so both exercise the same path.
+func buildEmission(vectors []rawVector, implVersion string) emission {
 	em := emission{
 		Impl:          implName,
 		ImplVersion:   implVersion,
@@ -93,7 +122,6 @@ func runEmitCanonical(args []string) error {
 		DecodeCodes:   map[string]string{},
 		Errors:        map[string]string{},
 	}
-
 	for _, v := range vectors {
 		switch v.Kind {
 		case "encode_equal":
@@ -116,27 +144,7 @@ func runEmitCanonical(args []string) error {
 			em.Errors[v.ID] = fmt.Sprintf("unknown kind: %q", v.Kind)
 		}
 	}
-
-	out, err := ecf.Encode(em)
-	if err != nil {
-		return fmt.Errorf("encode emission: %w", err)
-	}
-	if err := os.WriteFile(outPath, out, 0644); err != nil {
-		return fmt.Errorf("write emission: %w", err)
-	}
-
-	encodeIDs := sortedKeys(em.EncodeResults)
-	decodeIDs := sortedKeys(em.DecodeResults)
-	errorIDs := sortedKeys(em.Errors)
-	fmt.Printf("emit-canonical: wrote %s (%d bytes)\n", outPath, len(out))
-	fmt.Printf("  encode_results: %d vectors\n", len(encodeIDs))
-	fmt.Printf("  decode_results: %d vectors\n", len(decodeIDs))
-	fmt.Printf("  decode_codes:   %d vectors\n", len(em.DecodeCodes))
-	fmt.Printf("  errors:         %d vectors\n", len(errorIDs))
-	if len(errorIDs) > 0 {
-		fmt.Printf("  errored ids: %s\n", strings.Join(errorIDs, ", "))
-	}
-	return nil
+	return em
 }
 
 // rawVector is a vector as loaded from the corpus, with Input preserved as

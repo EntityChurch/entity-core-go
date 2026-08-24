@@ -5,22 +5,25 @@ import (
 	"os"
 	"strings"
 	"testing"
-
-	"github.com/fxamacker/cbor/v2"
 )
 
-// TestEmissionRoundTrip: load the emission file we just produced and
-// spot-check that the key vectors landed where expected, with the
-// shapes Appendix E §E.2 prescribes.
+// TestEmissionRoundTrip builds the emission in-process from the corpus in its
+// canonical home (entity-core-protocol) and spot-checks that the key vectors
+// landed where expected, with the shapes Appendix E §E.2 prescribes. Sourcing
+// the corpus directly — rather than a vendored snapshot — keeps one source of
+// truth and makes drift impossible; the test skips when the sibling repo is
+// not checked out so a standalone clone still builds and tests.
 func TestEmissionRoundTrip(t *testing.T) {
-	data, err := os.ReadFile("../../../test-vectors/v1/emit-go.cbor")
+	const corpusPath = "../../../../entity-core-protocol/specs/test-vectors/ecf-conformance/conformance-vectors-v1.cbor"
+	data, err := os.ReadFile(corpusPath)
 	if err != nil {
-		t.Skipf("emit-go.cbor not present; skipping (run emit-canonical first): %v", err)
+		t.Skipf("canonical corpus not present (%s); skipping: %v", corpusPath, err)
 	}
-	var em emission
-	if err := cbor.Unmarshal(data, &em); err != nil {
-		t.Fatalf("decode emission: %v", err)
+	vectors, err := loadCorpus(data)
+	if err != nil {
+		t.Fatalf("load corpus: %v", err)
 	}
+	em := buildEmission(vectors, "test")
 	if em.Impl != "core-go" {
 		t.Errorf("impl mismatch: %s", em.Impl)
 	}

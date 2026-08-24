@@ -11,7 +11,7 @@
 // See:
 //   - ENTITY-CBOR-ENCODING.md Appendix E (normative)
 //   - core-protocol-domain/guides/GUIDE-CONFORMANCE.md
-//   - core-protocol-domain/specs/test-vectors/ecf-conformance/conformance-vectors-v1.diag
+//   - entity-core-protocol/specs/test-vectors/ecf-conformance/conformance-vectors-v1.diag
 package main
 
 import (
@@ -70,14 +70,14 @@ Subcommands:
                     Pre-Appendix-E W2 regression fixture (deprecated; kept
                     so the older interop scripts still work).
 
-Examples:
+Examples (run from the entity-core-go repo root):
   wire-conformance build-fixture \
-    --diag ../entity-core-architecture/docs/architecture/v7.0-core-revision/core-protocol-domain/specs/test-vectors/ecf-conformance/conformance-vectors-v1.diag \
-    --out  ./test-vectors/v1/conformance-vectors-v1.cbor
+    --diag ../entity-core-protocol/specs/test-vectors/ecf-conformance/conformance-vectors-v1.diag \
+    --out  ./conformance-vectors-v1.cbor
 
   wire-conformance emit-canonical \
-    --input ./test-vectors/v1/conformance-vectors-v1.cbor \
-    --out   ./test-vectors/v1/emit-go.cbor
+    --input ./conformance-vectors-v1.cbor \
+    --out   ./emit-go.cbor
 `)
 }
 
