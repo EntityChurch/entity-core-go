@@ -51,8 +51,16 @@ read it as a fleet version.)
 
 ## [Unreleased]
 
-Development lands on `dev`; `master` carries the last release. **Will be cut as
-`0.9.0`** — see Versioning above. Highlights since `v0.8.0`, all measured in-tree:
+Development lands on `dev`; `master` carries the last release.
+
+## [0.9.0] — 2026-08-24
+
+_Protocol: Entity Core Protocol **V7**, carried out-of-band per [ADR-0002]. The
+revision each claim was measured against is named at its own site — README
+(`--profile core`, V7 §9.0 as folded at v7.75), `docs/STATUS.md`, and the
+entries below._
+
+Highlights since `v0.8.0`, all measured in-tree:
 
 - **Published-root convergence holds under load (§6.5.6).** The undebounced
   publisher spawned one goroutine per tracked-root advance, each carrying a

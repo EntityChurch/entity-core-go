@@ -161,7 +161,7 @@ go.entitychurch.org/entity-core-go/cmd
 ```
 
 Downstream consumers (e.g. `entity-workbench-go`) pin the versioned module —
-for example `require go.entitychurch.org/entity-core-go/core v0.8.0` — and
+for example `require go.entitychurch.org/entity-core-go/core v0.9.0` — and
 resolve it through the vanity domain. Published manifests never carry a
 sibling-path `replace`.
 

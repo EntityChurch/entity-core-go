@@ -25,11 +25,11 @@ require (
 	github.com/miekg/dns v1.1.27 // indirect
 	github.com/mr-tron/base58 v1.2.0
 	github.com/x448/float16 v0.8.4 // indirect
-	go.entitychurch.org/entity-core-go/core v0.8.0
+	go.entitychurch.org/entity-core-go/core v0.9.0
 	golang.org/x/crypto v0.53.0
 	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sys v0.46.0
 	golang.org/x/text v0.38.0
 )
 
-replace go.entitychurch.org/entity-core-go/core v0.8.0 => ../core
+replace go.entitychurch.org/entity-core-go/core v0.9.0 => ../core
