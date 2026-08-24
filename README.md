@@ -16,9 +16,13 @@ conventions). `CLAUDE.md` is a shim to those two, per ADR-0016.
 | `entity-core-protocol` | the core floor — `ENTITY-CORE-PROTOCOL.md`, `ENTITY-CBOR-ENCODING.md`, `ENTITY-NATIVE-TYPE-SYSTEM.md`, and the conformance vectors |
 | `entity-system-architecture` | every `EXTENSION-*.md`, the guides, and the proposal record |
 
-Implementations implement the spec; they do not define it. Gaps and
-ambiguities are logged in [`docs/validation/spec-issues/`](docs/validation/spec-issues/)
-and routed upstream rather than papered over locally.
+Implementations implement the spec; they do not define it. When this repo hits
+a gap or an ambiguity it writes it up as a spec issue and routes it upstream to
+whichever of those two repos owns the text, rather than papering over it
+locally — the ruling comes back as spec text, and only then does it get
+implemented here. The write-ups themselves are working notes kept in this
+repo's internal `docs/validation/` tier; the outcome that matters to a reader
+is in the spec.
 
 ---
 
@@ -41,8 +45,8 @@ All four passes exit 0, and the same four reproduce identically under
 `HASH_TYPE=sha384` — the non-floor home format is a separate gate, because it
 is the only run in which a home-format defect is reachable at all.
 
-The living measurement is [`docs/status/WORK-STATUS.md`](docs/status/WORK-STATUS.md) §1,
-which is re-measured rather than carried forward. A skip counts as a failure.
+The living measurement is [`docs/STATUS.md`](docs/STATUS.md), which is
+re-measured rather than carried forward. A skip counts as a failure.
 
 ---
 
@@ -192,9 +196,13 @@ make validate-python    # requires ../entity-core-py/
 TYPES=go,rust,python ./scripts/test-cross-peer.sh
 ```
 
-Cross-implementation results are written up per peer under
-[`docs/validation/reports/`](docs/validation/reports/), dated and pinned to the
-commit each peer was measured at.
+Cross-implementation results are written up per peer, dated and pinned to the
+commit each peer was measured at, because a conformance number is only true of
+the commit it was taken at. Those write-ups are working notes in this repo's
+internal `docs/validation/` tier rather than published documentation — they go
+stale the moment the peer they measure commits again. What a reader should take
+from them is the current headline, which is in [`docs/STATUS.md`](docs/STATUS.md),
+and anything they turned up about the spec, which is routed upstream.
 
 **On what the validator is.** It scores against the spec, and it has itself
 been the defect. A 2026-08-07 re-measure under a corrected oracle withdrew

@@ -99,8 +99,84 @@ title = "Build resource caps"
 blurb = "The podman build resource limits (defaults in the Makefile; per-machine override via env or an untracked caps.local.mk)."
 group = "Guides"
 
+# ── Status ────────────────────────────────────────────────────────────────────
+# The single rolling status file publishes; the dated snapshots beside it do not.
+# [ADR-0031] separates the two by PATH rather than by remembering a filename:
+# `docs/STATUS.md` is the rolling log — one file, re-measured, never appended to —
+# and `docs/status/` is left holding nothing but dated HANDOFF-/CHECKPOINT-/ROUTING-
+# snapshots, which are working memory and publish nothing. It moved here from
+# `docs/status/STATUS.md` in the same commit that changed this path; the old
+# location is recorded in `.release-removals`.
 [[doc]]
-path  = "docs/status/STATUS.md"
+path  = "docs/STATUS.md"
 title = "Status"
-blurb = "Current project status — where the project is, recent work, backlog, and what's next."
+blurb = "Current project status — where the project is, recent work, backlog, and what's next. Re-measured, not carried forward."
+group = "Overview"
+
+# ── Project files ─────────────────────────────────────────────────────────────
+# These were public at the last release but were never declared, and canon-filter
+# is a KEEP-LIST — so the next release would have DELETED all of them from the
+# public repo. Declaring them is what keeps them.
+
+[[doc]]
+path  = "CHANGELOG.md"
+title = "Changelog"
+blurb = "What changed in each release, newest first."
+group = "Project"
+
+[[doc]]
+path  = "CONTRIBUTING.md"
+title = "Contributing"
+blurb = "How to propose a change, and the DCO sign-off the project requires."
+group = "Project"
+
+[[doc]]
+path  = "CODE_OF_CONDUCT.md"
+title = "Code of Conduct"
+blurb = "What we expect of each other."
+group = "Project"
+
+[[doc]]
+path  = "SECURITY.md"
+title = "Security"
+blurb = "How to report a vulnerability."
+group = "Project"
+
+# ── Agent + methodology overlay ───────────────────────────────────────────────
+# Shared, byte-identical, injected fleet-wide ([ADR-0010] / [ADR-0028]).
+# METHODOLOGY.md is contributor-facing and publishes with the repo by [ADR-0028];
+# it is NEW to the public surface here, so the public-regress gate cannot vouch
+# for it either way — a file that was never published cannot show up as a
+# deletion, and declaring it is the only thing that ships it. The other three
+# were already public and stay so.
+
+[[doc]]
+path  = "AGENTS.md"
+title = "AGENTS.md"
+blurb = "The durable agent context and operating agreement for this repo."
+group = "Working here"
+
+[[doc]]
+path  = "AGENTS-STANDARD.md"
+title = "Agent standard"
+blurb = "The shared cross-repo standard every repo's AGENTS.md builds on."
+group = "Working here"
+
+[[doc]]
+path  = "METHODOLOGY.md"
+title = "Methodology"
+blurb = "Disciplines, doctrines, the ratchet, and the promotion ladder (ADR-0028)."
+group = "Working here"
+
+[[doc]]
+path  = "CLAUDE.md"
+title = "CLAUDE.md"
+blurb = "A one-line shim to AGENTS.md (ADR-0016)."
+group = "Working here"
+
+# ── Documentation map ─────────────────────────────────────────────────────────
+[[doc]]
+path  = "docs/README.md"
+title = "Documentation map"
+blurb = "Navigation for this repo's docs, and which tiers are canonical."
 group = "Overview"

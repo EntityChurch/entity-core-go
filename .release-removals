@@ -1,0 +1,90 @@
+# .release-removals — deliberate deletions against the PUBLISHED tree.
+#
+# One path or path-prefix per line; `#` comments allowed. The `[6/6] public-regress`
+# gate blocks any release that removes a file already on public `master` unless it is
+# declared here. A deletion is not forbidden — it must be intended, and this file is
+# the reviewed record that it was. Read by dev-pipeline/promote/promote.sh.
+#
+# A comment-only or blank file is NOT an allow-all; it declares nothing.
+#
+# Every entry below is a MOVE with a named commit behind it, not a capability that
+# went away. Where something moved, this file says where it moved to, so a reader of
+# the published tree can follow it.
+
+# ── The .diag/canonical codec became an importable package ────────────────────
+# `3cfec93` (2026-08-12) extracted these three files out of the `wire-conformance`
+# command into `cmd/internal/diagcodec/`. The reason was mechanical: wire-conformance
+# is `package main`, so nothing could import it, and the corpus build needed the same
+# encoder. The commit body records the move as *"same code, exported surface, tests
+# moved with it"* — and it is literally that: the three filenames are unchanged at
+# `cmd/internal/diagcodec/{canonical.go,canonical_test.go,diag.go}`, with the entry
+# points now exported as `EncodeCanonical`, `ParseDiag` and `StripDiagComments`.
+#
+# `cmd/internal/diagcodec/` ships in this release, so a reader loses no code. Only the
+# path changed, and it changed so that more than one caller could reach it.
+cmd/internal/wire-conformance/canonical.go
+cmd/internal/wire-conformance/canonical_test.go
+cmd/internal/wire-conformance/diag.go
+
+# ── The v767-* corpus tools were de-versioned, not withdrawn ──────────────────
+# `f884538` (2026-08-22) followed the upstream de-versioning of the crypto-agility
+# test-vector corpus. Arch executed PROPOSAL-DEVERSION-TEST-VECTOR-CORPUS
+# (entity-core-protocol `b4ea610`): `specs/test-vectors/v767/` is gone and the vectors
+# lost their `-v1` suffix, because a corpus with no version stamp should not carry a
+# revision number in its path. Item C-3 of that commit renamed the three `v767-*`
+# command directories to `agility-*` so the last live `v767` path in this repo went
+# with it.
+#
+# Both tools ship in this release under their new names — `cmd/agility-corpus-verify/`
+# and `cmd/agility-phase2-pins/` — with the same behaviour. This is a rename that
+# crossed a release boundary, nothing more.
+cmd/v767-corpus-verify/main.go
+cmd/v767-phase2-pins/main.go
+
+# ── The vendored conformance vectors moved to the repo that regenerates them ──
+# These two are the ones that sound alarming: conformance test vectors, deleted from
+# the repo that hosts the interop oracle. They are also the easiest to justify, and
+# the reason is that they were never the canonical copy.
+#
+# `b595e6b` (2026-07-12) removed them as a stale vendored snapshot. They were a frozen
+# self-snapshot taken at the v0.8.0 release (SHA `9d96f007`) — hand-built, with no tool
+# in any repo able to regenerate them — and by July they had drifted from the canonical
+# committed corpus (`41d68d2d`), which is the one `entity-core-keystone` matches. A
+# vendored copy that cannot be rebuilt and no longer agrees with its source is not a
+# test vector; it is a second, quieter answer to the same question.
+#
+# A public reader loses nothing. The canonical corpus is public in the repo that owns
+# it: `entity-core-protocol` `master` carries
+# `specs/test-vectors/ecf-conformance/conformance-vectors-v1.cbor` and its `.diag`
+# beside it. This repo now sources the corpus from there rather than vendoring it —
+# see `cmd/internal/corpus/corpus.go`, which pins the `ecf-conformance` set by SHA and
+# re-encodes the `.diag` to prove the bytes before the gate runs. The copy that went is
+# the drifted one; the copy that stayed is the one that can be rebuilt from source.
+#
+# `emit-go.cbor` was a derived artifact — this implementation's own emission, snapshotted
+# — and is now built in process by `buildEmission()` in
+# `cmd/internal/wire-conformance/emit.go`. Snapshotting an output you can recompute is
+# how a stale oracle gets minted.
+test-vectors/v1/conformance-vectors-v1.cbor
+test-vectors/v1/emit-go.cbor
+
+# ── The rolling status log moved out of the dated-snapshot directory ──────────
+# `docs/status/STATUS.md` is public from the last release and is not going away — it
+# moved up one level to `docs/STATUS.md`, and its `[[doc]]` block in
+# `CANONICAL-DOCS.toml` is repointed in the same commit as this line, so it publishes
+# from the new path in this release.
+#
+# Why move it: `docs/status/` holds dated, immutable snapshots — HANDOFF-, CHECKPOINT-,
+# ROUTING-, PEER-PACKET- — which are working memory and publish nothing. The single
+# rolling status file is a different kind of document, and it was the one exception
+# anybody had to remember. Under [ADR-0031] the two kinds now separate by PATH instead
+# of by filename: everything under `docs/status/` is internal, and the rolling log lives
+# beside the rest of the published docs. A rule you can see in a path is a rule that
+# survives the next person who adds a file.
+#
+# Declared even though rename detection may let it pass silently. `public_regression_ok`
+# runs `git diff --diff-filter=D` with rename detection on, so a move like this can
+# resolve as a rename and never surface as a deletion. Declaring only what the gate
+# happens to notice would make this file a record of the tool's blind spot rather than
+# of our intent.
+docs/status/STATUS.md

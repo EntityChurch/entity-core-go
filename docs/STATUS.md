@@ -1,6 +1,12 @@
 # entity-core-go — status
 
-_Updated: 2026-08-14 · public: v0.8.0 (master) · **live tracker: `docs/status/WORK-STATUS.md`**_
+_Updated: 2026-08-22 · public: v0.8.0 (`master`)_
+
+**This file is the canonical rolling log for this repo** — one file, re-measured
+rather than appended to, and the only status document that publishes. The dated
+snapshots beside it in `docs/status/` (`HANDOFF-`, `CHECKPOINT-`, `ROUTING-`,
+`TRACKER-`, `PEER-PACKET-`) are internal working memory and publish nothing;
+they are immutable once written, and nothing here should be inferred from them.
 
 ## Where it is
 
@@ -27,7 +33,99 @@ live-HTTP transport surfaces.
 
 ## Where we left off
 
-> **NEXT SESSION STARTS HERE — 2026-08-14 (b): CONTINUATION v1.22 is implemented and the
+> **NEXT SESSION STARTS HERE — 2026-08-22 (c): SIGNED OFF for publish. §5.2 compute depth-budget
+> fixed; the compute corpus LOCKs 362/362 go-on-go.** The 362-vector compute cross-bless had read
+> `361/362` for a week (`cv9a-map-depth-exceeded-contains`, `recurse/tail-sum` forked) — root cause was
+> the DEPTH limit reaching the peer through the wrong channel, on both sides: EXTENSION-COMPUTE §5.2
+> sources depth from the capability's **grant-level** `constraints["system/compute"]["max_compute_depth"]`
+> (ENTITY-CORE-PROTOCOL §5), and (1) the handler read it off the capability TOKEN top level (`grants[]`
+> is where it lives → it reached the evaluator *nowhere* since v0.8.0; `MatchingGrant` existed for exactly
+> this and was unused), and (2) the corpus wire driver sent only `params.budget` (operations), never depth.
+> Invisible go-on-go (both sides defaulted to depth 1024 → agreed); only the cross-impl fork showed it.
+> Fixed `0e34e3e`: read the matching grant (`computeConstraintsOfGrant`/`OfToken`), transmit depth via a
+> constraint-bearing cap in `peeremit.go` (`constrainedComputeCap`, absolute `/peer/*` resource so §PR-8
+> canonicalization holds and internal tree lookups stay authorized). **Proof: go-in-process vs
+> go-over-wire LOCKs 362/362 byte-identical.** Teeth `ext/compute/depth_constraint_test.go` (grant
+> constraint lowers depth + mutation). Release gate `validate-complete.sh` (PI_PORT=9411) **exit 0, all
+> six passes, read UNPIPED** (compute 128·0F); full suite 65 pkgs 0 fail; frozen corpus SHA unchanged.
+>
+> **SIGNED OFF — go publishes as-is.** **Owed to arch (WIP):** spec-issue `2026-08-22-a` — §5.2's
+> pseudocode `capability.data.constraints` reads as token-top-level and misled the impl; arch tightens the
+> wording to name the matching grant's constraints. **Owed cross-impl (rust/py, NOT go):** re-drive the
+> 362 corpus now that the harness transmits the limit — a peer that reads §5.2 literally has the same
+> silent default. `0e34e3e` (fix) + `93ca425` (CHANGELOG) on `dev`, pushed.
+>
+> ---
+>
+> **PRIOR — 2026-08-22 (b): the corpus de-version fold is LANDED and the
+> release gate is verified exit 0 UNPIPED.** `f884538` closes arch's `ROUTING-2026-08-22-a`
+> (C-1..C-4): arch executed `PROPOSAL-DEVERSION-TEST-VECTOR-CORPUS` on the crypto-agility half
+> (protocol `b4ea610` — `test-vectors/v767/` deleted, `agility-vectors-v1.*` → `agility-vectors.*`),
+> and go was the only tree that read the path. **C-1** collapsed the corpus to its one surviving copy
+> and repointed the PASS 0 guard at the `test-vectors` parent (it had gone *silent*, not red — the
+> `[ -d …/v767 ]` guard + `corpus.Check()` `ErrAbsent` both skip on an absent path). **C-2** re-verified:
+> corpus re-encodes to `b5484e84…` (13 vec), `agility-corpus-verify` 63 PASS/0 FAIL, frozen legacy pair
+> still reproduces `8e7c5232…` @ 9236 B (not re-pinned). **C-3** renamed the three `v767-*` command dirs
+> → `agility-*` (last live v767 path token; dated snapshots keep the historical name). **C-4** re-cited
+> the two conformance metadata checks off the revised §5.1 (still NON_NORMATIVE; register `-check` green).
+>
+> **Release gate: `validate-complete.sh` (PI_PORT=9411) exits 0 on all six passes — REAL exit read UNPIPED.**
+> This session corrected a masking bite: a `validate-complete.sh | tail` reports tail's `0`, not the gate's
+> exit, so the prior block's "exit 0, all six passes at b1c65e7" was made over a summary that read
+> `PASS 1 exit 1` (the failure was environmental — a sibling's leftover py peer squatting PI_PORT 9401 —
+> not a code defect, but the *reading* was masked). New ratchet in `AGENTS.md`: read the gate's exit from
+> the gate (`>log; echo $?` or `pipefail`), and quote the six per-pass `exit N` values. **No new discipline
+> in the corpus work itself** — it re-applied the standing "a Skip-on-missing-file guard is only a guard if
+> its path is live" rule. The go repo is green + clean; nothing blocks its GitHub publish.
+>
+> ---
+>
+> **PRIOR — 2026-08-22 (a): arch's `ROUTING-2026-08-21-h` worklist is CLOSED and
+> the go repo is release-ready.** Live state is in **`docs/status/TRACKER-RELEASE-PUSH-2026-08-20.md`**
+> and **`docs/status/WORK-STATUS.md`** (this STATUS.md's narrative below is older context).
+>
+> All five go-owed items landed this session — **C-14** (eval-limit carve-out keyed on code both arms +
+> `depth_exceeded` contains, a provenance defect go shipped, fixed), **C-15** (D3 concat-args scalar),
+> **C-18** (CV-9a/b/c corpus 359→362, SHA `8d2f55c8`), **C-17** (D8 walk-completeness wire checks,
+> compute 126→128, GREEN three-way), and **B5** (cross-impl naming-leg driver over browser-rust's
+> committed federation — the last registry-v1 clause, MET). Release gate `validate-complete.sh` **exit 0,
+> all six passes** at `b1c65e7`. **No new discipline earned** (recorded per the close-out floor).
+>
+> **The go repo is green + clean; nothing blocks its GitHub publish.** Compute is on the operator-DEFERRED
+> T5 track, so the compute items are cohort-convergence, not release-blocking. **Owed by OTHERS:** rust/py
+> cross-bless the compute corpus at `8d2f55c8`; rust lands D3 (closes the transient `type_system`
+> divergence); rust/py seed the C-12 check
+> (`docs/validation/reports/2026-08-22-compute-v327-landed-and-what-rust-py-owe.md`). Publication-gate
+> blockers B-1/B-2/B-3 are core-rust/browser-rust/devops, not go. **Post-release go-internal residuals**
+> (off the cohort path): WS-C S2 client `request_id` demux, S4 revocation vectors.
+>
+> ---
+>
+> **PRIOR — 2026-08-14 (c): the board is clear. One build owed, and it is
+> a rare one — the spec is ahead of every implementation.**
+> **Read this first:**
+> `docs/status/HANDOFF-2026-08-14-b-the-board-is-clear-and-what-each-seat-owes.md`
+> — measured state, what each seat owes, and two single-item packets ready to send.
+>
+> **Everything routed to us this cycle is implemented and measured.**
+> `convergence` is **99 P / 0 F in ALL THREE pairings** (go→go, go→rust, go→python) — closing
+> `rexec_delivered`, open across three sessions and ours all along. Gate
+> `1574 · 0F · 0S · 0W / 636 / 55 / 27 / 8`, six passes exit 0. rust `cc6cb56` **0 F** full
+> surface; py `808d9e6` **1 F**, which is a *code* not a behaviour (§5 of the handoff).
+>
+> **The one build we owe: `strategy: "handler"` (REVISION §5.3, G-18).** v3.10 says it outright
+> — *implementation gap, not a spec gap.* §5.3 fully specifies the delegation, §5.2 has always
+> carried the dispatch arm, and **nothing in the cohort has built it**. All three degrade to a
+> conflict entity, which is safe and not conformant.
+>
+> **Two defects we found in our OWN oracle this cycle, and they are one shape:** a rule that is
+> pinned but asserted by nothing. The supersession vector asserted the `pending_hash` *changed*
+> — which R4 forbids, and which FAILed conformant peers on clock resolution. And
+> `wrong_substitute_type` was pinned by us one day and gated on `status != 400` the next, so the
+> code was a value nothing asserted — hiding python's `invalid_entry` divergence until v1.2
+> forced the assertion.
+>
+> **PRIOR — 2026-08-14 (b): CONTINUATION v1.22 is implemented and the
 > cross-impl seam is CLOSED — 99 P / 0 F in all three pairings.**
 >
 > Arch landed **CONTINUATION v1.22**, **REGISTRY v1.4**, SUBSTITUTE v1.1, REVISION v3.9.
