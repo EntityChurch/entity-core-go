@@ -415,7 +415,10 @@ func (e *Engine) reEvaluate(expressionURI, subgraphPath string, evt store.TreeCh
 	resultPath := sgData.ResultPath
 	if evalErr != nil {
 		if ce, ok := evalErr.(*ComputeError); ok {
-			errEnt, entErr := ce.ToEntity()
+			// Q1: writing the error to the result_path is a materialized
+			// crossing — code-only, so a reactive consumer keyed on the result
+			// hash converges cross-impl regardless of message prose.
+			errEnt, entErr := ce.ToMaterializedEntity()
 			if entErr == nil {
 				errHash, _ := e.store.Put(errEnt)
 				e.writeResult(resultPath, errHash, evt)
@@ -471,12 +474,15 @@ func (e *Engine) writeResult(path string, h hash.Hash, evt store.TreeChangeEvent
 }
 
 func (e *Engine) freezeSubgraph(qualifiedPath string, sgData types.ComputeSubgraphData, code, message, at string, evt store.TreeChangeEvent) {
+	// Q1: the frozen-subgraph error is written to the result_path — a
+	// materialized crossing, so code-only. message/at are diagnostics that would
+	// otherwise leak impl-specific prose into the content hash.
 	errData := types.ComputeErrorData{
 		Code:    code,
 		Message: message,
 		At:      at,
 	}
-	errEnt, err := errData.ToEntity()
+	errEnt, err := errData.ToMaterializedEntity()
 	if err != nil {
 		return
 	}

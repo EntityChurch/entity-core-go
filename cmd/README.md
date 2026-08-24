@@ -12,6 +12,10 @@ Run any tool with `go run ./cmd/<name> [flags]`, or build them all into
 - `internal/interop/` — cross-implementation interop tests.
 - `internal/config/` — identity, grant, and config loading.
 
+`cmd/internal/` also holds two conformance-harness binaries (`package main`, run with `go run`):
+- `internal/wire-conformance/` — the ECF corpus pipeline (`.diag → .cbor → per-impl emit → cross-bless`).
+- `internal/compute-corpus/` — the compute differential corpus (GUIDE-CONFORMANCE §7c); see its README.
+
 ---
 
 ## Peer + operations
@@ -87,5 +91,6 @@ produce byte-equal CBOR and identical content hashes.
 | **fetch-published-fixture** | Go-side consumer that drives the Tier-1 published-root read flow (MANIFEST_GET → verify → TREE_GET → CONTENT_GET → byte-equality) against a publisher URL. |
 | **peerissued-fixtures** | Emits the `REG-PEERISSUED-*` byte-equal fixture bundle (`-out <dir>`) for the peer-issued REGISTRY backend. |
 | **relay-fixtures** | Emits the EXTENSION-RELAY v1.0 byte-equal fixtures for the R5 cohort handoff. |
+| **internal/compute-corpus** | The compute differential corpus (GUIDE-CONFORMANCE §7c): `generate` a seeded frozen `(IR, bindings, budget)` set, `emit` boundary outcomes through core-go, `verify` the six anti-vacuity guards, `cross-bless` 2+ impls. Inputs only — Go is the fixture-builder, not the oracle. |
 | **v767-corpus-verify** | Decodes the v7.67 agility conformance corpus and asserts file hash + structural invariants + cryptographic re-derivation. |
 | **v767-phase2-pins** | Derives the v7.67 Phase-2 matrix (M2/M3/M6) byte tuples from the pinned seeds and prints them as JSON per vector. |

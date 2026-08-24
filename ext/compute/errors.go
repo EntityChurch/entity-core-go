@@ -53,8 +53,29 @@ func newComputeErrorAt(code, message, at string) *ComputeError {
 	return &ComputeError{Code: code, Message: message, At: at}
 }
 
-// ToEntity converts a ComputeError to a compute/error entity.
+// ToEntity converts a ComputeError to its IN-FLIGHT / dispatch-boundary
+// compute/error entity — the §3.7 / F10 status-200 error-as-value form, which
+// MAY carry the diagnostic fields (Q1). This is NOT the form to write when the
+// error crosses to materialized state (result_path, construct field, wire
+// subtree); use ToMaterializedEntity there.
 func (e *ComputeError) ToEntity() (entity.Entity, error) {
+	d := e.data()
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(types.TypeComputeError, cbor.RawMessage(raw))
+}
+
+// ToMaterializedEntity converts a ComputeError to its code-only materialized
+// compute/error entity (Q1). Used wherever the error is written to a tree path
+// or otherwise content-addressed: two impls raising the same code with
+// different prose MUST converge on one content hash.
+func (e *ComputeError) ToMaterializedEntity() (entity.Entity, error) {
+	return e.data().ToMaterializedEntity()
+}
+
+func (e *ComputeError) data() types.ComputeErrorData {
 	d := types.ComputeErrorData{
 		Code:    e.Code,
 		Message: e.Message,
@@ -63,11 +84,7 @@ func (e *ComputeError) ToEntity() (entity.Entity, error) {
 	if !e.Expression.IsZero() {
 		d.Expression = &e.Expression
 	}
-	raw, err := ecf.Encode(d)
-	if err != nil {
-		return entity.Entity{}, err
-	}
-	return entity.NewEntity(types.TypeComputeError, cbor.RawMessage(raw))
+	return d
 }
 
 // IsComputeError checks if an error is a ComputeError.

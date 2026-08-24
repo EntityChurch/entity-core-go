@@ -84,7 +84,7 @@ func (h *Handler) handleEval(ctx context.Context, req *handler.Request) (*handle
 			"Entity at path is not a compute expression: "+expression.Type)
 	}
 
-	budget := initBudget(hctx)
+	budget := initBudget(hctx, req.Params)
 	evalCtx := h.makeEvalContext(hctx, nil)
 	evalCtx.SubgraphRoot = exprPath
 	scope := NewScope()
@@ -172,13 +172,27 @@ func (h *Handler) makeEvalContext(hctx *handler.HandlerContext, registerDep func
 	}
 }
 
-// initBudget creates a budget from handler context and capability constraints.
-func initBudget(hctx *handler.HandlerContext) *Budget {
+// initBudget creates a budget per EXTENSION-COMPUTE §5.2:
+//
+//	request_budget = params.budget or infinity
+//	bounds_budget  = bounds.budget or peer_default_max_ops
+//	operations     = min(request_budget, bounds_budget, compute_ops_limit)
+//	depth          = compute_depth_limit
+//
+// The request budget is a voluntary self-restriction — a caller asking to be cut
+// off early. It can only lower the ceiling (it enters a min), never raise it, so
+// honoring it cannot widen what a capability authorizes. Absent or unreadable, it
+// is infinity and contributes nothing.
+func initBudget(hctx *handler.HandlerContext, params entity.Entity) *Budget {
 	ops := DefaultMaxOps
 	depth := DefaultMaxDepth
 
 	if hctx.Bounds != nil && hctx.Bounds.Budget != nil && *hctx.Bounds.Budget < uint64(ops) {
 		ops = int(*hctx.Bounds.Budget)
+	}
+
+	if reqOps, ok := requestBudget(params); ok && reqOps < ops {
+		ops = reqOps
 	}
 
 	// Check capability constraints for compute-specific limits.
@@ -193,6 +207,34 @@ func initBudget(hctx *handler.HandlerContext) *Budget {
 	}
 
 	return NewBudget(ops, depth)
+}
+
+// requestBudget reads the optional `budget` knob out of an eval request's params
+// (§3.2: "params optionally carries operation knobs (budget)").
+//
+// Params is declared primitive/any, so the body is an open map with no schema to
+// decode against — every failure mode here (empty params, a non-map body, a
+// missing or non-numeric `budget`) means "the caller did not ask for a limit"
+// and returns false, never an error. A malformed knob must not fail the eval:
+// the spec's default is infinity, and rejecting the request would turn an
+// optional field into a required one.
+func requestBudget(params entity.Entity) (int, bool) {
+	if len(params.Data) == 0 {
+		return 0, false
+	}
+	var m map[string]interface{}
+	if err := ecf.Decode(params.Data, &m); err != nil {
+		return 0, false
+	}
+	v, ok := m["budget"]
+	if !ok {
+		return 0, false
+	}
+	n := toIntValue(v)
+	if n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // extractComputeConstraints reads compute resource limits from capability

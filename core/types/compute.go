@@ -340,6 +340,20 @@ func (d ComputeResultData) ToEntity() (entity.Entity, error) {
 	return entity.NewEntity(TypeComputeResult, cbor.RawMessage(raw))
 }
 
+// ComputeErrorData is the IN-FLIGHT / dispatch-boundary representation of a
+// compute/error (§2.4). It MAY carry the diagnostic fields — message, at,
+// expression — because the dispatch-boundary status-200 error-as-value return
+// is explicitly allowed to (Q1, ARCH-RESPONSE-COMPUTE-CORPUS-FIRST-RUN).
+//
+// It is NOT the MATERIALIZED form. When a compute/error materializes — written
+// to a result_path, placed in a compute/construct field, or sent on the wire as
+// part of a materialized subtree — its canonical content is `code` ALONE (Q1).
+// Use ToMaterializedEntity for that; ToEntity is the in-flight form.
+//
+// message has no omitempty on purpose: the in-flight form is a diagnostic
+// surface where an empty message is still a present (if unhelpful) field, and
+// omitting it would make the in-flight encoding depend on whether a message was
+// set. The materialized form sidesteps this entirely by carrying only code.
 type ComputeErrorData struct {
 	Code       string     `cbor:"code"`
 	Message    string     `cbor:"message"`
@@ -353,6 +367,42 @@ func (d ComputeErrorData) ToEntity() (entity.Entity, error) {
 		return entity.Entity{}, err
 	}
 	return entity.NewEntity(TypeComputeError, cbor.RawMessage(raw))
+}
+
+// computeMaterializedError is the code-only canonical content of a materialized
+// compute/error (Q1). Exactly one field, so two impls that raised the same code
+// with different prose materialize to the same content hash — which is what
+// keeps dedup, cross-peer sync, and reactive consumers keyed on that hash from
+// diverging over the ~40% error input-space (AE-1 error-boundary equivalence).
+type computeMaterializedError struct {
+	Code string `cbor:"code"`
+}
+
+// ToMaterializedEntity builds the code-only compute/error entity — the form that
+// crosses a compute→non-compute boundary. Any diagnostic fields on d are dropped
+// by construction; they live only in the in-flight ToEntity form.
+func (d ComputeErrorData) ToMaterializedEntity() (entity.Entity, error) {
+	raw, err := ecf.Encode(computeMaterializedError{Code: d.Code})
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(TypeComputeError, cbor.RawMessage(raw))
+}
+
+// MaterializeErrorEntity re-encodes an already-built compute/error entity into
+// its code-only materialized form. A no-op-shaped helper for the materialize()
+// boundary, where an error arrives as an entity.Entity (in-flight bytes) that
+// must be stripped to code before it is content-addressed. Non-error entities
+// are returned unchanged, so callers can apply it unconditionally.
+func MaterializeErrorEntity(e entity.Entity) (entity.Entity, error) {
+	if e.Type != TypeComputeError {
+		return e, nil
+	}
+	d, err := ComputeErrorDataFromEntity(e)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return d.ToMaterializedEntity()
 }
 
 // ComputeErrorDataFromEntity decodes a compute/error entity's data.

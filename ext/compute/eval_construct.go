@@ -143,9 +143,22 @@ func materialize(v interface{}, cs store.ContentStore) (interface{}, error) {
 			}
 		}
 		return out, nil
+	case entity.Entity:
+		// Q1 (ARCH-RESPONSE-COMPUTE-CORPUS-FIRST-RUN §2.4): a compute/error
+		// crossing to materialized form is content-hashed over `code` ALONE.
+		// message/at/expression are diagnostic and MUST NOT be in the bytes V7
+		// content-addresses, or two impls that raised the same code with
+		// different prose would produce different tree hashes — breaking dedup,
+		// cross-peer sync, and every reactive consumer keyed on that hash. The
+		// in-flight dispatch-boundary form (handler status-200, which bypasses
+		// materialize()) keeps its message; this materialized path strips it.
+		// Any other entity is already bare — pass through.
+		if t.Type == types.TypeComputeError {
+			return types.MaterializeErrorEntity(t)
+		}
+		return v, nil
 	default:
-		// Already bare: entity.Entity (materialized or hand-built), primitive,
-		// bare map, etc. Pass through.
+		// Already bare: primitive, bare map, etc. Pass through.
 		return v, nil
 	}
 }
@@ -210,14 +223,23 @@ func evalIndex(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalContext
 	if err != nil {
 		return nil, err
 	}
-	idx, ok := asInt64Index(idxVal)
-	if !ok {
+	idx, isInt, inInt64 := asIndex(idxVal)
+	if !isInt {
 		return nil, newComputeError(ErrTypeMismatch,
 			fmt.Sprintf("compute/index requires an integer index, got %T", idxVal))
 	}
-	if idx < 0 || idx >= int64(len(arr)) {
+	// F-2 (ARCH-RESPONSE-COMPUTE-CORPUS-FIRST-RUN R3, §9.1): an integer index
+	// whose MAGNITUDE is out of bounds is index_out_of_range, not type_mismatch —
+	// int/uint are annotations, not distinct value types (§2.2), so any integer
+	// bit-pattern is a valid index *argument*. A uint64 above MaxInt64 does not
+	// fit int64 but is still a well-formed integer index; it is necessarily
+	// ≥ len(arr) (no array approaches 2⁶³ elements), so it is out of range, not
+	// a type error. (The cross-impl run had Go answer type_mismatch here where
+	// Rust answered index_out_of_range; Rust was ruled correct.)
+	if !inInt64 || idx < 0 || idx >= int64(len(arr)) {
 		return nil, newComputeError(ErrIndexOutOfRange,
-			fmt.Sprintf("index %d out of range for array of length %d", idx, len(arr)))
+			fmt.Sprintf("index %s out of range for array of length %d",
+				indexMagnitude(idxVal, idx, inInt64), len(arr)))
 	}
 	// v3.19c Part A R3: no kind-tagged data in wire form. Array elements are
 	// returned bare (whatever Go type they decoded as — could be a primitive,
@@ -252,17 +274,38 @@ func evalLength(ent entity.Entity, scope *Scope, budget *Budget, ctx *EvalContex
 	return int64(len(arr)), nil
 }
 
-// asInt64Index coerces a numeric value used as an array index to int64. Accepts
-// int64 and uint64 (rejecting uint64 values above MaxInt64 — too large to be a
-// valid array index in any case). Floats are rejected.
-func asInt64Index(v interface{}) (int64, bool) {
+// asIndex classifies a value used as an array index (§9.1 / F-2):
+//
+//	isInt    — the value is an integer bit-pattern (a valid index ARGUMENT).
+//	           False only for a genuine non-integer (float, string, ...), which
+//	           is the sole type_mismatch case.
+//	inInt64  — the integer fits int64, so `idx` carries its usable value. A
+//	           uint64 above MaxInt64 is a valid integer index that is out of
+//	           range (isInt true, inInt64 false), NOT a type error.
+//
+// Floats are non-integers: §2.2 rule 4 keeps the index integer-only.
+func asIndex(v interface{}) (idx int64, isInt, inInt64 bool) {
 	switch n := v.(type) {
 	case int64:
-		return n, true
+		return n, true, true
 	case uint64:
 		if n <= math.MaxInt64 {
-			return int64(n), true
+			return int64(n), true, true
+		}
+		return 0, true, false
+	}
+	return 0, false, false
+}
+
+// indexMagnitude renders an index for a diagnostic message (Q1: message is
+// diagnostic-only, not part of the materialized boundary). A uint64 that
+// overflowed int64 is printed at its true unsigned magnitude rather than as the
+// meaningless int64 reinterpretation.
+func indexMagnitude(v interface{}, idx int64, inInt64 bool) string {
+	if !inInt64 {
+		if u, ok := v.(uint64); ok {
+			return fmt.Sprintf("%d", u)
 		}
 	}
-	return 0, false
+	return fmt.Sprintf("%d", idx)
 }
