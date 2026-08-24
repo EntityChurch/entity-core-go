@@ -53,29 +53,185 @@ func requirePodman() {
 }
 
 // ensureImage (re)builds the peer image via `make build` in the sibling repo so
-// the container reflects the latest source — the make+podman analogue of the
-// old `cargo build` / `uv run`-from-source behavior. Idempotent: podman
-// layer-caches, so an unchanged tree rebuilds in seconds. Set
-// ENTITY_PM_SKIP_BUILD=1 to skip and use a pre-built image (e.g. in CI, or when
-// iterating on the Go side against an already-built sibling image).
+// the container reflects the latest source — the make+podman analogue of the old
+// `cargo build` / `uv run`-from-source behavior.
+//
+// It is SOURCE-PROVENANCE AWARE, because trusting podman's layer cache alone is
+// not safe: a `make build` can report success and hand back a stale image whose
+// cache did not invalidate on a source change (observed 2026-07-30 — peer-manager
+// served a 36 h-old entity-core-rust image after real fixes had landed, so a
+// cross-impl validation run silently tested old code). That is the same
+// "green-but-meaningless" failure class the RT-6 fix exposed, one layer down in
+// the tooling. To make staleness IMPOSSIBLE-to-miss rather than merely unlikely:
+//
+//   - After a build off a CLEAN, committed tree at commit C, the image is tagged
+//     `<image>:src-<C>`. That tag is the provenance record — no side state.
+//   - If `<image>:src-<HEAD>` already exists (clean tree), the exact source is
+//     already built: skip the build entirely (fast AND verified).
+//   - If an image exists but NOT for HEAD — the sibling moved on, or the tree is
+//     dirty, or ENTITY_PM_NO_CACHE is set — a plain `make build` might hand back
+//     the stale cache, so the rebuild is forced with `--no-cache` (injected via
+//     the Makefiles' `PODMAN_BUILD_CAPS`, which preserves each recipe's own
+//     `--target`).
+//   - As defense in depth, if the sibling stamps a git-commit LABEL on the image
+//     (the sibling half of this fix), a post-build mismatch against HEAD warns.
+//
+// Env: ENTITY_PM_SKIP_BUILD=1 skips the build (pre-built image / CI);
+// ENTITY_PM_NO_CACHE=1 forces a clean rebuild.
 func ensureImage(repoDir, image string) {
 	if os.Getenv("ENTITY_PM_SKIP_BUILD") != "" {
 		return
 	}
+
+	sha, dirty := gitStamp(repoDir)
+	srcTag := ""
+	if sha != "" {
+		srcTag = image + ":src-" + sha
+	}
+	forceEnv := os.Getenv("ENTITY_PM_NO_CACHE") != ""
+
+	plan := planImageBuild(sha, dirty, forceEnv,
+		srcTag != "" && podmanImageExists(srcTag),
+		podmanImageExists(image))
+
+	if plan.skip {
+		// Point :latest at the source-verified build in case it drifted.
+		_ = podmanTag(srcTag, image)
+		fmt.Fprintf(os.Stderr, "peer-manager: %s image is current (%s) — skipping build.\n", image, plan.reason)
+		return
+	}
+
 	if _, err := exec.LookPath("make"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: make not found on PATH (needed to build the %s image from %s).\n", image, repoDir)
 		fmt.Fprintf(os.Stderr, "  Pre-build the image and set ENTITY_PM_SKIP_BUILD=1 to skip this step.\n")
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "Building %s image (make build in %s)...\n", image, repoDir)
-	build := exec.Command("make", "build")
-	build.Dir = repoDir
-	build.Stdout = os.Stderr
-	build.Stderr = os.Stderr
-	if err := build.Run(); err != nil {
+	if sha == "" {
+		fmt.Fprintf(os.Stderr, "peer-manager: WARNING — cannot read %s git HEAD; building without source-provenance tracking, so a stale image could go undetected. Ensure `git` works in %s, or set ENTITY_PM_NO_CACHE=1 to force a clean build.\n", image, repoDir)
+	}
+
+	verb := "Building"
+	if plan.noCache {
+		verb = "Rebuilding (no cache)"
+	}
+	fmt.Fprintf(os.Stderr, "peer-manager: %s %s image via `make build` in %s (%s)...\n", verb, image, repoDir, plan.reason)
+
+	if err := runMakeBuild(repoDir, plan.noCache); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: `make build` failed in %s: %v\n", repoDir, err)
 		os.Exit(1)
 	}
+
+	// Record provenance so the next run off this commit hits the fast path.
+	if sha != "" && !dirty {
+		if err := podmanTag(image, srcTag); err != nil {
+			fmt.Fprintf(os.Stderr, "peer-manager: note — could not tag %s (%v); provenance not recorded for this build.\n", srcTag, err)
+		}
+	}
+
+	// Defense in depth: if the sibling stamped a git-commit label, cross-check it.
+	if lbl := podmanImageLabel(image, "org.entity.git.commit", "org.opencontainers.image.revision"); lbl != "" && sha != "" {
+		if !strings.HasPrefix(lbl, sha) && !strings.HasPrefix(sha, lbl) {
+			fmt.Fprintf(os.Stderr, "peer-manager: WARNING — %s image revision label %q does not match %s HEAD %s; the image may not reflect the current source.\n", image, lbl, repoDir, sha)
+		}
+	}
+}
+
+// buildPlan is the decision ensureImage makes before touching podman.
+type buildPlan struct {
+	skip    bool   // the exact source is already built — do nothing
+	noCache bool   // podman's layer cache is untrustworthy — force a clean build
+	reason  string // human-readable, for the log line
+}
+
+// planImageBuild decides how to (re)build an image from the source provenance
+// signals alone — pure, so it is unit-testable without podman. srcTagExists is
+// whether `<image>:src-<sha>` is present (clean-tree provenance for HEAD);
+// latestExists is whether any `<image>` is present at all.
+func planImageBuild(sha string, dirty, forceEnv, srcTagExists, latestExists bool) buildPlan {
+	if forceEnv {
+		return buildPlan{noCache: true, reason: "ENTITY_PM_NO_CACHE set"}
+	}
+	if sha == "" {
+		// No git provenance — preserve the old build-and-trust-the-cache behavior
+		// (a warning is emitted separately). Cannot force safely on every run.
+		return buildPlan{reason: "no git provenance"}
+	}
+	if dirty {
+		return buildPlan{noCache: true, reason: "working tree dirty at " + sha}
+	}
+	if srcTagExists {
+		return buildPlan{skip: true, reason: "already built from " + sha}
+	}
+	if latestExists {
+		// An image exists but not for this commit: a plain `make build` may serve
+		// the stale cache, so bust it. This is the silent-stale case.
+		return buildPlan{noCache: true, reason: "existing image predates " + sha}
+	}
+	// No image at all — a fresh build from a cold cache cannot be stale.
+	return buildPlan{reason: "first build at " + sha}
+}
+
+// runMakeBuild runs `make build` in the sibling repo. When noCache is set it
+// injects `--no-cache` through PODMAN_BUILD_CAPS (a command-line make-var
+// assignment overrides the Makefile's `:=`, and preserves the recipe's own
+// `-t $(IMAGE)` / `--target`), carrying the build memory caps forward from
+// CAP_MEM/CAP_SWAP when set so a forced rebuild is not OOM-prone on a small box.
+func runMakeBuild(repoDir string, noCache bool) error {
+	args := []string{"build"}
+	if noCache {
+		caps := "--no-cache"
+		if m := os.Getenv("CAP_MEM"); m != "" {
+			caps += " --memory=" + m + " --memory-swap=" + envOr("CAP_SWAP", m)
+		}
+		args = append(args, "PODMAN_BUILD_CAPS="+caps)
+	}
+	build := exec.Command("make", args...)
+	build.Dir = repoDir
+	build.Stdout = os.Stderr
+	build.Stderr = os.Stderr
+	return build.Run()
+}
+
+// gitStamp returns the sibling repo's short HEAD and whether its tree is dirty.
+// sha is "" (and dirty false) when git is unavailable or repoDir is not a repo —
+// the caller then falls back to the old build-and-trust behavior with a warning.
+func gitStamp(repoDir string) (sha string, dirty bool) {
+	out, err := exec.Command("git", "-C", repoDir, "rev-parse", "--short=12", "HEAD").Output()
+	if err != nil {
+		return "", false
+	}
+	sha = strings.TrimSpace(string(out))
+	if sha == "" {
+		return "", false
+	}
+	st, err := exec.Command("git", "-C", repoDir, "status", "--porcelain").Output()
+	if err != nil {
+		return sha, false
+	}
+	return sha, strings.TrimSpace(string(st)) != ""
+}
+
+func podmanImageExists(ref string) bool {
+	return exec.Command("podman", "image", "exists", ref).Run() == nil
+}
+
+func podmanTag(src, dst string) error {
+	return exec.Command("podman", "tag", src, dst).Run()
+}
+
+// podmanImageLabel returns the first non-empty value among the given label keys
+// on the image, or "" if none are set (e.g. the sibling has not stamped one yet).
+func podmanImageLabel(image string, keys ...string) string {
+	for _, k := range keys {
+		out, err := exec.Command("podman", "inspect", "--format", fmt.Sprintf("{{index .Config.Labels %q}}", k), image).Output()
+		if err != nil {
+			continue
+		}
+		if v := strings.TrimSpace(string(out)); v != "" && v != "<no value>" {
+			return v
+		}
+	}
+	return ""
 }
 
 // resolveAddr turns a :0 / random-port request into a concrete host:port.

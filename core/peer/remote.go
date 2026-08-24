@@ -128,6 +128,64 @@ func (p *Peer) SetDispatchFallback(fn DispatchFallbackFunc) {
 	p.dispatchFallback = fn
 }
 
+// LiveEstablishFunc is the NETWORK §10.3 step-3b live-establishment seam
+// (Amendment 14). Consulted by remoteExecute / RemoteExecuteWithIncluded when
+// getRemoteConnection fails (no durable profile connected) and BEFORE
+// dispatchFallback (§10.2 — the normative "live first, store-and-forward last"
+// ordering). A traversal extension (EXTENSION-SIGNALING §7's hole punch)
+// registers the policy behind this seam; peers with none leave it nil and the
+// ladder is byte-identical to the pre-seam behavior.
+//
+// It carries a context (the §10.3 review delta this impl fed back to arch: a
+// traversal "takes seconds" and a caller with no deadline is a hang — so the
+// seam MUST be cancellable). It returns a CONNECTION, not a delivered result:
+// on a non-nil return the ladder re-enters ordinary dispatch and the
+// connection is pooled (AddRemoteConnection), so every later dispatch to that
+// peer reuses it and it runs §5 keepalive — §10.3 obligations 1 and 2.
+//
+// Return contract:
+//   - (conn, nil)  — traversal established a live transport; the ladder pools
+//     and sends through it.
+//   - (nil,  nil)  — no traversal path (symmetric NAT / CGNAT / not eligible);
+//     the ladder falls through to dispatchFallback, then the terminal.
+//   - (nil,  err)  — traversal attempted and failed; treated as (nil, nil) for
+//     dispatch (fall through) — the error is for the seam's own observability.
+type LiveEstablishFunc func(ctx context.Context, peerID crypto.PeerID) (*Connection, error)
+
+// SetLiveEstablish installs the NETWORK §10.3 step-3b live-establishment seam.
+// Pass nil to disable. Peers with no traversal extension leave it unset and the
+// dispatch ladder behaves exactly as pre-Amendment-14 (fall straight to §10.2 /
+// the terminal on a NAT'd target with no durable profile).
+func (p *Peer) SetLiveEstablish(fn LiveEstablishFunc) {
+	p.establishLive = fn
+}
+
+// tryEstablishLive consults the §10.3 seam and, on a live connection, pools it
+// (which also begins §5 keepalive — §10.3 obligation 2) so the ladder re-enters
+// ordinary dispatch and later calls reuse it. Returns nil when no seam is
+// registered, the seam declines, or pooling fails — every one of which is a
+// "fall through to §10.2" signal, never a hard error (traversal is best-effort;
+// correctness is preserved by the store-and-forward fallback below it).
+func (p *Peer) tryEstablishLive(ctx context.Context, peerID crypto.PeerID) remoteEndpoint {
+	seam := p.establishLive
+	if seam == nil {
+		return nil
+	}
+	conn, err := seam(ctx, peerID)
+	if err != nil || conn == nil {
+		return nil
+	}
+	// Pool it as an ordinary transport (§10.3 obligation 1) and start keepalive
+	// (obligation 2). AddRemoteConnection resolves the race if a connection for
+	// peerID already landed, returning whichever is now pooled.
+	pooled, aerr := p.AddRemoteConnection(peerID, conn)
+	if aerr != nil {
+		conn.Close()
+		return nil
+	}
+	return pooled
+}
+
 // RegisterRemote registers a remote peer's transport address in the
 // tree as a TCPProfileData entity at
 // system/peer/transport/{peer_id}/{profile-id}, per EXTENSION-NETWORK
@@ -390,6 +448,15 @@ func (p *Peer) remoteExecute(ctx context.Context, uri, operation string, params 
 
 	conn, err := p.getRemoteConnection(ctx, peerID)
 	if err != nil {
+		// §10.3 step 3b — live-establishment seam, consulted BEFORE §10.2's
+		// dispatch_fallback (the normative "live first, store-and-forward last"
+		// ordering). On success the connection is pooled and the ladder
+		// re-enters ordinary dispatch through it.
+		if live := p.tryEstablishLive(ctx, peerID); live != nil {
+			conn, err = live, nil
+		}
+	}
+	if err != nil {
 		if p.dispatchFallback != nil {
 			if resp, ok, ferr := p.dispatchFallback(ctx, peerID, uri, operation, params, resource); ok {
 				if ferr != nil {
@@ -476,6 +543,12 @@ func (p *Peer) RemoteExecuteWithIncluded(ctx context.Context, uri, operation str
 	peerID := crypto.PeerID(parsed.PeerID)
 
 	conn, err := p.getRemoteConnection(ctx, peerID)
+	if err != nil {
+		// §10.3 step 3b — live-establishment BEFORE §10.2 dispatch_fallback.
+		if live := p.tryEstablishLive(ctx, peerID); live != nil {
+			conn, err = live, nil
+		}
+	}
 	if err != nil {
 		if p.dispatchFallback != nil {
 			if resp, ok, ferr := p.dispatchFallback(ctx, peerID, uri, operation, params, resource); ok {

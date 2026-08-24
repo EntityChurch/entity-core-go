@@ -91,6 +91,16 @@ type Peer struct {
 	// relay-resolve + Mode-S/Mode-F policy in behind this field;
 	// non-RELAY peers leave it nil and behave byte-identical to v1.
 	dispatchFallback DispatchFallbackFunc
+
+	// establishLive is the NETWORK §10.3 step-3b live-establishment seam
+	// (Amendment 14). Consulted by remoteExecute when getRemoteConnection
+	// fails (no durable profile connected) and BEFORE dispatchFallback (§10.2)
+	// — the normative ordering: live first, store-and-forward last. A
+	// traversal extension (EXTENSION-SIGNALING §7, the rendezvous-coordinated
+	// hole punch) plugs the algorithm in behind this field; peers with no
+	// traversal extension leave it nil and behave byte-identical to the
+	// pre-seam ladder. See SetLiveEstablish / LiveEstablishFunc.
+	establishLive LiveEstablishFunc
 }
 
 // New creates a new Peer with the given options.

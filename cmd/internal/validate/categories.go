@@ -56,6 +56,7 @@ func AllCategories() []string {
 		catPublishFetchHTTPPoll,
 		catQuery,
 		catQuorum,
+		catReachability,
 		catRegistry,
 		catRelay,
 		catRelayMultiPeer,

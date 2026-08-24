@@ -542,6 +542,17 @@ func (c *Connection) initServerSessionLocked() {
 	if cs == nil || !cs.Completed {
 		return
 	}
+	// EXTENSION-NETWORK §6.7.1: record the transport-layer source of this
+	// accepted connection — the remote's public NAT mapping as observed from
+	// here — so the observe-address / check-reachability handlers can reflect
+	// and prove it. Responder-side only (this is the accept path) and read
+	// straight off the socket, never body-supplied. Not persisted anywhere
+	// durable (§6.7.1 MUST 2).
+	if c.conn != nil {
+		if addr := c.conn.RemoteAddr(); addr != nil {
+			cs.ObservedAddress = addr.String()
+		}
+	}
 	c.session = &Session{
 		RemotePeerID: cs.RemotePeerID,
 	}

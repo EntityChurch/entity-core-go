@@ -516,6 +516,13 @@ func (s *ValidationSuite) Run(ctx context.Context) (*Report, error) {
 		return runNetwork(ctx, client, s.keepaliveEnvelopeMs)
 	})
 
+	// Category 28d: EXTENSION-NETWORK Amendment 13 §6.7 reachability facts —
+	// observe-address reflects our transport source (never a body value), and
+	// check-reachability either dials our observed source or is 403-restricted
+	// per §6.7.4. Pins the two security MUSTs on the wire; the full §6.7.5
+	// cross-NAT gate is beyond a single-target run.
+	runCat(catReachability, func() []CheckResult { return runReachability(ctx, client) })
+
 	// Category 29: V7 v7.65 peer entity canonicalization conformance vectors
 	// (PROPOSAL-V7-PEER-ENTITY-CANONICALIZATION-AND-V1-CONTRACT §13).
 	// Seven vectors: PEER-CANON-1/2, PEER-PATTERN-1/2, PEER-MUT-1/2,
@@ -859,6 +866,8 @@ func (s *ValidationSuite) RunCategory(ctx context.Context, category string) (*Re
 		report.AddAll(runLiveness(ctx, client, s.keepaliveEnvelopeMs))
 	case catNetwork:
 		report.AddAll(runNetwork(ctx, client, s.keepaliveEnvelopeMs))
+	case catReachability:
+		report.AddAll(runReachability(ctx, client))
 	case catPeerIDForm:
 		report.AddAll(runPeerIDForm(ctx, client))
 	case catPolicyDualForm:

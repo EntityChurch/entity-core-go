@@ -520,6 +520,10 @@ func RegisterCoreTypes(r *TypeRegistry) {
 	r.ReflectType(TypeNetworkStatus, reflect.TypeOf(NetworkStatusData{}))
 	r.ReflectType(TypeNetworkCloseRequest, reflect.TypeOf(CloseRequestData{}))
 	r.OverrideField(TypeNetworkCloseRequest, "peer_id", FieldSpec{TypeRef: "system/peer-id"})
+	// §6.7 reachability facts (Amendment 13).
+	r.ReflectType(TypeNetworkObserveAddressResult, reflect.TypeOf(ObserveAddressResultData{}))
+	r.ReflectType(TypeNetworkCheckReachabilityResult, reflect.TypeOf(CheckReachabilityResultData{}))
+	r.ReflectType(TypeNetworkCandidate, reflect.TypeOf(NetworkCandidateData{}))
 	// §3.13 system/connection — connection-state complement of
 	// system/peer/status (ruling C: MUST at full NETWORK conformance,
 	// write-on-transition; not in the liveness floor).

@@ -44,6 +44,22 @@ type ConnectionState struct {
 	// the hello response. Zero (hash.AlgorithmSHA256, 0x00) is the v7.66
 	// default and the floor pre-negotiation.
 	ActiveHashFormat byte
+	// ObservedAddress is the transport-layer source IP:port this peer
+	// observed for the remote on THIS connection — the remote's public NAT
+	// mapping, as seen from here. It is the narrow, NETWORK-scoped accept-side
+	// fact EXTENSION-NETWORK §6.7.1 (observe-address) reflects back, and the
+	// dial-back target §6.7.2 (check-reachability) proves. Set responder-side
+	// at accept from the underlying net.Conn.RemoteAddr(); empty on
+	// initiator-side and in-process states (no accepted transport source).
+	//
+	// It is a RESPONDER-SIDE fact with no durable home: per §6.7.1 MUST 2 it
+	// MUST NOT be persisted to system/connection.address, a
+	// system/peer/transport/* profile, or system/peer/status — every durable
+	// address field in this spec is dialer-side dialable-endpoint state, and
+	// an ephemeral source port written there routes nowhere yet reads as
+	// dialable to §10. It is read from the live connection and returned; it is
+	// never connection-state-of-record.
+	ObservedAddress string
 }
 
 // EffectiveFrameBudget returns the configured FrameBudget when set,
@@ -1046,6 +1062,18 @@ func DefaultConnectionGrants() []types.GrantEntry {
 			Handlers:   types.CapabilityScope{Include: []string{"system/capability"}},
 			Resources:  types.CapabilityScope{Include: []string{}},
 			Operations: types.CapabilityScope{Include: []string{"request"}},
+		},
+		// Network handler: observe-address (§6.7.1 / §6.7.4 network-reflect).
+		// A broad default grant is reasonable — the op only echoes the source
+		// address the peer itself observed (no amplification, leaks nothing not
+		// already implied by connecting). Empty resource scope: the fact rides
+		// from the connection, not a resource target. check-reachability
+		// (§6.7.2 network-dialback) is deliberately NOT here — it is restricted,
+		// granted only to peers a host is actively connecting with.
+		{
+			Handlers:   types.CapabilityScope{Include: []string{"system/network"}},
+			Resources:  types.CapabilityScope{Include: []string{}},
+			Operations: types.CapabilityScope{Include: []string{"observe-address"}},
 		},
 	}
 }

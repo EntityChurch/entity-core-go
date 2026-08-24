@@ -61,13 +61,22 @@ type Handler struct {
 	// In-memory per §12.4 (session bookkeeping is implementation-defined);
 	// the continuation graph itself lives in the tree.
 	sessions map[crypto.PeerID]*session
-	debugLog *log.Logger
+	// reflectLimiter / dialbackLimiter are the §6.7.4 per-requester rate
+	// limits for observe-address / check-reachability (both "always
+	// rate-limited"; dial-back the more tightly).
+	reflectLimiter  *rateLimiter
+	dialbackLimiter *rateLimiter
+	debugLog        *log.Logger
 }
 
 // NewHandler creates a new network handler. Call Bind after the peer is
 // constructed to wire the imperative seams.
 func NewHandler() *Handler {
-	return &Handler{sessions: make(map[crypto.PeerID]*session)}
+	return &Handler{
+		sessions:        make(map[crypto.PeerID]*session),
+		reflectLimiter:  newRateLimiter(reflectMinInterval),
+		dialbackLimiter: newRateLimiter(dialbackMinInterval),
+	}
 }
 
 // Bind wires the handler to its local peer. Must be called once after
@@ -124,6 +133,17 @@ func (h *Handler) Manifest() types.HandlerManifestData {
 			},
 			"close": {
 				InputType: types.TypeNetworkCloseRequest,
+			},
+			// §6.7 reachability facts (Amendment 13). Both take no input (the
+			// fact rides from the accepted connection, never the body);
+			// observe-address is in the broad default connection grant
+			// (§6.7.4 network-reflect), check-reachability is restricted
+			// (§6.7.4 network-dialback).
+			"observe-address": {
+				OutputType: types.TypeNetworkObserveAddressResult,
+			},
+			"check-reachability": {
+				OutputType: types.TypeNetworkCheckReachabilityResult,
 			},
 			// Internal — dispatched by the §4.1 lifecycle continuations,
 			// advertised per §A5.
@@ -184,6 +204,10 @@ func (h *Handler) Handle(ctx context.Context, req *handler.Request) (*handler.Re
 		return h.handleStatus(ctx, req)
 	case "close":
 		return h.handleClose(ctx, req)
+	case "observe-address":
+		return h.handleObserveAddress(ctx, req)
+	case "check-reachability":
+		return h.handleCheckReachability(ctx, req)
 	case "reconnect":
 		return h.handleReconnect(ctx, req)
 	case "restore-subscriptions":
