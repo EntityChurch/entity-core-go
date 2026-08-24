@@ -88,7 +88,7 @@ func WithPinnedIdentity(peerEntity entity.Entity) OutboundOption {
 
 // Default knobs.
 const (
-	DefaultOutboundFetchTimeout         = 30 * time.Second
+	DefaultOutboundFetchTimeout           = 30 * time.Second
 	DefaultOutboundMaxResponseBytes int64 = 64 * 1024 * 1024 // 64 MiB
 )
 
@@ -97,12 +97,12 @@ type Outbound struct {
 	profile  types.HTTPPollProfileData
 	endpoint types.TransportEndpoint
 
-	mu             sync.Mutex
-	client         *http.Client
-	allowHTTP      bool
-	fetchTimeout   time.Duration
+	mu               sync.Mutex
+	client           *http.Client
+	allowHTTP        bool
+	fetchTimeout     time.Duration
 	maxResponseBytes int64
-	pinnedIdentity *entity.Entity
+	pinnedIdentity   *entity.Entity
 
 	// lastSeq tracks the highest published-root.seq seen for this profile.
 	// The connector rejects any later FetchPublishedRoot whose seq is less
@@ -468,4 +468,3 @@ func decodeTreeLeafPointer(body []byte) (hash.Hash, error) {
 	}
 	return h, nil
 }
-

@@ -211,12 +211,12 @@ func TestInboxRelayFallback_SeamFiresAndRelayStores(t *testing.T) {
 		// intent + that R stored the right shape under D's namespace.
 		paramsHashHex := hex.EncodeToString(params.ContentHash.Bytes())
 		marker, mErr := cbor.Marshal(map[string]any{
-			"build_test":   "INBOX-RELAY-FALLBACK-1",
-			"uri":          uri,
-			"operation":    operation,
-			"params_hash":  paramsHashHex,
-			"sender":       sPeerID,
-			"destination":  string(peerID),
+			"build_test":  "INBOX-RELAY-FALLBACK-1",
+			"uri":         uri,
+			"operation":   operation,
+			"params_hash": paramsHashHex,
+			"sender":      sPeerID,
+			"destination": string(peerID),
 		})
 		if mErr != nil {
 			return nil, true, mErr

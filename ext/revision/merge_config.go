@@ -132,4 +132,3 @@ func makeMergeConfigResponse(result types.RevisionMergeConfigResultData) (*handl
 	}
 	return &handler.Response{Status: 200, Result: resultEntity}, nil
 }
-

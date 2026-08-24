@@ -19,8 +19,8 @@ import (
 //   - intersect: minimal common structure (drop fields unique to any input)
 //   - union:     all fields; uniques become optional; incompatibles excluded
 //   - prefer:    first path is the preferred definition; others supply
-//                additional fields as optional; incompatibles take the
-//                preferred's version
+//     additional fields as optional; incompatibles take the
+//     preferred's version
 //
 // The handler returns a ReconcileResult that wraps the merged entity in
 // reconciled_type alongside metadata about what changed. Caller decides

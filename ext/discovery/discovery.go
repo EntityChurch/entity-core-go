@@ -343,6 +343,15 @@ func (h *Handler) handleAnnounceStop(ctx context.Context, req *handler.Request) 
 			"discovery backend not registered: "+rd.Backend)
 	}
 	if err := b.AnnounceStop(ctx, rd.ProfileRef); err != nil {
+		// §3.3 binds BOTH ops: a profile_ref the backend does not recognize
+		// is a caller error on stop exactly as on announce. This mapping was
+		// missing — handleAnnounce had it and handleAnnounceStop did not, so
+		// every stop failure became a 500 telling the caller to retry
+		// something that can never succeed.
+		if errors.Is(err, ErrUnknownProfileRef) {
+			return handler.NewErrorResponse(400, "unknown_profile_ref",
+				"announce-stop on "+rd.Backend+": "+err.Error())
+		}
 		return handler.NewErrorResponse(500, "backend_error",
 			"announce-stop on "+rd.Backend+" failed: "+err.Error())
 	}
@@ -482,4 +491,3 @@ func (h *Handler) bindCandidate(hctx *handler.HandlerContext, backend string, en
 	}
 	return nil
 }
-

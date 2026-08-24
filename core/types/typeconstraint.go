@@ -29,17 +29,17 @@ const (
 	TypeConstraintValidateResult = "system/type/constraint/validate-result"
 
 	// Type handler analysis-op types per §8.
-	TypeTypeViolation             = "system/type/violation"
-	TypeTypeFieldComparison       = "system/type/field-comparison"
-	TypeTypeFieldIncompatibility  = "system/type/field-incompatibility"
-	TypeTypeCompareRequest        = "system/type/compare-request"
-	TypeTypeCompareResult         = "system/type/compare-result"
-	TypeTypeCompatibleRequest     = "system/type/compatible-request"
-	TypeTypeCompatibilityReport   = "system/type/compatibility-report"
-	TypeTypeConvergeRequest       = "system/type/converge-request"
-	TypeTypeAdoptRequest          = "system/type/adopt-request"
-	TypeTypeReconcileRequest      = "system/type/reconcile-request"
-	TypeTypeReconcileResult       = "system/type/reconcile-result"
+	TypeTypeViolation            = "system/type/violation"
+	TypeTypeFieldComparison      = "system/type/field-comparison"
+	TypeTypeFieldIncompatibility = "system/type/field-incompatibility"
+	TypeTypeCompareRequest       = "system/type/compare-request"
+	TypeTypeCompareResult        = "system/type/compare-result"
+	TypeTypeCompatibleRequest    = "system/type/compatible-request"
+	TypeTypeCompatibilityReport  = "system/type/compatibility-report"
+	TypeTypeConvergeRequest      = "system/type/converge-request"
+	TypeTypeAdoptRequest         = "system/type/adopt-request"
+	TypeTypeReconcileRequest     = "system/type/reconcile-request"
+	TypeTypeReconcileResult      = "system/type/reconcile-result"
 )
 
 // Well-known violation kinds per EXTENSION-TYPE v1.1 §8.5 / §1.2.

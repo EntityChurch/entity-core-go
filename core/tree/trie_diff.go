@@ -213,4 +213,3 @@ func countAllBindings(cs store.ContentStore, nodeHash hash.Hash) uint64 {
 	}
 	return uint64(BranchSize(cs, node))
 }
-

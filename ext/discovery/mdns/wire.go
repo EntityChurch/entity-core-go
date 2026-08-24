@@ -29,11 +29,11 @@ const (
 // the spec §3.2 doesn't require ordering — `version`, `peer_id_hint`,
 // `profile_ref` MUST be PRESENT, not in any particular slot.
 const (
-	TXTKeyVersion      = "version"
-	TXTKeyPeerIDHint   = "peer_id_hint"
-	TXTKeyProfileRef   = "profile_ref"
-	TXTKeyProto        = "proto"        // OPTIONAL — comma-list of advertised transports
-	TXTKeyDisplayName  = "display_name" // OPTIONAL — UTF-8 user-facing label hint
+	TXTKeyVersion     = "version"
+	TXTKeyPeerIDHint  = "peer_id_hint"
+	TXTKeyProfileRef  = "profile_ref"
+	TXTKeyProto       = "proto"        // OPTIONAL — comma-list of advertised transports
+	TXTKeyDisplayName = "display_name" // OPTIONAL — UTF-8 user-facing label hint
 )
 
 // CurrentVersion is the DISCOVERY major version pinned in TXTKeyVersion.

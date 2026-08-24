@@ -45,16 +45,28 @@ type peerData struct {
 // The key_type field is the lowercase ASCII string canonical form
 // (v7.66 §2.2 errata) — distinct surface from the binary peer_id varint
 // prefix in V7 §1.5.
+// **The format is not a parameter.** Per ENTITY-CORE-PROTOCOL §4.5a item 1a
+// (v7.77) a `system/peer` entity is authored at the ECFv1-SHA-256 floor
+// UNCONDITIONALLY — on every connection, whatever the peer's home format and
+// whatever the connection's negotiated active format. It is the single named
+// exception to §1.2's "a peer's persistent state is uniformly its home
+// format."
+//
+// This used to take an `alg` argument (`IdentityEntityFormat`), and the
+// connect handler passed the negotiated active format. That is now the defect
+// the ruling exists to prevent: §4.5a item 4 says one derivation function is
+// the conformant shape and two is the defect, so the parameter is removed
+// rather than defaulted — a format-taking variant is a place for the second
+// function to grow back.
+//
+// What it buys: §1.8's "use the authored hash, MUST NOT recompute" stops being
+// a per-connection coincidence and becomes an identity — the authored hash IS
+// the floor-derived hash, the same bytes on every connection in the network
+// rather than merely within one. So deriving an identity hash for a
+// `{peer_id_hex}` path segment and comparing an authored identity hash for a
+// §5.2 `grantee == author` equality are now one value by construction, which
+// is what made the {peer_id_hex} pin unimplementable before it was ruled.
 func (k Keypair) IdentityEntity() (entity.Entity, error) {
-	return k.IdentityEntityFormat(entity.DefaultHashAlgorithm())
-}
-
-// IdentityEntityFormat creates a system/peer entity hashed under the
-// given content_hash_format code. Used by the connect handler to author
-// the identity entity under the connection's active format per V7 v7.69
-// §4.5a (the local identity entity presented on a connection is hashed
-// under the negotiated active format, not the peer-startup default).
-func (k Keypair) IdentityEntityFormat(alg byte) (entity.Entity, error) {
 	ktString := KeyTypeString(k.KeyType)
 	if ktString == "" {
 		return entity.Entity{}, fmt.Errorf("IdentityEntity: unsupported key_type 0x%02x", k.KeyType)
@@ -67,7 +79,7 @@ func (k Keypair) IdentityEntityFormat(alg byte) (entity.Entity, error) {
 	if err != nil {
 		return entity.Entity{}, err
 	}
-	return entity.NewEntityFormat(alg, TypePeer, cbor.RawMessage(raw))
+	return entity.NewEntityFormat(hash.AlgorithmSHA256, TypePeer, cbor.RawMessage(raw))
 }
 
 // ExperimentalTestPeerEntity creates a system/peer entity for the v7.66 §4

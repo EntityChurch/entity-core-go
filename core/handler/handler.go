@@ -200,8 +200,8 @@ func WithReactiveTrigger() ExecuteOption {
 
 // HandlerContext provides the execution environment for handlers.
 type HandlerContext struct {
-	Author           crypto.PeerID
-	AuthorHash       hash.Hash
+	Author     crypto.PeerID
+	AuthorHash hash.Hash
 	// SessionPeerID is the authenticated session/connection peer — the
 	// peer that holds the underlying connection over which this EXECUTE
 	// arrived. For direct EXECUTE this equals Author (the wire-author);
@@ -225,10 +225,10 @@ type HandlerContext struct {
 	// Populated automatically by TreeSet/TreeRemove for cap entities; consumed
 	// by is_revoked. May be nil in manually-built test contexts — TreeSet
 	// gracefully no-ops the record when so.
-	CapabilityIndex  capability.CapabilityIndex
-	HandlerPattern   string
-	RequestID        string
-	Bounds           *types.BoundsData
+	CapabilityIndex capability.CapabilityIndex
+	HandlerPattern  string
+	RequestID       string
+	Bounds          *types.BoundsData
 	// ChainDepth is the EXTENSION-CONTINUATION §3.9 chain-depth counter for
 	// this execution context: how many continuation advancements deep this
 	// dispatch sits. Incremented only by a continuation advancement dispatch
@@ -237,7 +237,7 @@ type HandlerContext struct {
 	// Zero at wire entry BY DESIGN, not by omission — §3.9 pins the counter as
 	// per-peer and not carried in bounds, so a cross-peer chain resets it at
 	// each peer boundary. Each peer bounds its own local execution depth.
-	ChainDepth       uint64
+	ChainDepth uint64
 	// ReactiveTrigger is true when this execution is a reactive delivery-driven
 	// advancement (set via WithReactiveTrigger by the inbox/subscription
 	// delivery path), false for a bare administrative `advance` EXECUTE. Read by
@@ -246,8 +246,8 @@ type HandlerContext struct {
 	// dispatch from ExecuteOpts, NOT inherited from the parent context, so it
 	// marks only the advance the delivery mechanism initiated — never its
 	// onward chain dispatches.
-	ReactiveTrigger  bool
-	Included         map[hash.Hash]entity.Entity
+	ReactiveTrigger bool
+	Included        map[hash.Hash]entity.Entity
 	// Execute dispatches a local or remote EXECUTE request from within a handler.
 	// Injected by the Dispatcher at dispatch time to avoid import cycles.
 	// Handlers call this to invoke other handlers, governed by capabilities and bounds.

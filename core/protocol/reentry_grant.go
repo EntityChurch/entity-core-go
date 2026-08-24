@@ -79,9 +79,12 @@ func BuildReentryGrantEnvelope(kp crypto.Keypair, granteeHash hash.Hash, grants 
 	if len(grants) == 0 {
 		return entity.Envelope{}, fmt.Errorf("reentry grant: assembled grant set is empty (nothing to authorize)")
 	}
-	localIdentity, err := kp.IdentityEntityFormat(activeFormat)
+	// §4.5a item 1a: the identity entity is floor-authored, not
+	// active-format-authored. The cap token and its signature below still
+	// follow activeFormat.
+	localIdentity, err := kp.IdentityEntity()
 	if err != nil {
-		return entity.Envelope{}, fmt.Errorf("reentry grant: local identity under active format: %w", err)
+		return entity.Envelope{}, fmt.Errorf("reentry grant: local identity: %w", err)
 	}
 
 	// Contents: the grant an inbound dialer would actually receive from us —

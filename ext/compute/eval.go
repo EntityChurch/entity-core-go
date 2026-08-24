@@ -310,7 +310,6 @@ func evalLambda(ent entity.Entity, scope *Scope, ctx *EvalContext) (interface{},
 	return closureData.ToEntity()
 }
 
-
 // --- Resolution ---
 
 // resolve resolves a hash to an entity through the layered access model (§4.2)
@@ -458,7 +457,6 @@ func truthy(value interface{}) bool {
 	}
 	return true
 }
-
 
 // --- Canonical map ordering (§8.2) ---
 

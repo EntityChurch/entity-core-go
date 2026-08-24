@@ -292,9 +292,9 @@ func (d *cappingDispatcher) Execute(ctx context.Context, req handler.ExecuteRequ
 // denyingDispatcher always returns the configured status with an error
 // result entity, simulating a cap denial / not-found / etc.
 type denyingDispatcher struct {
-	cs                   store.ContentStore
-	status               uint
-	code, message        string
+	cs            store.ContentStore
+	status        uint
+	code, message string
 }
 
 func (d *denyingDispatcher) Store() store.ContentStore { return d.cs }

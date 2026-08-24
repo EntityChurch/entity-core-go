@@ -74,11 +74,11 @@ type HTTPPollProfileData struct {
 	SupportedOps   []string          `cbor:"supported_ops"` // non-empty subset of {OpTreeGet, OpContentGet, OpManifestGet} per D-13
 	Freshness      string            `cbor:"freshness,omitempty"`
 	NonceRequired  bool              `cbor:"nonce_required"`
-	CapFlow        string            `cbor:"cap_flow,omitempty"`        // typically "egress"
+	CapFlow        string            `cbor:"cap_flow,omitempty"`         // typically "egress"
 	PollIntervalMs uint64            `cbor:"poll_interval_ms,omitempty"` // informative
 	SignedPointer  string            `cbor:"signed_pointer,omitempty"`   // canonical signed root path
-	AdvertisedAt   uint64            `cbor:"advertised_at,omitempty"` // wall-clock epoch ms (PROPOSAL-TRANSPORT-FAMILY-CHUNK-C-AMENDMENTS D-3 — informational, NOT a selection key)
-	Priority       *uint64           `cbor:"priority,omitempty"`      // Q1 (arch §8.9 / Round 3): DNS-SRV semantics — lower = preferred. Pointer-typed so nil (omitted on wire) is distinguishable from explicit 0. Defaults applied at sort time: nil + profile-id "primary" → 0, nil + others → 100.
+	AdvertisedAt   uint64            `cbor:"advertised_at,omitempty"`    // wall-clock epoch ms (PROPOSAL-TRANSPORT-FAMILY-CHUNK-C-AMENDMENTS D-3 — informational, NOT a selection key)
+	Priority       *uint64           `cbor:"priority,omitempty"`         // Q1 (arch §8.9 / Round 3): DNS-SRV semantics — lower = preferred. Pointer-typed so nil (omitted on wire) is distinguishable from explicit 0. Defaults applied at sort time: nil + profile-id "primary" → 0, nil + others → 100.
 }
 
 func (d HTTPPollProfileData) ToEntity() (entity.Entity, error) {
@@ -130,7 +130,7 @@ type TCPProfileData struct {
 	SupportedOps  []string             `cbor:"supported_ops"` // typically [OpExecute]
 	Freshness     string               `cbor:"freshness,omitempty"`
 	NonceRequired bool                 `cbor:"nonce_required"`
-	CapFlow       string               `cbor:"cap_flow,omitempty"` // typically "both"
+	CapFlow       string               `cbor:"cap_flow,omitempty"`      // typically "both"
 	AdvertisedAt  uint64               `cbor:"advertised_at,omitempty"` // wall-clock epoch ms (D-3)
 	Priority      *uint64              `cbor:"priority,omitempty"`      // Q1 / arch §8.9 — DNS-SRV semantics; see HTTPPollProfileData.Priority.
 }
@@ -162,7 +162,7 @@ type HTTPProfileData struct {
 	SupportedOps  []string             `cbor:"supported_ops"`  // [OpExecute]
 	Freshness     string               `cbor:"freshness,omitempty"`
 	NonceRequired bool                 `cbor:"nonce_required"`
-	CapFlow       string               `cbor:"cap_flow,omitempty"` // typically "both"
+	CapFlow       string               `cbor:"cap_flow,omitempty"`      // typically "both"
 	AdvertisedAt  uint64               `cbor:"advertised_at,omitempty"` // wall-clock epoch ms (D-3)
 	Priority      *uint64              `cbor:"priority,omitempty"`      // Q1 / arch §8.9 — DNS-SRV semantics; see HTTPPollProfileData.Priority.
 }
@@ -206,7 +206,7 @@ type WebSocketProfileData struct {
 	SupportedOps  []string             `cbor:"supported_ops"`  // [OpExecute]
 	Freshness     string               `cbor:"freshness,omitempty"`
 	NonceRequired bool                 `cbor:"nonce_required"`
-	CapFlow       string               `cbor:"cap_flow,omitempty"` // typically "both"
+	CapFlow       string               `cbor:"cap_flow,omitempty"`      // typically "both"
 	AdvertisedAt  uint64               `cbor:"advertised_at,omitempty"` // wall-clock epoch ms (D-3)
 	Priority      *uint64              `cbor:"priority,omitempty"`      // Q1 / arch §8.9 — DNS-SRV semantics; see HTTPPollProfileData.Priority.
 }

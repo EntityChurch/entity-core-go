@@ -324,4 +324,3 @@ func TestIngestEntity_WritesHashTreePresenceBinding(t *testing.T) {
 		})
 	}
 }
-

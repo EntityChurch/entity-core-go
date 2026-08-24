@@ -133,7 +133,15 @@ func enforceContainment(root *RootMapping, fsPath, label string) error {
 	}
 	resolvedPath := filepath.Join(canonicalParent, filepath.Base(fsPath))
 
-	if !strings.HasPrefix(resolvedPath, canonical) {
+	// The containment comparison is on PATH COMPONENTS, not on the string.
+	// A bare HasPrefix admits any sibling whose name merely extends the
+	// root's — root "/srv/peerroot" would contain "/srv/peerroot-backup",
+	// because the prefix matches mid-component. That is reachable two ways
+	// with every other defense satisfied: a symlink planted inside the root
+	// pointing at the sibling (all components resolve, the leaf is an
+	// ordinary file), or a bare `../peerroot-backup/x` join. Require either
+	// exact equality with the root or a separator at the boundary.
+	if resolvedPath != canonical && !strings.HasPrefix(resolvedPath, canonical+string(filepath.Separator)) {
 		return fmt.Errorf("path traversal rejected: %q escapes root %q", label, root.FSRoot)
 	}
 

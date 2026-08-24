@@ -51,8 +51,21 @@ func stageRequest(
 	if err != nil {
 		t.Fatalf("encode register-request: %v", err)
 	}
+	return stageProof(t, hctx, signerKP, reqEnt)
+}
+
+// stageProof is stageRequest's body, generalized over the request type.
+// §6a.9 layer 1 binds all three write ops — register, renew and revoke —
+// so the proof-staging step cannot stay specific to register-request.
+func stageProof(
+	t *testing.T,
+	hctx *handler.HandlerContext,
+	signerKP crypto.Keypair,
+	reqEnt entity.Entity,
+) entity.Entity {
+	t.Helper()
 	if _, err := hctx.Store.Put(reqEnt); err != nil {
-		t.Fatalf("store register-request: %v", err)
+		t.Fatalf("store request: %v", err)
 	}
 	sigBytes := signerKP.Sign(reqEnt.ContentHash.Bytes())
 	signerIdentity, err := signerKP.IdentityEntity()
@@ -372,6 +385,10 @@ func TestRenew_ReplayDetected_SameNonceTwice(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encode renew-request: %v", err)
 		}
+		// Renew is layer-1 signed by the binding's target_peer_id, so the
+		// replay probe has to clear authorization first — otherwise it
+		// measures the 401 and never reaches the nonce logic.
+		ent = stageProof(t, hctx, publisher, ent)
 		r, err := iss.Handle(context.Background(), &handler.Request{
 			Path:      IssuerHandlerPattern,
 			Operation: OpRenewRequest,
@@ -452,5 +469,159 @@ func TestRegister_NameTaken(t *testing.T) {
 	}
 	if code := decodeErrorCode(t, resp2); code != types.RegistryErrNameTaken {
 		t.Fatalf("name_taken: code want %s got %s", types.RegistryErrNameTaken, code)
+	}
+}
+
+// --- §6a.9 layer 1 on the follow-on ops -----------------------------------
+//
+// revoke-request and renew-request verified NOTHING. Any peer that could
+// reach the registry could permanently revoke any binding in it, or extend
+// any binding past its registrant's intended lapse. The validator's own
+// checks certified this: they asserted 200/202 with no proof attached, so a
+// peer that enforced authorization FAILED them and a peer that skipped it
+// passed. Python refused to match and reported it instead — go-on-go was
+// green the whole time, which is precisely why the shared probe could not
+// see it.
+
+// seedBinding registers one name and returns its binding hash, so the
+// layer-1 tests below have something real to aim at.
+func seedBinding(t *testing.T, iss *Issuer, hctx *handler.HandlerContext, owner crypto.Keypair, name string) hash.Hash {
+	t.Helper()
+	installPolicy(t, hctx, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen})
+	resp := dispatchRegister(t, iss, hctx, stageRequest(t, hctx, owner,
+		types.RegistryRegisterRequestData{
+			Name:         name,
+			TargetPeerID: string(owner.PeerID()),
+			Nonce:        []byte{0x01},
+			IssuedAt:     1_000_000,
+		}))
+	if resp.Status != 200 {
+		t.Fatalf("seed register: status want 200 got %d", resp.Status)
+	}
+	res, err := types.LocalNameBindResultDataFromEntity(resp.Result)
+	if err != nil {
+		t.Fatalf("decode bind-result: %v", err)
+	}
+	return res.BindingHash
+}
+
+func dispatchOp(t *testing.T, iss *Issuer, hctx *handler.HandlerContext, op string, params entity.Entity) *handler.Response {
+	t.Helper()
+	resp, err := iss.Handle(context.Background(), &handler.Request{
+		Path:      IssuerHandlerPattern,
+		Operation: op,
+		Params:    params,
+		Context:   hctx,
+	})
+	if err != nil {
+		t.Fatalf("Handle %s: %v", op, err)
+	}
+	if resp == nil {
+		t.Fatalf("Handle %s: nil response", op)
+	}
+	return resp
+}
+
+// An unsigned revoke is a permanent, un-undoable denial-of-name against a
+// binding the caller does not own. It MUST be refused — and MUST NOT
+// publish a revocation, since a 401 that revoked anyway is worse than an
+// honest 200: it reports refusal while acting.
+func TestRevoke_Unsigned_Rejected(t *testing.T) {
+	registryKP, _, _ := newRegistry(t)
+	iss, hctx := newIssuer(t, registryKP,
+		WithIssuerClock(func() uint64 { return 1_000_000 }))
+	owner, _ := crypto.Generate()
+	bindingHash := seedBinding(t, iss, hctx, owner, "unsigned-revoke.com")
+
+	revEnt, err := types.RegistryRevokeRequestData{BindingHash: bindingHash}.ToEntity()
+	if err != nil {
+		t.Fatalf("encode revoke-request: %v", err)
+	}
+	resp := dispatchOp(t, iss, hctx, OpRevokeRequest, revEnt)
+	if resp.Status != 401 {
+		t.Fatalf("unsigned revoke: status want 401 got %d", resp.Status)
+	}
+	if code := decodeErrorCode(t, resp); code != types.RegistryErrSignatureInvalid {
+		t.Fatalf("unsigned revoke: code want %s got %s", types.RegistryErrSignatureInvalid, code)
+	}
+	if _, ok := hctx.LocationIndex.Get(types.PeerIssuedRevocationByTargetPath(bindingHash)); ok {
+		t.Fatal("unsigned revoke was refused 401 but published a revocation at the by-target index anyway")
+	}
+}
+
+// The proof must be by the BINDING's target_peer_id, not merely by someone.
+// A well-formed signature from an unrelated peer is the realistic attack:
+// every attacker has a key of their own.
+func TestRevoke_SignedByStranger_Rejected(t *testing.T) {
+	registryKP, _, _ := newRegistry(t)
+	iss, hctx := newIssuer(t, registryKP,
+		WithIssuerClock(func() uint64 { return 1_000_000 }))
+	owner, _ := crypto.Generate()
+	stranger, _ := crypto.Generate()
+	bindingHash := seedBinding(t, iss, hctx, owner, "stranger-revoke.com")
+
+	revEnt, err := types.RegistryRevokeRequestData{BindingHash: bindingHash}.ToEntity()
+	if err != nil {
+		t.Fatalf("encode revoke-request: %v", err)
+	}
+	revEnt = stageProof(t, hctx, stranger, revEnt)
+
+	resp := dispatchOp(t, iss, hctx, OpRevokeRequest, revEnt)
+	if resp.Status != 401 {
+		t.Fatalf("stranger-signed revoke: status want 401 got %d", resp.Status)
+	}
+	if _, ok := hctx.LocationIndex.Get(types.PeerIssuedRevocationByTargetPath(bindingHash)); ok {
+		t.Fatal("stranger-signed revoke published a revocation")
+	}
+}
+
+// The positive direction, so the fix cannot be "refuse everything": the
+// registrant revoking their own binding still works.
+func TestRevoke_SignedByTarget_Accepted(t *testing.T) {
+	registryKP, _, _ := newRegistry(t)
+	iss, hctx := newIssuer(t, registryKP,
+		WithIssuerClock(func() uint64 { return 1_000_000 }))
+	owner, _ := crypto.Generate()
+	bindingHash := seedBinding(t, iss, hctx, owner, "owner-revoke.com")
+
+	revEnt, err := types.RegistryRevokeRequestData{BindingHash: bindingHash}.ToEntity()
+	if err != nil {
+		t.Fatalf("encode revoke-request: %v", err)
+	}
+	revEnt = stageProof(t, hctx, owner, revEnt)
+
+	resp := dispatchOp(t, iss, hctx, OpRevokeRequest, revEnt)
+	if resp.Status != 200 {
+		t.Fatalf("owner revoke: status want 200 got %d", resp.Status)
+	}
+	if _, ok := hctx.LocationIndex.Get(types.PeerIssuedRevocationByTargetPath(bindingHash)); !ok {
+		t.Fatal("owner revoke answered 200 but published no revocation at the by-target index")
+	}
+}
+
+// Renew's replay defense is not authorization — it stops a CAPTURED request
+// being re-run while leaving a fresh unsigned one accepted. A fresh nonce is
+// exactly what an attacker supplies.
+func TestRenew_Unsigned_Rejected(t *testing.T) {
+	registryKP, _, _ := newRegistry(t)
+	iss, hctx := newIssuer(t, registryKP,
+		WithIssuerClock(func() uint64 { return 1_000_000 }))
+	owner, _ := crypto.Generate()
+	bindingHash := seedBinding(t, iss, hctx, owner, "unsigned-renew.com")
+
+	renewEnt, err := types.RegistryRenewRequestData{
+		BindingHash: bindingHash,
+		Nonce:       []byte{0xDE, 0xAD, 0xBE, 0xEF},
+		IssuedAt:    1_000_001,
+	}.ToEntity()
+	if err != nil {
+		t.Fatalf("encode renew-request: %v", err)
+	}
+	resp := dispatchOp(t, iss, hctx, OpRenewRequest, renewEnt)
+	if resp.Status != 401 {
+		t.Fatalf("unsigned renew: status want 401 got %d", resp.Status)
+	}
+	if code := decodeErrorCode(t, resp); code != types.RegistryErrSignatureInvalid {
+		t.Fatalf("unsigned renew: code want %s got %s", types.RegistryErrSignatureInvalid, code)
 	}
 }

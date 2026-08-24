@@ -107,15 +107,15 @@ type AdvertisedScopeFn func() []types.GrantEntry
 
 // ConnectHandler handles the system/protocol/connect path.
 type ConnectHandler struct {
-	localKeypair       crypto.Keypair
-	localPeerID        crypto.PeerID
-	localIdentity      entity.Entity
-	protocols          []string
-	connectionGrants   []types.GrantEntry // nil means use DefaultConnectionGrants()
-	grantResolver      GrantResolver      // nil means skip dynamic resolution
-	handlerRegistered  HandlerRegisteredFn // nil means skip discipline check
-	advertisedScope    AdvertisedScopeFn   // nil means skip the §3 subset filter
-	debugLog           func(format string, args ...any) // nil → silent; v7.65 §5 wire-acceptance debug
+	localKeypair      crypto.Keypair
+	localPeerID       crypto.PeerID
+	localIdentity     entity.Entity
+	protocols         []string
+	connectionGrants  []types.GrantEntry               // nil means use DefaultConnectionGrants()
+	grantResolver     GrantResolver                    // nil means skip dynamic resolution
+	handlerRegistered HandlerRegisteredFn              // nil means skip discipline check
+	advertisedScope   AdvertisedScopeFn                // nil means skip the §3 subset filter
+	debugLog          func(format string, args ...any) // nil → silent; v7.65 §5 wire-acceptance debug
 
 	// V7.69 §4.5 — what this peer advertises in hello negotiation.
 	// hash_formats: preference-ordered list of content_hash_format strings
@@ -578,11 +578,21 @@ func (h *ConnectHandler) handleAuthenticate(ctx context.Context, req *handler.Re
 	// in the pre-§9 R6 land; this is the §9.3 schema landing on top).
 	now := uint64(time.Now().UnixMilli())
 	var capEntity, capSigEntity entity.Entity
-	// responseLocalIdentity is the local identity entity authored under
-	// the connection's active format (v7.69 §4.5a). For the cached-cap
-	// reuse path it stays as the peer-startup-time h.localIdentity (which
-	// is the form the cached cap's Granter was minted under); for the
-	// fresh-mint path it is re-derived under cs.ActiveHashFormat.
+	// responseLocalIdentity is the local `system/peer` identity entity.
+	//
+	// Under §4.5a item 1a (v7.77) it needs no per-connection derivation at
+	// all: the identity entity is authored at the ECFv1-SHA-256 floor
+	// unconditionally, so the peer-startup-time h.localIdentity, a re-derive
+	// under the connection's active format, and a re-derive matching a cached
+	// cap's format are all the SAME BYTES. This used to fork three ways to
+	// keep those forms lined up — the cached-cap path kept the startup form,
+	// the fresh-mint path re-derived under cs.ActiveHashFormat — which is the
+	// two-derivation-function shape item 1a exists to collapse.
+	//
+	// Note what stays true: the cap token and signature around it are still
+	// authored under the connection's ACTIVE format (§4.5a item 1). Only the
+	// identity entity is pinned. An active-format cap carrying a floor-form
+	// Granter reference is the intended shape, not a cross-format leak.
 	responseLocalIdentity := h.localIdentity
 	found := false
 	if req.Context != nil && req.Context.Store != nil && req.Context.LocationIndex != nil {
@@ -606,11 +616,10 @@ func (h *ConnectHandler) handleAuthenticate(ctx context.Context, req *handler.Re
 						if sigEnt, sigStoreOK := req.Context.Store.Get(sigHash); sigStoreOK {
 							capEntity = mintedCap
 							capSigEntity = sigEnt
-							// Recompute responseLocalIdentity in the matching
-							// format so its hash lines up with mintedCap.Granter.
-							if rid, ridErr := h.localKeypair.IdentityEntityFormat(mintedCap.ContentHash.Algorithm); ridErr == nil {
-								responseLocalIdentity = rid
-							}
+							// No re-derivation: under §4.5a item 1a the identity
+							// entity is floor-authored whatever format the cached
+							// cap was minted under, so h.localIdentity already
+							// lines up with mintedCap.Granter by construction.
 							found = true
 						}
 					}
@@ -619,19 +628,14 @@ func (h *ConnectHandler) handleAuthenticate(ctx context.Context, req *handler.Re
 		}
 	}
 	if !found {
-		// V7 v7.69 §4.5a item 1 — every transmitted entity authored
-		// under the connection's active format. Re-derive the local
-		// identity entity under activeFormat so cap.Granter and
-		// signature.Signer name the *same* identity-hash form as
-		// anything we previously placed on the wire (the responder's
-		// own hello-response was authored under activeFormat too). The
-		// peer-startup-time h.localIdentity may be under a different
-		// format (the process default) and would otherwise create a
-		// cross-format Granter reference inside an active-format chain.
-		localIdEntityForConn, lidErr := h.localKeypair.IdentityEntityFormat(cs.ActiveHashFormat)
-		if lidErr != nil {
-			return nil, lidErr
-		}
+		// §4.5a item 1a — the local identity entity is the floor-authored
+		// one, full stop. This previously re-derived under
+		// cs.ActiveHashFormat so cap.Granter and signature.Signer would name
+		// the same identity-hash form as the hello-response had used; item 1a
+		// makes that alignment automatic and network-wide instead of
+		// per-connection, so the re-derive is removed rather than kept as a
+		// no-op. h.localIdentity IS the value it would have produced.
+		localIdEntityForConn := h.localIdentity
 		responseLocalIdentity = localIdEntityForConn
 
 		capToken := types.CapabilityTokenData{
@@ -769,7 +773,6 @@ func capGrantsEqual(a, b []types.GrantEntry) (bool, error) {
 	return true, nil
 }
 
-
 // CreateHelloExecute creates a connect hello EXECUTE envelope. Populates
 // hash_formats and key_types per V7 v7.69 §4.5 — preference-ordered list
 // of formats this peer supports (derived from
@@ -864,7 +867,11 @@ func CreateAuthenticateExecute(kp crypto.Keypair, theirNonce []byte) (entity.Env
 // NegotiateActiveHashFormat applied to its own advertised list and the
 // responder's hello.HashFormats.
 func CreateAuthenticateExecuteFormat(kp crypto.Keypair, theirNonce []byte, activeFormat byte) (entity.Envelope, error) {
-	identity, err := kp.IdentityEntityFormat(activeFormat)
+	// The identity entity is the ONE exception to this function's
+	// "everything under activeFormat" rule: §4.5a item 1a pins `system/peer`
+	// to the ECFv1-SHA-256 floor unconditionally. activeFormat still governs
+	// the authenticate and signature entities below.
+	identity, err := kp.IdentityEntity()
 	if err != nil {
 		return entity.Envelope{}, err
 	}

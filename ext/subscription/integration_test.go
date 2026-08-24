@@ -166,11 +166,11 @@ func TestSubscribeAndNotify(t *testing.T) {
 	if !ok {
 		t.Fatal("notification entity not in store")
 	}
-	if notifEntity.Type != types.TypeInboxNotification {
-		t.Fatalf("expected notification type %s, got %s", types.TypeInboxNotification, notifEntity.Type)
+	if notifEntity.Type != types.TypeSubscriptionNotification {
+		t.Fatalf("expected notification type %s, got %s", types.TypeSubscriptionNotification, notifEntity.Type)
 	}
 
-	notifData, err := types.InboxNotificationDataFromEntity(notifEntity)
+	notifData, err := types.SubscriptionNotificationDataFromEntity(notifEntity)
 	if err != nil {
 		t.Fatal(err)
 	}

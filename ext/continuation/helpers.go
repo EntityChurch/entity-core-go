@@ -15,8 +15,6 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-
-
 // --- helpers ---
 
 // mergeResolution merges resolution data into params (both are CBOR maps).
@@ -153,7 +151,7 @@ func navigate(value interface{}, dottedPath string) interface{} {
 //   - cont.Params absent + map value      → final = value (merge into empty)
 //   - cont.Params present + map value     → shallow merge, value keys win
 //   - non-map value                       → final = params (or {} if no params)
-//                                            + valueIsMap=false (caller binds marker)
+//   - valueIsMap=false (caller binds marker)
 func mergeAssemble(contParams cbor.RawMessage, value cbor.RawMessage) (cbor.RawMessage, bool) {
 	// Decode value first; non-map → marker signal + static-only result.
 	var valueDecoded interface{}

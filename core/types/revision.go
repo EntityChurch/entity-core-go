@@ -156,11 +156,11 @@ const TypeRevisionMergeConfigResult = "system/revision/merge-config-result"
 // strategy-rejection contract (lww / keep-both → 400 invalid_strategy) and a
 // CAS guard.
 type RevisionMergeConfigParamsData struct {
-	Scope        string                   `cbor:"scope"`                    // "path" | "type"
-	Name         string                   `cbor:"name"`                     // pattern (scope=path) or type name (scope=type)
-	Action       string                   `cbor:"action"`                   // "set" | "delete"
-	Config       *RevisionMergeConfigData `cbor:"config,omitempty"`         // required when action=set
-	ExpectedHash *hash.Hash               `cbor:"expected_hash,omitempty"`  // optional CAS guard
+	Scope        string                   `cbor:"scope"`                   // "path" | "type"
+	Name         string                   `cbor:"name"`                    // pattern (scope=path) or type name (scope=type)
+	Action       string                   `cbor:"action"`                  // "set" | "delete"
+	Config       *RevisionMergeConfigData `cbor:"config,omitempty"`        // required when action=set
+	ExpectedHash *hash.Hash               `cbor:"expected_hash,omitempty"` // optional CAS guard
 }
 
 func (d RevisionMergeConfigParamsData) ToEntity() (entity.Entity, error) {
@@ -181,9 +181,9 @@ func RevisionMergeConfigParamsDataFromEntity(e entity.Entity) (RevisionMergeConf
 
 // RevisionMergeConfigResultData is the result payload for the merge-config op.
 type RevisionMergeConfigResultData struct {
-	Path   string    `cbor:"path"`             // binding path written or deleted
-	Hash   hash.Hash `cbor:"hash,omitzero"`    // new entity hash (action=set); zero on delete
-	Status string    `cbor:"status"`           // "set" | "deleted" | "no_change"
+	Path   string    `cbor:"path"`          // binding path written or deleted
+	Hash   hash.Hash `cbor:"hash,omitzero"` // new entity hash (action=set); zero on delete
+	Status string    `cbor:"status"`        // "set" | "deleted" | "no_change"
 }
 
 func (d RevisionMergeConfigResultData) ToEntity() (entity.Entity, error) {

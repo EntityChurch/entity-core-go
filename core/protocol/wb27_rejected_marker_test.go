@@ -22,14 +22,14 @@ import (
 // + §3.10.4. When an inbound EXECUTE carrying Bounds.ChainID is refused
 // on cap-check, the dispatcher MUST:
 //
-//   (1) Bind a receiver-side `rejected` chain-error marker at
-//       system/runtime/chain-errors/rejected/{chain_id}/{step_index}/
-//       capability_denied/{marker_hash} (v1.20 path, V7 §3.5 hex form).
-//   (2) Populate the outgoing 403 response's ErrorData.RejectedMarker
-//       with the marker's content_hash (mirror-pointer per §3.10.4).
-//   (3) Use the canonical V7 §3.3 code `capability_denied` (NOT the
-//       withdrawn `cap_denied` that Amendment 1 invented and Unified
-//       Design corrected).
+//	(1) Bind a receiver-side `rejected` chain-error marker at
+//	    system/runtime/chain-errors/rejected/{chain_id}/{step_index}/
+//	    capability_denied/{marker_hash} (v1.20 path, V7 §3.5 hex form).
+//	(2) Populate the outgoing 403 response's ErrorData.RejectedMarker
+//	    with the marker's content_hash (mirror-pointer per §3.10.4).
+//	(3) Use the canonical V7 §3.3 code `capability_denied` (NOT the
+//	    withdrawn `cap_denied` that Amendment 1 invented and Unified
+//	    Design corrected).
 //
 // Pre-fix: cap-rejected chain dispatches silently failed at the
 // dispatcher; workbench's Stage 4 cap-discipline-mesh test surfaced 0

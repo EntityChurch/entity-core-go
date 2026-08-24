@@ -12,8 +12,6 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-
-
 // --- resume operation (spec §3.7) ---
 
 // handleResume implements the resume operation.

@@ -30,7 +30,7 @@ func TestV314RecipeShape(t *testing.T) {
 	included := map[hash.Hash]entity.Entity{payloadEnt.ContentHash: payloadEnt}
 
 	// Build a fake "created" event notification (previous_hash absent).
-	notifData := types.InboxNotificationData{
+	notifData := types.SubscriptionNotificationData{
 		SubscriptionID: "sub-1",
 		Event:          "created",
 		URI:            "/peer-src/system/validate/cycle/doc",
@@ -92,7 +92,7 @@ func TestV314RecipeShape_Updated(t *testing.T) {
 	newEnt, _ := entity.NewEntity("test/cycle-doc", cbor.RawMessage(rawNewData))
 	included := map[hash.Hash]entity.Entity{newEnt.ContentHash: newEnt}
 
-	notifData := types.InboxNotificationData{
+	notifData := types.SubscriptionNotificationData{
 		SubscriptionID: "sub-1",
 		Event:          "updated",
 		URI:            "/peer-src/system/validate/cycle/doc",

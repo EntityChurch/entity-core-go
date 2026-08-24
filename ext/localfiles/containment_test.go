@@ -139,3 +139,87 @@ func TestWatcherFlushRefusesSymlinkedParentDirectory(t *testing.T) {
 		t.Fatalf("watcher ingested %q through a symlinked parent directory — content from outside the root is now bound in the tree and will propagate cross-peer", treePath)
 	}
 }
+
+// TestEnforceContainmentRejectsPrefixSharingSibling pins the containment
+// comparison to PATH COMPONENTS rather than to the raw string.
+//
+// Conformance vector: LF-CONTAIN-BOUNDARY-1 (DOMAIN-LOCAL-FILES §8.3, added
+// 2026-08-11). Arch accepted the routing and took the defect: §8.3's own
+// pseudocode read "if not canonical starts with canonicalize(root)" — a raw
+// string prefix test — so strings.HasPrefix was that spec implemented
+// faithfully. §8.3 is now invariant-first, its defenses explicitly NOT a
+// closed list, and "V4a green is not containment audited" is normative.
+//
+// The check was `strings.HasPrefix(resolvedPath, canonical)`, which matches
+// mid-component: root "/srv/peerroot" string-contains "/srv/peerroot-backup".
+// This vector satisfies BOTH existing defenses on purpose — every component
+// resolves cleanly and the leaf is an ordinary file — so neither the
+// symlinked-parent test nor the leaf-symlink test can see it. Sibling
+// directories that extend a root's name are ordinary in deployments
+// (`-backup`, `.old`, `2`), which is what makes it reachable rather than
+// theoretical.
+func TestEnforceContainmentRejectsPrefixSharingSibling(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "peerroot")
+	sibling := filepath.Join(base, "peerroot-backup")
+	for _, d := range []string{root, sibling} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sibling, "secret.txt"), []byte("OUTSIDE THE SANDBOX"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(sibling, link); err != nil {
+		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+
+	rm := &RootMapping{Name: "test", Prefix: "local/files/test/", FSRoot: root}
+
+	escaping := filepath.Join(link, "secret.txt")
+	if info, err := os.Lstat(escaping); err != nil {
+		t.Fatalf("fixture: %v", err)
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("fixture is wrong: the LEAF must be an ordinary file, or a leaf-only defense would pass this and prove nothing")
+	}
+
+	if err := enforceContainment(rm, escaping, "link/secret.txt"); err == nil {
+		t.Fatal("enforceContainment accepted a path resolving into a prefix-sharing sibling of the root — the string prefix matched mid-component")
+	}
+}
+
+// TestEnforceContainmentRejectsPrefixSharingTraversal is the same boundary
+// without a symlink: a bare `..` join into the prefix-sharing sibling.
+// enforceContainment is the defense-in-depth layer and must reject it on its
+// own, regardless of what upstream path validation also rejects.
+func TestEnforceContainmentRejectsPrefixSharingTraversal(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "peerroot")
+	sibling := filepath.Join(base, "peerroot-backup")
+	for _, d := range []string{root, sibling} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sibling, "secret.txt"), []byte("OUTSIDE THE SANDBOX"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rm := &RootMapping{Name: "test", Prefix: "local/files/test/", FSRoot: root}
+	fsPath := filepath.Join(root, "../peerroot-backup/secret.txt")
+	if err := enforceContainment(rm, fsPath, "../peerroot-backup/secret.txt"); err == nil {
+		t.Fatalf("enforceContainment accepted %q, which resolves outside root %q", fsPath, root)
+	}
+}
+
+// TestEnforceContainmentAcceptsRootItself guards the boundary fix from
+// over-correcting: the root directory itself is contained, and a separator
+// requirement that refuses it would break `list` on the root.
+func TestEnforceContainmentAcceptsRootItself(t *testing.T) {
+	root := t.TempDir()
+	rm := &RootMapping{Name: "test", Prefix: "local/files/test/", FSRoot: root}
+	if err := enforceContainment(rm, root, ""); err != nil {
+		t.Fatalf("enforceContainment refused the root itself: %v", err)
+	}
+}

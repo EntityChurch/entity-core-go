@@ -21,13 +21,13 @@ import (
 //  2. At each level L, compute position p = 5 bits of h starting at bit
 //     offset 5*L (MSB-first per spec §3.4.2). Inspect node.Map at bit p:
 //     - clear: set bit p; insert a single-tuple bucket at popcount index
-//       in node.Data; done.
+//     in node.Data; done.
 //     - set: consult the entry at popcount index:
 //     - bucket and key present: replace value_hash.
 //     - bucket with len < BucketSize: insert tuple sorted lex.
 //     - bucket with len == BucketSize: promote — build a sub-node at
-//       level L+1 by routing all BucketSize+1 tuples by their next 5
-//       bits; replace this entry with a Link to the sub-node.
+//     level L+1 by routing all BucketSize+1 tuples by their next 5
+//     bits; replace this entry with a Link to the sub-node.
 //     - link: descend into the sub-node and recurse at level L+1.
 //  3. On ascent, every modified node is re-stored to the content store
 //     and the new hash is propagated up.

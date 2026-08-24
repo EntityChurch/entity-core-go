@@ -41,9 +41,9 @@ const (
 	TypeDiscoveryScanResult = "system/discovery/scan-result"
 
 	// Handler request types per §3.
-	TypeDiscoveryScanRequest          = "system/discovery/scan-request"
-	TypeDiscoveryAnnounceRequest      = "system/discovery/announce-request"
-	TypeDiscoveryAnnounceStopRequest  = "system/discovery/announce-stop-request"
+	TypeDiscoveryScanRequest         = "system/discovery/scan-request"
+	TypeDiscoveryAnnounceRequest     = "system/discovery/announce-request"
+	TypeDiscoveryAnnounceStopRequest = "system/discovery/announce-stop-request"
 )
 
 // Backend identifiers (§3 / §6 — only mdns is v1-normative; qr / registry-
@@ -54,10 +54,10 @@ const (
 
 // Decision outcome values per §2.1. NORMATIVE hyphenated spelling.
 const (
-	DiscoveryOutcomeIgnore        = "ignore"
-	DiscoveryOutcomeTrack         = "track"
-	DiscoveryOutcomeGrantLimited  = "grant-limited"
-	DiscoveryOutcomeGrantMore     = "grant-more"
+	DiscoveryOutcomeIgnore       = "ignore"
+	DiscoveryOutcomeTrack        = "track"
+	DiscoveryOutcomeGrantLimited = "grant-limited"
+	DiscoveryOutcomeGrantMore    = "grant-more"
 )
 
 // DISCOVERY-domain error codes per §3.1 + V7 §3.3 routing.

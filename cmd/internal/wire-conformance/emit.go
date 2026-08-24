@@ -49,14 +49,14 @@ const (
 )
 
 type emission struct {
-	Impl           string                 `cbor:"impl"`
-	ImplVersion    string                 `cbor:"impl_version"`
-	CorpusVersion  string                 `cbor:"corpus_version"`
-	SpecVersion    string                 `cbor:"spec_version"`
-	EncodeResults  map[string][]byte      `cbor:"encode_results"`
-	DecodeResults  map[string]bool        `cbor:"decode_results"`
-	DecodeCodes    map[string]string      `cbor:"decode_codes"`
-	Errors         map[string]string      `cbor:"errors"`
+	Impl          string            `cbor:"impl"`
+	ImplVersion   string            `cbor:"impl_version"`
+	CorpusVersion string            `cbor:"corpus_version"`
+	SpecVersion   string            `cbor:"spec_version"`
+	EncodeResults map[string][]byte `cbor:"encode_results"`
+	DecodeResults map[string]bool   `cbor:"decode_results"`
+	DecodeCodes   map[string]string `cbor:"decode_codes"`
+	Errors        map[string]string `cbor:"errors"`
 }
 
 func runEmitCanonical(args []string) error {

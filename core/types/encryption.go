@@ -59,14 +59,14 @@ const EncryptionAADModeGroupWrap = "group-wrap"
 
 // enc_key_type registry per §3.1. Varint-encoded.
 const (
-	EncKeyTypeReserved      byte = 0x00
-	EncKeyTypeX25519        byte = 0x01 // v1 floor
-	EncKeyTypeX448          byte = 0x02 // reserved (pairs with Ed448 validate slot)
-	EncKeyTypeMLKEM768      byte = 0x03 // reserved PQ KEM
+	EncKeyTypeReserved             byte = 0x00
+	EncKeyTypeX25519               byte = 0x01 // v1 floor
+	EncKeyTypeX448                 byte = 0x02 // reserved (pairs with Ed448 validate slot)
+	EncKeyTypeMLKEM768             byte = 0x03 // reserved PQ KEM
 	EncKeyTypeX25519MLKEM768Hybrid byte = 0x04 // reserved hybrid (PQ upgrade path)
-	EncKeyTypeMLKEM512      byte = 0x05
-	EncKeyTypeMLKEM1024     byte = 0x06
-	EncKeyTypeTestOnly      byte = 0xFE
+	EncKeyTypeMLKEM512             byte = 0x05
+	EncKeyTypeMLKEM1024            byte = 0x06
+	EncKeyTypeTestOnly             byte = 0xFE
 )
 
 // aead_id registry per §3.2.
@@ -80,11 +80,11 @@ const (
 
 // kdf_id registry per §3.3.
 const (
-	KDFIDReserved      byte = 0x00
-	KDFIDHKDFSHA256    byte = 0x01 // v1 floor
-	KDFIDHKDFSHA512    byte = 0x02
-	KDFIDHKDFSHA384    byte = 0x03
-	KDFIDArgon2id      byte = 0x04
+	KDFIDReserved   byte = 0x00
+	KDFIDHKDFSHA256 byte = 0x01 // v1 floor
+	KDFIDHKDFSHA512 byte = 0x02
+	KDFIDHKDFSHA384 byte = 0x03
+	KDFIDArgon2id   byte = 0x04
 )
 
 // Argon2 version pinned by §6.2 + §9.2 (v1.3 / v19).
@@ -111,12 +111,12 @@ const (
 // supported_aead_ids, supported_kdf_ids, created, expires); cross-tier
 // interop binds the SAME authored inner entity (F2-3).
 type EncryptionPubkeyData struct {
-	EncKeyType        uint   `cbor:"enc_key_type"`
-	PublicKey         []byte `cbor:"public_key"`
-	SupportedAEADIDs  []uint `cbor:"supported_aead_ids"`
-	SupportedKDFIDs   []uint `cbor:"supported_kdf_ids"`
-	Created           uint64 `cbor:"created"`
-	Expires           uint64 `cbor:"expires,omitempty"`
+	EncKeyType       uint   `cbor:"enc_key_type"`
+	PublicKey        []byte `cbor:"public_key"`
+	SupportedAEADIDs []uint `cbor:"supported_aead_ids"`
+	SupportedKDFIDs  []uint `cbor:"supported_kdf_ids"`
+	Created          uint64 `cbor:"created"`
+	Expires          uint64 `cbor:"expires,omitempty"`
 }
 
 // KDFParams is the §6.1 / §9.2 normative Argon2id parameter shape.
@@ -134,11 +134,11 @@ type KDFParams struct {
 // a peer-mode encryption of the random group_aead_key to that member,
 // AAD-domain-separated via the "group-wrap" mode label (F2-2).
 type WrappedKey struct {
-	RecipientKey    hash.Hash `cbor:"recipient_key"`
-	EncKeyType      uint      `cbor:"enc_key_type"`
-	EphemeralKey    []byte    `cbor:"ephemeral_key"`
-	WrappedAEADKey  []byte    `cbor:"wrapped_aead_key"`
-	WrapNonce       []byte    `cbor:"wrap_nonce"`
+	RecipientKey   hash.Hash `cbor:"recipient_key"`
+	EncKeyType     uint      `cbor:"enc_key_type"`
+	EphemeralKey   []byte    `cbor:"ephemeral_key"`
+	WrappedAEADKey []byte    `cbor:"wrapped_aead_key"`
+	WrapNonce      []byte    `cbor:"wrap_nonce"`
 }
 
 // EncryptedData is the §5.1 outer wrapper, unioned across modes. Per-mode
@@ -146,16 +146,16 @@ type WrappedKey struct {
 // kdf_salt + kdf_params), §7.2 (peer adds ephemeral_key + recipient_key),
 // and §8.2 (group adds wrapped_keys). The Mode field discriminates.
 type EncryptedData struct {
-	Mode        string `cbor:"mode"`
-	EncKeyType  uint   `cbor:"enc_key_type"`
-	AEADID      uint   `cbor:"aead_id"`
-	KDFID       uint   `cbor:"kdf_id"`
-	Nonce       []byte `cbor:"nonce"`
-	Ciphertext  []byte `cbor:"ciphertext"`
+	Mode       string `cbor:"mode"`
+	EncKeyType uint   `cbor:"enc_key_type"`
+	AEADID     uint   `cbor:"aead_id"`
+	KDFID      uint   `cbor:"kdf_id"`
+	Nonce      []byte `cbor:"nonce"`
+	Ciphertext []byte `cbor:"ciphertext"`
 
 	// Self-mode additions (§6.1).
-	KeyID     string    `cbor:"key_id,omitempty"`
-	KDFSalt   []byte    `cbor:"kdf_salt,omitempty"`
+	KeyID     string     `cbor:"key_id,omitempty"`
+	KDFSalt   []byte     `cbor:"kdf_salt,omitempty"`
 	KDFParams *KDFParams `cbor:"kdf_params,omitempty"`
 
 	// Peer-mode additions (§7.2). recipient_key is the inner pubkey-entity

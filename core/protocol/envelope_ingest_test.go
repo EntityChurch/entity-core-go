@@ -49,7 +49,7 @@ func (c *countingLocationIndex) Get(path string) (hash.Hash, bool) {
 	c.get.Add(1)
 	return c.inner.Get(path)
 }
-func (c *countingLocationIndex) Has(path string) bool              { return c.inner.Has(path) }
+func (c *countingLocationIndex) Has(path string) bool                 { return c.inner.Has(path) }
 func (c *countingLocationIndex) Remove(path string) (hash.Hash, bool) { return c.inner.Remove(path) }
 func (c *countingLocationIndex) List(prefix string) []store.LocationEntry {
 	return c.inner.List(prefix)

@@ -274,13 +274,13 @@ func TestWorkedErrorVectorsRaiseTheirCode(t *testing.T) {
 	os := outcomes(t, c)
 
 	want := map[string]string{
-		"worked/arithmetic/division-by-zero":      "division_by_zero",
-		"worked/record/index-out-of-range":        "index_out_of_range",
-		"worked/record/index-out-of-range-uint":   "index_out_of_range",
-		"worked/numeric-intent/cast-out-of-range": "cast_out_of_range",
+		"worked/arithmetic/division-by-zero":       "division_by_zero",
+		"worked/record/index-out-of-range":         "index_out_of_range",
+		"worked/record/index-out-of-range-uint":    "index_out_of_range",
+		"worked/numeric-intent/cast-out-of-range":  "cast_out_of_range",
 		"worked/numeric-intent/cast-type-mismatch": "type_mismatch",
-		"worked/scope/unbound-name":               "not_found",
-		"worked/budget/exhausted-deterministic":   "budget_exhausted",
+		"worked/scope/unbound-name":                "not_found",
+		"worked/budget/exhausted-deterministic":    "budget_exhausted",
 	}
 	for id, code := range want {
 		o := mustOutcome(t, os, id)

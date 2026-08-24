@@ -10,13 +10,13 @@
 // pending_review and an operator approves out-of-band.
 //
 // Wire flow per §6a.9:
-//   1. Build a system/registry/register-request entity.
-//   2. Sign request.content_hash with the publisher's keypair — this is
-//      Layer 1 ownership-proof (V7 §5.2 target-matching signature).
-//   3. tree:put the signature at system/signature/{hex(request.content_hash)}.
-//   4. EXECUTE register-request on system/registry/peer-issued. Registry
-//      verifies layer-1, runs issuer-policy admission, signs+publishes the
-//      binding on approve.
+//  1. Build a system/registry/register-request entity.
+//  2. Sign request.content_hash with the publisher's keypair — this is
+//     Layer 1 ownership-proof (V7 §5.2 target-matching signature).
+//  3. tree:put the signature at system/signature/{hex(request.content_hash)}.
+//  4. EXECUTE register-request on system/registry/peer-issued. Registry
+//     verifies layer-1, runs issuer-policy admission, signs+publishes the
+//     binding on approve.
 //
 // Usage:
 //

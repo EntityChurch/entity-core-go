@@ -80,7 +80,7 @@ func TestHandleGet_FrameBudgetChunksResponse_AndRemainderMovesToMissing(t *testi
 	}
 	if len(respData.Found) == len(chunkHashes) {
 		t.Fatalf("F8 NOT enforced: found=%d equals requested=%d (no `missing`); response would exceed budget by ~%d MiB",
-			len(respData.Found), len(chunkHashes), (len(chunkHashes)-len(respData.Found)))
+			len(respData.Found), len(chunkHashes), (len(chunkHashes) - len(respData.Found)))
 	}
 	if len(respData.Missing) == 0 {
 		t.Fatalf("missing empty when budget would overflow — F8 not triggering")

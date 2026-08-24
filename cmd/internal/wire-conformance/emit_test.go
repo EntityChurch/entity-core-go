@@ -36,10 +36,10 @@ func TestEmissionRoundTrip(t *testing.T) {
 
 	// Class A float spot-checks: minimization per RFC 8949 §4.2 Rule 4.
 	classAFloats := map[string]string{
-		"float.1":  "f90000",         // 0.0 → f16
-		"float.7":  "f97e00",         // NaN → canonical f16 NaN
-		"float.10": "f97bff",         // 65504.0 → max f16
-		"float.12": "fa477fdf00",     // 65503.0 → must encode as f32 (one f32 ULP below max f16)
+		"float.1":  "f90000",             // 0.0 → f16
+		"float.7":  "f97e00",             // NaN → canonical f16 NaN
+		"float.10": "f97bff",             // 65504.0 → max f16
+		"float.12": "fa477fdf00",         // 65503.0 → must encode as f32 (one f32 ULP below max f16)
 		"float.14": "fb3ff199999999999a", // 1.1 → f64
 	}
 	for id, want := range classAFloats {

@@ -363,10 +363,10 @@ func runSubscriptions(ctx context.Context, client *PeerClient) []CheckResult {
 
 		r.Store("notif_entity", notifEnt)
 		r.Store("notif_path", notifPath)
-		if notifEnt.Type == types.TypeInboxNotification {
-			return PassCheck("notification entity type is system/protocol/inbox/notification")
+		if notifEnt.Type == types.TypeSubscriptionNotification {
+			return PassCheck("notification entity type is system/subscription/notification")
 		}
-		return FailCheck(fmt.Sprintf("notification entity type is %q (expected %q)", notifEnt.Type, types.TypeInboxNotification))
+		return FailCheck(fmt.Sprintf("notification entity type is %q (expected %q)", notifEnt.Type, types.TypeSubscriptionNotification))
 	})
 
 	r.Run("notification_fields_subscription_id", func() CheckOutcome {
@@ -376,7 +376,7 @@ func runSubscriptions(ctx context.Context, client *PeerClient) []CheckResult {
 		notifEnt := r.Load("notif_entity").(entity.Entity)
 		subID := r.Load("sub_id").(string)
 
-		notifData, err := types.InboxNotificationDataFromEntity(notifEnt)
+		notifData, err := types.SubscriptionNotificationDataFromEntity(notifEnt)
 		if err != nil {
 			return FailCheck("failed to decode notification data: " + err.Error())
 		}
@@ -392,7 +392,7 @@ func runSubscriptions(ctx context.Context, client *PeerClient) []CheckResult {
 		if out, ok := r.Require("notification_fields_subscription_id"); !ok {
 			return out
 		}
-		notifData := r.Load("notif_data").(types.InboxNotificationData)
+		notifData := r.Load("notif_data").(types.SubscriptionNotificationData)
 		if notifData.Event == "created" {
 			return PassCheck("notification event is 'created'")
 		}
@@ -403,7 +403,7 @@ func runSubscriptions(ctx context.Context, client *PeerClient) []CheckResult {
 		if out, ok := r.Require("notification_fields_subscription_id"); !ok {
 			return out
 		}
-		notifData := r.Load("notif_data").(types.InboxNotificationData)
+		notifData := r.Load("notif_data").(types.SubscriptionNotificationData)
 		testPath := r.Load("test_path").(string)
 		if matchesPattern(notifData.URI, testPath, string(client.RemotePeerID())) {
 			return PassCheck(fmt.Sprintf("notification URI: %s", notifData.URI))
@@ -415,7 +415,7 @@ func runSubscriptions(ctx context.Context, client *PeerClient) []CheckResult {
 		if out, ok := r.Require("notification_fields_subscription_id"); !ok {
 			return out
 		}
-		notifData := r.Load("notif_data").(types.InboxNotificationData)
+		notifData := r.Load("notif_data").(types.SubscriptionNotificationData)
 		testEntity := r.Load("test_entity").(entity.Entity)
 		if notifData.Hash == testEntity.ContentHash {
 			return PassCheck("notification hash matches PUT entity hash")
@@ -429,7 +429,7 @@ func runSubscriptions(ctx context.Context, client *PeerClient) []CheckResult {
 		if out, ok := r.Require("notification_fields_subscription_id"); !ok {
 			return out
 		}
-		notifData := r.Load("notif_data").(types.InboxNotificationData)
+		notifData := r.Load("notif_data").(types.SubscriptionNotificationData)
 		if strings.HasPrefix(notifData.URI, "entity://") {
 			return FailCheck(fmt.Sprintf("notification URI starts with entity:// (%q) — INBOX v5.4 §2.2 (M1) requires bare tree path", notifData.URI))
 		}

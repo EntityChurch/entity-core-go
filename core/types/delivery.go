@@ -10,14 +10,27 @@ import (
 
 // Delivery, inbox, and subscription type constants.
 const (
-	TypeDeliverySpec         = "system/delivery-spec"
-	TypeInboxDelivery        = "system/inbox/delivery"
-	TypeInboxNotification    = "system/protocol/inbox/notification"
-	TypeSubscription         = "system/subscription"
-	TypeSubscriptionRequest  = "system/subscription/request"
-	TypeSubscriptionLimits   = "system/subscription/limits"
-	TypeSubscriptionCancel   = "system/subscription/cancel"
-	TypeSubscriptionRedirect = "system/subscription/redirect"
+	TypeDeliverySpec  = "system/delivery-spec"
+	TypeInboxDelivery = "system/inbox/delivery"
+	// TypeSubscriptionNotification was `system/protocol/inbox/notification`.
+	// RATIFIED 2026-08-10 (EXTENSION-SUBSCRIPTION §2.2): the mis-homing
+	// `protocol/` prefix is stripped and the type is re-homed INBOX →
+	// SUBSCRIPTION (owner-not-problem-domain — a subscription event belongs
+	// to the spec that defines subscriptions). Its sibling
+	// `system/inbox/delivery` correctly stays INBOX-owned, which is why only
+	// this one moved namespace.
+	//
+	// Cut in ONE ROUND with `system/inbox/delivery` [MUST] — there is no
+	// dual-kind acceptance window for either, and a peer holding undelivered
+	// mail at cut time MUST drain it first: a notification written under the
+	// old string is not matched by an upgraded handler and stalls its
+	// continuation SILENTLY (the §3.2 silent-drop class, no loud error).
+	TypeSubscriptionNotification = "system/subscription/notification"
+	TypeSubscription             = "system/subscription"
+	TypeSubscriptionRequest      = "system/subscription/request"
+	TypeSubscriptionLimits       = "system/subscription/limits"
+	TypeSubscriptionCancel       = "system/subscription/cancel"
+	TypeSubscriptionRedirect     = "system/subscription/redirect"
 )
 
 // DeliverySpec is the data for system/delivery-spec.
@@ -51,8 +64,8 @@ func InboxDeliveryDataFromEntity(e entity.Entity) (InboxDeliveryData, error) {
 	return d, nil
 }
 
-// InboxNotificationData is the data payload for system/protocol/inbox/notification.
-type InboxNotificationData struct {
+// SubscriptionNotificationData is the data payload for system/subscription/notification.
+type SubscriptionNotificationData struct {
 	SubscriptionID string    `cbor:"subscription_id"`
 	Event          string    `cbor:"event"`
 	URI            string    `cbor:"uri"`
@@ -60,20 +73,20 @@ type InboxNotificationData struct {
 	PreviousHash   hash.Hash `cbor:"previous_hash,omitzero"`
 }
 
-// ToEntity creates a system/protocol/inbox/notification entity.
-func (d InboxNotificationData) ToEntity() (entity.Entity, error) {
+// ToEntity creates a system/subscription/notification entity.
+func (d SubscriptionNotificationData) ToEntity() (entity.Entity, error) {
 	raw, err := ecf.Encode(d)
 	if err != nil {
 		return entity.Entity{}, err
 	}
-	return entity.NewEntity(TypeInboxNotification, cbor.RawMessage(raw))
+	return entity.NewEntity(TypeSubscriptionNotification, cbor.RawMessage(raw))
 }
 
-// InboxNotificationDataFromEntity decodes an inbox notification entity's data.
-func InboxNotificationDataFromEntity(e entity.Entity) (InboxNotificationData, error) {
-	var d InboxNotificationData
+// SubscriptionNotificationDataFromEntity decodes an inbox notification entity's data.
+func SubscriptionNotificationDataFromEntity(e entity.Entity) (SubscriptionNotificationData, error) {
+	var d SubscriptionNotificationData
 	if err := ecf.Decode(e.Data, &d); err != nil {
-		return InboxNotificationData{}, err
+		return SubscriptionNotificationData{}, err
 	}
 	return d, nil
 }

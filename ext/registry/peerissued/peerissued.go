@@ -106,9 +106,9 @@ func WithCacheOnResolve(on bool) Option {
 // the meta-resolver under its own backend_id (the registry's base58
 // peer-id).
 type Backend struct {
-	registryPeerID   string         // BackendID — matches resolver_chain[].backend_id
-	registryPeer     entity.Entity  // pinned identity — signature trust root
-	registryPeerHash hash.Hash      // canonical content_hash(registryPeer)
+	registryPeerID   string        // BackendID — matches resolver_chain[].backend_id
+	registryPeer     entity.Entity // pinned identity — signature trust root
+	registryPeerHash hash.Hash     // canonical content_hash(registryPeer)
 	publicKey        []byte
 	keyType          byte
 
@@ -194,11 +194,11 @@ func (b *Backend) ID() string { return b.registryPeerID }
 //
 //   - resolved        → meta-resolver returns it (after its revocation check)
 //   - not_found       → name absent from registry → meta-resolver advances
-//                       the chain; carries neg_ttl when WithNegativeTTLMillis
-//                       was set.
+//     the chain; carries neg_ttl when WithNegativeTTLMillis
+//     was set.
 //   - error returned  → verify-fail / expired / revoked / decode-fail →
-//                       fail-closed (REGISTRY §4.1 step 4); meta-resolver
-//                       advances. Does NOT downgrade to a pin (§5).
+//     fail-closed (REGISTRY §4.1 step 4); meta-resolver
+//     advances. Does NOT downgrade to a pin (§5).
 //
 // Offline / precedes path: a locally-cached binding at the by-name path
 // + signature in the local store satisfies steps 1–2; step 3 is

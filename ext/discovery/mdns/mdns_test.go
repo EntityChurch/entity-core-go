@@ -2,6 +2,7 @@ package mdns
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -98,10 +99,36 @@ func TestAnnounceUnknownProfileError(t *testing.T) {
 // AnnounceStop — idempotent on never-announced
 // -----------------------------------------------------------------------
 
-func TestAnnounceStopIdempotent(t *testing.T) {
-	b := New("2Kpeer", nil)
-	if err := b.AnnounceStop(context.Background(), "profile-never-announced"); err != nil {
-		t.Fatalf("AnnounceStop on never-announced must be idempotent (no error), got: %v", err)
+// EXTENSION-DISCOVERY §3.3 (corrected 2026-08-11) is a two-case rule, so this
+// test covers both halves. It used to wire a nil resolver and assert that
+// stopping ANY profile was a silent success — which is the defect: idempotency
+// answers "recognized but not running", and it was being applied to a profile
+// the backend had never heard of.
+func TestAnnounceStopTwoCaseRule(t *testing.T) {
+	resolver := StaticResolver(map[string]struct {
+		Port   int
+		Protos []string
+	}{
+		"tcp": {Port: 9000, Protos: []string{"entity-core/1"}},
+	})
+	b := New("2Kpeer", resolver)
+
+	// Case 1 — recognized, not currently announcing: idempotent success.
+	if err := b.AnnounceStop(context.Background(), "tcp"); err != nil {
+		t.Fatalf("AnnounceStop on a recognized, not-running profile must be idempotent, got: %v", err)
+	}
+
+	// Case 2 — unrecognized by the backend: a caller error the handler maps
+	// to 400, NOT a silent 200.
+	err := b.AnnounceStop(context.Background(), "profile-never-announced")
+	if err == nil {
+		t.Fatal("AnnounceStop on a backend-unrecognized profile_ref returned nil — " +
+			"idempotency covers the recognized case only (§3.3); a silent success here " +
+			"means the backend never asked whether it recognizes the ref")
+	}
+	if !errors.Is(err, discovery.ErrUnknownProfileRef) {
+		t.Fatalf("AnnounceStop unknown profile_ref: want ErrUnknownProfileRef sentinel "+
+			"(the handler keys its 400 off it), got: %v", err)
 	}
 }
 

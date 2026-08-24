@@ -29,9 +29,9 @@ const connectPath = "system/protocol/connect"
 
 // Dispatcher decodes envelopes, verifies auth, and routes to handlers.
 type Dispatcher struct {
-	Registry          *handler.Registry
-	Store             store.ContentStore
-	LocationIndex     store.LocationIndex
+	Registry      *handler.Registry
+	Store         store.ContentStore
+	LocationIndex store.LocationIndex
 	// CapabilityIndex is the observational hash→path index for cap bindings
 	// (V7 v7.62 §5.1 capability_path_for). Threaded through HandlerContext;
 	// nil means use a no-op index (binding-check defense-in-depth disabled,

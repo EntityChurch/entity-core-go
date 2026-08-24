@@ -3,24 +3,24 @@
 // Four operations (all MUST per v7.62):
 //
 //   - request:   policy-table-bounded attenuation from the caller's
-//                authenticated cap. Subset-validates the request payload
-//                against BOTH the caller's cap AND any matching policy
-//                entry at system/capability/policy/{caller_peer_hex} (or
-//                the `default` fallback). Mints a token at the local peer
-//                and returns it inline.
+//     authenticated cap. Subset-validates the request payload
+//     against BOTH the caller's cap AND any matching policy
+//     entry at system/capability/policy/{caller_peer_hex} (or
+//     the `default` fallback). Mints a token at the local peer
+//     and returns it inline.
 //   - revoke:    universal revocation entry point. Path-agnostic: tree-
-//                unbinds the cap (if path-bound via capability_path_for)
-//                AND writes a marker at system/capability/revocations/
-//                {cap_hash_hex}. No cross-dispatch to role or any other
-//                handler. Authorization is the standard "hold a cap
-//                covering system/capability:revoke on the target."
+//     unbinds the cap (if path-bound via capability_path_for)
+//     AND writes a marker at system/capability/revocations/
+//     {cap_hash_hex}. No cross-dispatch to role or any other
+//     handler. Authorization is the standard "hold a cap
+//     covering system/capability:revoke on the target."
 //   - configure: writes a system/capability/policy/{peer_pattern} entry
-//                under the handler's own grant.
+//     under the handler's own grant.
 //   - delegate:  caller-driven self-attenuation. Verifies the caller
-//                holds the parent directly (parent.grantee == caller's
-//                authenticated identity) and mints a narrowed child.
-//                Self-attenuation only in v1 — grantee = caller always;
-//                third-party handoff deferred to a future amendment.
+//     holds the parent directly (parent.grantee == caller's
+//     authenticated identity) and mints a narrowed child.
+//     Self-attenuation only in v1 — grantee = caller always;
+//     third-party handoff deferred to a future amendment.
 //
 // Result envelope (§7): request and delegate return inline. The included
 // map carries the issued token, its signature, and the granter identity.

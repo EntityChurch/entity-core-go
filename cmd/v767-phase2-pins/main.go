@@ -36,12 +36,12 @@ import (
 )
 
 type peerPin struct {
-	KeyType         string `json:"key_type"`
-	HomeFormat      byte   `json:"home_content_hash_format"`
-	PubkeyHex       string `json:"pubkey_hex"`
-	PeerIDBase58    string `json:"peer_id_base58"`
-	PeerEntityCBOR  string `json:"peer_entity_data_cbor_hex"`
-	ContentHashHex  string `json:"content_hash_hex"`
+	KeyType        string `json:"key_type"`
+	HomeFormat     byte   `json:"home_content_hash_format"`
+	PubkeyHex      string `json:"pubkey_hex"`
+	PeerIDBase58   string `json:"peer_id_base58"`
+	PeerEntityCBOR string `json:"peer_entity_data_cbor_hex"`
+	ContentHashHex string `json:"content_hash_hex"`
 }
 
 type matrixPin struct {
@@ -80,8 +80,8 @@ func main() {
 	// KEY-TYPE-ED448-1 lock. If any of these diverge, the substrate is
 	// off — fail loud rather than ship a wrong pin.
 	const (
-		ed448_42_pubkey     = "2601850dc77aaf141e065b2fe83ecfe08b6c15ba930886e9f111b6f0fd8f9f246b167e0398f957df61c9cead939cdf5bc9fe43c9432f3b0e00"
-		ed448_42_peer_id    = "3dR1gAppfHXSGMvPRuAfYkkt4P2C1fvnFYpxPBSQP8RLs4"
+		ed448_42_pubkey       = "2601850dc77aaf141e065b2fe83ecfe08b6c15ba930886e9f111b6f0fd8f9f246b167e0398f957df61c9cead939cdf5bc9fe43c9432f3b0e00"
+		ed448_42_peer_id      = "3dR1gAppfHXSGMvPRuAfYkkt4P2C1fvnFYpxPBSQP8RLs4"
 		ed448_42_content_hash = "002785b314436a82503829339cb2519b4efe795712406ea19ac185e31ae8c70748"
 	)
 	if got := pins[0].PeerA.PubkeyHex; got != ed448_42_pubkey {
@@ -176,9 +176,12 @@ func derivePeerPin(kp crypto.Keypair, homeFormat byte) peerPin {
 	if err != nil {
 		die("PeerIDFromPublicKey: %v", err)
 	}
-	ent, err := kp.IdentityEntityFormat(homeFormat)
+	// §4.5a item 1a: the identity entity is floor-authored regardless of
+	// homeFormat. homeFormat is still reported in the pin below because it
+	// remains the peer's home format for every OTHER entity it authors.
+	ent, err := kp.IdentityEntity()
 	if err != nil {
-		die("IdentityEntityFormat: %v", err)
+		die("IdentityEntity: %v", err)
 	}
 	keyTypeStr := crypto.KeyTypeString(kp.KeyType)
 	return peerPin{

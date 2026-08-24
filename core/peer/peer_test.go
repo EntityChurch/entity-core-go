@@ -1145,11 +1145,11 @@ func TestWithBindingHookPattern_E2E(t *testing.T) {
 	kp, _ := crypto.Generate()
 
 	var (
-		attHits     int
-		clockHits   int
-		exactHits   int
+		attHits      int
+		clockHits    int
+		exactHits    int
 		wildcardHits int
-		allHits     int
+		allHits      int
 	)
 
 	p, err := New(
@@ -1196,9 +1196,9 @@ func TestWithBindingHookPattern_E2E(t *testing.T) {
 	}{
 		{"attestation-1", "/" + pid + "/system/attestation/a1"},
 		{"attestation-2", "/" + pid + "/system/attestation/nested/a2"},
-		{"clock-now",     "/" + pid + "/system/clock/now"},
-		{"exact-hit",     "/" + pid + "/system/exact/path"},
-		{"unrelated",     "/" + pid + "/unrelated/x"},
+		{"clock-now", "/" + pid + "/system/clock/now"},
+		{"exact-hit", "/" + pid + "/system/exact/path"},
+		{"unrelated", "/" + pid + "/unrelated/x"},
 	}
 
 	for _, tc := range cases {

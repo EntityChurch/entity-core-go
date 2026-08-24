@@ -1,16 +1,16 @@
 // Command v767-corpus-verify decodes the v7.67 agility conformance corpus
 // (`conformance-vectors-v1.cbor`) end-to-end and asserts:
 //
-//   1. File sha256 matches the F16 re-stamp 8e7c5232…f31f982e (or the value
-//      supplied via -expected-sha).
-//   2. F16 structural invariants on the file's input-side fields:
-//        A) every Ed448 secret_seed / pubkey-from-seed input is 57 B (RFC 8032)
-//        B) every `experimental-test` public_key is 64 B
-//        C) every matrix.*.expected_* field is CBOR bytes, not the literal
-//           text "TBD-COHORT-ROUND-TRIP"
-//   3. Phase-1 and Phase-2 cryptographic outputs re-derive from the inputs
-//      embedded in the corpus and match the corresponding `expected_*` /
-//      `canonical*` pins.
+//  1. File sha256 matches the F16 re-stamp 8e7c5232…f31f982e (or the value
+//     supplied via -expected-sha).
+//  2. F16 structural invariants on the file's input-side fields:
+//     A) every Ed448 secret_seed / pubkey-from-seed input is 57 B (RFC 8032)
+//     B) every `experimental-test` public_key is 64 B
+//     C) every matrix.*.expected_* field is CBOR bytes, not the literal
+//     text "TBD-COHORT-ROUND-TRIP"
+//  3. Phase-1 and Phase-2 cryptographic outputs re-derive from the inputs
+//     embedded in the corpus and match the corresponding `expected_*` /
+//     `canonical*` pins.
 //
 // This closes the F16 cohort action surfaced by Keystone — "decode the
 // artifact, not its sha256" — on the Go side. No impl code change is required;
@@ -41,7 +41,20 @@ import (
 )
 
 const (
-	defaultPath = "../entity-core-architecture/docs/architecture/v7.0-core-revision/core-protocol-domain/specs/test-vectors/v767/conformance-vectors-v1.cbor"
+	// The v767 corpus did NOT migrate in the V8 split. Its two siblings
+	// (`ecf-conformance`, `crypto-agility`) are in
+	// entity-core-protocol/specs/test-vectors/; `v767` was left in the pre-V8
+	// arch repo, which lives under entity-lab-legacy-meta — NOT beside this
+	// repo. The old default here assumed the pre-split sibling layout
+	// (`../entity-core-architecture/…`) and resolved to nothing on any current
+	// checkout, so the tool had been unrunnable at its default since the split.
+	//
+	// The bytes are intact and match the F16 re-stamp below. Routed for
+	// migration in
+	// docs/validation/spec-issues/2026-08-11-b-the-v767-corpus-did-not-migrate-in-the-v8-split.md
+	// — when it lands beside its siblings this becomes a one-line change (and
+	// the re-stamp for §4.5a item 1a will change expectedSHA with it).
+	defaultPath = "../../entity-lab-legacy-meta/entity-core-architecture/docs/architecture/v7.0-core-revision/core-protocol-domain/specs/test-vectors/v767/conformance-vectors-v1.cbor"
 	expectedSHA = "8e7c5232f64bee83d628679f930c771e4e49f2f1e37d19e41e0d7838e31f982e"
 )
 
@@ -248,7 +261,7 @@ func verifyEd448PeerEntity(c *checks, id string, v map[string]any) {
 		c.record(id, "entity-cbor", false, "derived pubkey ≠ input.data.public_key")
 		return
 	}
-	ent, err := kp.IdentityEntityFormat(0x00)
+	ent, err := kp.IdentityEntity()
 	if err != nil {
 		c.record(id, "entity-cbor", false, fmt.Sprintf("IdentityEntityFormat: %v", err))
 		return
@@ -305,8 +318,11 @@ func verifyMatrix(c *checks, id string, v map[string]any, sha384gate bool) {
 	b := mustMap(v, "input_peer_b")
 	keyA := keyFromInput(a)
 	keyB := keyFromInput(b)
-	homeA := byte(mustU64(a, "home_content_hash_format"))
-	homeB := byte(mustU64(b, "home_content_hash_format"))
+	// home_content_hash_format is still read so a malformed vector still
+	// fails loudly here, but it no longer selects the identity hash: §4.5a
+	// item 1a floor-pins system/peer whatever a peer's home format is.
+	_ = byte(mustU64(a, "home_content_hash_format"))
+	_ = byte(mustU64(b, "home_content_hash_format"))
 	active := byte(mustU64(v, "negotiated_active_format"))
 
 	// Peer A side
@@ -321,7 +337,11 @@ func verifyMatrix(c *checks, id string, v map[string]any, sha384gate bool) {
 		c.record(id, "peer_a.peer_id", string(pidA) == want,
 			fmt.Sprintf("derived %s", string(pidA)))
 	}
-	entA, err := keyA.IdentityEntityFormat(homeA)
+	// §4.5a item 1a (v7.77): system/peer is floor-authored whatever the home
+	// format, so homeA no longer selects the identity hash. The corresponding
+	// expected_peer_a_content_hash_sha384 vector below describes behavior the
+	// ruling RETIRED — see the header note.
+	entA, err := keyA.IdentityEntity()
 	if err != nil {
 		c.record(id, "peer_a.content_hash", false, err.Error())
 	} else {
@@ -348,7 +368,7 @@ func verifyMatrix(c *checks, id string, v map[string]any, sha384gate bool) {
 		c.record(id, "peer_b.peer_id", string(pidB) == want,
 			fmt.Sprintf("derived %s", string(pidB)))
 	}
-	entB, err := keyB.IdentityEntityFormat(homeB)
+	entB, err := keyB.IdentityEntity() // floor-pinned per §4.5a item 1a
 	if err != nil {
 		c.record(id, "peer_b.content_hash", false, err.Error())
 		return

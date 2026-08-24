@@ -73,8 +73,9 @@ func runDiscovery(ctx context.Context, client *PeerClient) []CheckResult {
 	r.DeclareSelf("v4_scan_result_flat_shape", "DISCOVERY §3, cohort discipline #3 — ScanResult is a flat entity, NOT system/protocol/status-wrapped")
 	r.Declare("v5_scan_invocation_handler_live", "DISCOVERY §3 — :scan against mdns returns 200 + ScanResult shape (snapshot list may be empty on quiet net)")
 	r.Declare("v6_scan_unknown_backend", "DISCOVERY §3.3 (Ruling-5 erratum) — :scan against unregistered backend MUST return 400 + code `unknown_backend` (V7 §3.3 unknown enum class)")
-	r.Declare("v7_announce_stop_idempotent", "DISCOVERY §3, §8.1 — :announce-stop on never-announced profile returns 200 (idempotent symmetric lifecycle)")
+	r.Declare("v7_announce_stop_idempotent", "DISCOVERY §3.3 [MUST, corrected 2026-08-11] — :announce-stop on a profile the backend RECOGNIZES but is not currently announcing returns 200. Idempotency is now normative for the first time; it previously cited §3/§8.1 loosely because the corpus stated it nowhere")
 	r.Declare("v7a_announce_lifecycle", "DISCOVERY §3, §8.1 — the POSITIVE arm: :announce then :announce-stop on the SAME profile. v7 only ever stops a never-announced profile, so :announce itself had no check and the stop path never ran against announced state.")
+	r.Declare("v7c_announce_stop_unknown_profile_ref", "DISCOVERY §3.3 [MUST] — the NEGATIVE half of v7: :announce-stop with a profile_ref the backend does not recognize MUST return 400, not an idempotent 200. §3.3 binds BOTH ops, and the ruling says in terms that an implementation whose stop never maps its unknown-profile sentinel is not conformant merely by being idempotent")
 	r.Declare("v7b_announce_unknown_profile_ref", "DISCOVERY §3.3 (Ruling-5 erratum) — :announce with a profile_ref the backend does not serve MUST return 400, not 500: an unknown parameter VALUE is a caller error, exactly as for an unknown `backend`")
 	r.DeclareSelf("v8_watchable_prefix_storage_path", "DISCOVERY §3.0 — CandidateStoragePath helper round-trips, watchable prefix matches `system/discovery/candidate/{backend}/`")
 	r.DeclareSelf("v9_successor_pattern_supersedes", "DISCOVERY §2.2 — successor candidate carries PeerID + Supersedes hash; original left immutable")
@@ -88,6 +89,7 @@ func runDiscovery(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Run("v6_scan_unknown_backend", func() CheckOutcome { return runDiscScanUnknownBackend(ctx, client) })
 	r.Run("v7_announce_stop_idempotent", func() CheckOutcome { return runDiscAnnounceStopIdempotent(ctx, client) })
 	r.Run("v7a_announce_lifecycle", func() CheckOutcome { return runDiscAnnounceLifecycle(ctx, client) })
+	r.Run("v7c_announce_stop_unknown_profile_ref", func() CheckOutcome { return runDiscAnnounceStopUnknownProfileRef(ctx, client) })
 	r.Run("v7b_announce_unknown_profile_ref", func() CheckOutcome { return runDiscAnnounceUnknownProfileRef(ctx, client) })
 	r.Run("v8_watchable_prefix_storage_path", runDiscWatchablePrefixStoragePath)
 	r.Run("v9_successor_pattern_supersedes", runDiscSuccessorPatternSupersedes)
@@ -344,20 +346,58 @@ func runDiscScanUnknownBackend(ctx context.Context, client *PeerClient) CheckOut
 	return PassCheck("scan on unregistered backend → 400 unknown_backend (V7 §3.3 class)")
 }
 
+// The idempotent case is "RECOGNIZED but not running" — not "never heard of."
+//
+// This used to send "validate-peer-never-announced-profile", a synthetic name
+// no backend resolves, and assert 200. Under §3.3's corrected two-case rule
+// that ref is the 400 case, so the check was asserting the unknown-profile
+// answer under the idempotency name — and would have scored a conformant peer
+// as failing. `tcp` is the profile every peer-manager-started peer publishes
+// (see runDiscAnnounceLifecycle), and nothing announced it before this check.
 func runDiscAnnounceStopIdempotent(ctx context.Context, client *PeerClient) CheckOutcome {
 	req := types.AnnounceStopRequestData{
 		Backend:    types.DiscoveryBackendMDNS,
-		ProfileRef: "validate-peer-never-announced-profile",
+		ProfileRef: "tcp",
 	}
 	ent, _ := req.ToEntity()
-	status, _, err := discExecute(ctx, client, "announce-stop", ent)
+	status, result, err := discExecute(ctx, client, "announce-stop", ent)
 	if err != nil {
 		return FailCheck("announce-stop dispatch: " + err.Error())
 	}
 	if status != 200 {
-		return FailCheck(fmt.Sprintf("§3, §8.1: announce-stop MUST be idempotent (200 on never-announced), got %d", status))
+		return FailCheck(fmt.Sprintf(
+			"§3.3: announce-stop on a RECOGNIZED but not-announcing profile MUST be an idempotent 200, got %d (%s)",
+			status, discErrDetail(result)))
 	}
-	return PassCheck("announce-stop is idempotent on never-announced profile (200)")
+	return PassCheck("announce-stop on a recognized, not-running profile → 200 (idempotent)")
+}
+
+// The negative half of the rule above, and the case Go itself failed: its
+// announce-stop returned nil for everything, which is idempotency applied to a
+// question it never asked. §3.3 binds both ops.
+func runDiscAnnounceStopUnknownProfileRef(ctx context.Context, client *PeerClient) CheckOutcome {
+	ent, err := types.AnnounceStopRequestData{
+		Backend:    types.DiscoveryBackendMDNS,
+		ProfileRef: "no-such-transport-profile",
+	}.ToEntity()
+	if err != nil {
+		return FailCheck("build announce-stop request: " + err.Error())
+	}
+	status, result, err := discExecute(ctx, client, "announce-stop", ent)
+	if err != nil {
+		return FailCheck("announce-stop dispatch: " + err.Error())
+	}
+	if status == 200 {
+		return FailCheck(
+			"announce-stop with a backend-unrecognized profile_ref → 200. Idempotency covers " +
+				"the recognized-but-not-running case ONLY (§3.3, corrected 2026-08-11); answering 200 " +
+				"here means the backend never asked whether it recognizes the ref at all")
+	}
+	if status != 400 {
+		return FailCheck(fmt.Sprintf("announce-stop unknown profile_ref → %d, want 400 (%s)",
+			status, discErrDetail(result)))
+	}
+	return PassCheck("announce-stop unknown profile_ref → 400 (caller error, not a silent idempotent success)")
 }
 
 // runDiscAnnounceLifecycle drives the POSITIVE announce arm — `:announce`

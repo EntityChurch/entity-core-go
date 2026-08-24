@@ -69,6 +69,8 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("layer1_unsigned_request_rejected", "§6a.9 layer 1 — a register-request with no system/signature at its invariant pointer MUST be refused; ownership proof is the floor beneath every policy mode")
 	r.Declare("revoke_request_publishes_revocation", "§6a.9 — revoke-request MUST publish a verifying revocation at the by-target index, which is the §2.1 step-4 signal a resolver excludes the binding on. Revocation is ADDITIVE: the immutable binding and its by-name pointer stay put.")
 	r.Declare("renew_request_accepted", "§6a.9 — renew-request extends an existing binding's expiry")
+	r.Declare("layer1_unsigned_revoke_rejected", "§6a.9 REG-REVOKE-PROOF-1 [added 2026-08-11] — revoke-request is \"Signed by target_peer_id or the operator\". An unsigned revoke MUST be refused: revocation is monotonic and cannot be undone, so an unauthenticated one is a permanent denial-of-name against any binding in the registry")
+	r.Declare("layer1_unsigned_renew_rejected", "§6a.9 REG-RENEW-PROOF-1 [added 2026-08-11] — renew-request is \"Signed by target_peer_id (layer-1)\". Replay defense is not authorization: it stops a CAPTURED request being re-run while leaving a fresh unsigned one accepted")
 	r.Declare("unknown_operation_rejected", "§6a.9 — an operation the issuer does not implement MUST be refused, not silently accepted")
 	r.Declare("set_issuer_policy_round_trip", "§6a.9.2 — set-issuer-policy stores the policy and get-issuer-policy returns it as written. Before this ruling the capability system/capability/registry-manage-issuer-policy named an act the corpus never defined, and a client had nothing to call")
 	r.Declare("set_issuer_policy_replaces_whole", "§6a.9.2 [MUST] — set replaces the policy WHOLE; an absent optional field means *unset*, not *unchanged*. A merge would make the result depend on write order, which two peers cannot reconstruct")
@@ -295,6 +297,13 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 		if err != nil {
 			return FailCheck("build revoke-request: " + err.Error())
 		}
+		// §6a.9: revoke is "Signed by target_peer_id or the operator."
+		// This check used to dispatch with NO proof and assert 200/202,
+		// which made it a check that a peer passes by NOT authorizing —
+		// a correctly-implemented peer failed here. Prove ownership.
+		if err := publishOwnershipProof(ctx, client, revEnt); err != nil {
+			return FailCheck("publish ownership proof for revoke-request: " + err.Error())
+		}
 		revStatus, revCode, err := issuerDispatch(ctx, client, uri, peerissued.OpRevokeRequest, revEnt)
 		if err != nil {
 			return FailCheck("revoke-request: " + err.Error())
@@ -338,6 +347,12 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 		if err != nil {
 			return FailCheck("build renew-request: " + err.Error())
 		}
+		// §6a.9: renew is "Signed by target_peer_id (layer-1)." Same
+		// defect as revoke above — replay defense is not authorization,
+		// and asserting acceptance without proof scored the absence of it.
+		if err := publishOwnershipProof(ctx, client, renewEnt); err != nil {
+			return FailCheck("publish ownership proof for renew-request: " + err.Error())
+		}
 		renewStatus, renewCode, err := issuerDispatch(ctx, client, uri, peerissued.OpRenewRequest, renewEnt)
 		if err != nil {
 			return FailCheck("renew-request: " + err.Error())
@@ -353,6 +368,78 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 			return FailCheck("renew-request answered " + fmt.Sprint(renewStatus) + " but the binding no longer resolves — renew MUST extend, not drop")
 		}
 		return PassCheck(fmt.Sprintf("renew-request accepted (%d) and the binding still resolves", renewStatus))
+	}))
+
+	// The two negative halves. These are the checks whose absence let an
+	// unauthenticated revocation path ship green: the positive checks above
+	// asserted only that revoke/renew were ACCEPTED, so a peer that skipped
+	// authorization entirely scored better than one that enforced it.
+	r.Run("layer1_unsigned_revoke_rejected", gate(func() CheckOutcome {
+		if out := setIssuerPolicy(ctx, client, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen}); out != nil {
+			return *out
+		}
+		name := issuerName("unsigned-revoke")
+		status, code, bindingHash, err := issuerRegisterBound(ctx, client, uri, name)
+		if err != nil || status != 200 {
+			return FailCheck(fmt.Sprintf("setup: register %q → %d/%q err=%v", name, status, code, err))
+		}
+		revEnt, err := types.RegistryRevokeRequestData{BindingHash: bindingHash}.ToEntity()
+		if err != nil {
+			return FailCheck("build revoke-request: " + err.Error())
+		}
+		// Deliberately publish NO ownership proof.
+		revStatus, revCode, err := issuerDispatch(ctx, client, uri, peerissued.OpRevokeRequest, revEnt)
+		if err != nil {
+			return FailCheck("revoke-request: " + err.Error())
+		}
+		if revStatus == 200 || revStatus == 202 {
+			return FailCheck("an UNSIGNED revoke-request was accepted — any peer that can reach this registry can permanently revoke any binding in it")
+		}
+		if revStatus != 401 {
+			return FailCheck(fmt.Sprintf("unsigned revoke-request → %d/%q, want 401 (ownership proof missing)", revStatus, revCode))
+		}
+		// Status alone is not enough: a 401 that revoked anyway is worse
+		// than an honest 200, because it reports refusal while acting.
+		revPath := types.PeerIssuedRevocationByTargetPath(bindingHash)
+		revoked, err := issuerPathBound(ctx, client, revPath)
+		if err != nil {
+			return FailCheck("read back revocation by-target index: " + err.Error())
+		}
+		if revoked {
+			return FailCheck("unsigned revoke-request answered 401 but published a revocation at " + revPath + " anyway")
+		}
+		return PassCheck("unsigned revoke-request refused 401 and published nothing")
+	}))
+
+	r.Run("layer1_unsigned_renew_rejected", gate(func() CheckOutcome {
+		if out := setIssuerPolicy(ctx, client, types.IssuerPolicyData{Mode: types.IssuerPolicyModeOpen}); out != nil {
+			return *out
+		}
+		name := issuerName("unsigned-renew")
+		status, code, bindingHash, err := issuerRegisterBound(ctx, client, uri, name)
+		if err != nil || status != 200 {
+			return FailCheck(fmt.Sprintf("setup: register %q → %d/%q err=%v", name, status, code, err))
+		}
+		renewEnt, err := types.RegistryRenewRequestData{
+			BindingHash: bindingHash,
+			Nonce:       issuerNonce(),
+			IssuedAt:    uint64(time.Now().UnixMilli()),
+		}.ToEntity()
+		if err != nil {
+			return FailCheck("build renew-request: " + err.Error())
+		}
+		// Deliberately publish NO ownership proof.
+		renewStatus, renewCode, err := issuerDispatch(ctx, client, uri, peerissued.OpRenewRequest, renewEnt)
+		if err != nil {
+			return FailCheck("renew-request: " + err.Error())
+		}
+		if renewStatus == 200 || renewStatus == 202 {
+			return FailCheck("an UNSIGNED renew-request was accepted — any peer can extend any binding's life past its registrant's intended lapse")
+		}
+		if renewStatus != 401 {
+			return FailCheck(fmt.Sprintf("unsigned renew-request → %d/%q, want 401 (ownership proof missing)", renewStatus, renewCode))
+		}
+		return PassCheck("unsigned renew-request refused 401")
 	}))
 
 	r.Run("unknown_operation_rejected", gate(func() CheckOutcome {
@@ -507,9 +594,23 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 // an empty `primitive/map` — the same shape clockExecute sends for
 // `system/clock:now`. Learned from a live peer; the unit tests call Handle
 // directly and never cross the envelope layer, so they could not see it.
+// The type is `primitive/any`, NOT `primitive/map`.
+//
+// This sent `primitive/map` and was caught by arch reviewing the instrument,
+// not by any run: core §3.2 has pinned the empty-params shape as a
+// `primitive/any` entity whose data is canonical CBOR `a0` since it was
+// written, and a strictly-conformant handler SHOULD reject a mismatched
+// params *type* with `400 unexpected_params`. Go accepted `primitive/map`
+// leniently, so go-on-go passed and the defect would have surfaced as a
+// rust/py FAIL on `get_issuer_policy_unset_404` — a sibling bug that was
+// really ours.
+//
+// The comment this replaced called `primitive/map` a "cohort convention,
+// learned from a live peer." The convention was in the spec; what the live
+// peer taught was Go's own leniency.
 func issuerNoParams() entity.Entity {
 	raw, _ := ecf.Encode(map[string]interface{}{})
-	ent, _ := entity.NewEntity("primitive/map", cbor.RawMessage(raw))
+	ent, _ := entity.NewEntity("primitive/any", cbor.RawMessage(raw))
 	return ent
 }
 

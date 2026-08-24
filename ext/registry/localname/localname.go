@@ -525,7 +525,6 @@ func errToResponse(err error) (*handler.Response, error) {
 	return handler.NewErrorResponse(500, "internal_error", err.Error())
 }
 
-
 // mustEncode is the ECF wrapper. Panics on encoding failure — only called
 // with primitive values where encoding cannot fail in practice.
 func mustEncode(v any) cbor.RawMessage {

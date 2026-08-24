@@ -196,7 +196,7 @@ func TestMergeConfig_CASGuard(t *testing.T) {
 
 	// Initial write.
 	resp1, _ := h.Handle(context.Background(), makeMergeConfigRequest(t, hctx, types.RevisionMergeConfigParamsData{
-		Scope:  "path", Name: "docs/*", Action: "set",
+		Scope: "path", Name: "docs/*", Action: "set",
 		Config: &types.RevisionMergeConfigData{Pattern: "docs/*", Strategy: "three-way", DeletionResolution: "preserve-on-conflict"},
 	}))
 	r1 := decodeMergeConfigResult(t, resp1)

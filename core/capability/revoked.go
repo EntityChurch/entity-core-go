@@ -23,10 +23,10 @@ import (
 //   - CapabilityIndex: ctx.capability_path_for(hash) — observational hash→
 //     path index for cap bindings.
 type RevocationContext struct {
-	ContentStore     store.ContentStore
-	LocationIndex    store.LocationIndex
-	Included         map[hash.Hash]entity.Entity
-	CapabilityIndex  CapabilityIndex
+	ContentStore    store.ContentStore
+	LocationIndex   store.LocationIndex
+	Included        map[hash.Hash]entity.Entity
+	CapabilityIndex CapabilityIndex
 }
 
 // IsRevoked implements V7 v7.62 §5.1 `is_revoked(capability, ctx)`.

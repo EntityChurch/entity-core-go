@@ -84,10 +84,10 @@ func TestHTTPLive_EndToEnd_HandshakeThenExecute(t *testing.T) {
 		t.Fatalf("decode result entity: %v", err)
 	}
 	var helloRespData struct {
-		Nonce  []byte    `cbor:"nonce"`
-		PeerID string    `cbor:"peer_id"`
-		Hashes []string  `cbor:"protocols"`
-		At     uint64    `cbor:"timestamp"`
+		Nonce  []byte   `cbor:"nonce"`
+		PeerID string   `cbor:"peer_id"`
+		Hashes []string `cbor:"protocols"`
+		At     uint64   `cbor:"timestamp"`
 	}
 	if err := cbor.Unmarshal(resultEnt.Data, &helloRespData); err != nil {
 		t.Fatalf("decode hello body: %v", err)

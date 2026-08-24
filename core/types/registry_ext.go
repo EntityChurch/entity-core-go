@@ -35,18 +35,18 @@ const (
 	// MUST be system/registry/resolution-result on the wire with flat data
 	// fields — MUST NOT wrap under system/protocol/status. The Go const name
 	// is retained as ResolveResult for source-compat; the wire string moved.
-	TypeRegistryResolveResult            = "system/registry/resolution-result"
-	TypeRegistryInvalidateCacheRequest   = "system/registry/invalidate-cache-request"
-	TypeRegistryLocalNameBindRequest     = "system/registry/local-name/bind-request"
-	TypeRegistryLocalNameBindResult      = "system/registry/local-name/bind-result"
-	TypeRegistryLocalNameUnbindRequest   = "system/registry/local-name/unbind-request"
-	TypeRegistryLocalNameListRequest     = "system/registry/local-name/list-request"
-	TypeRegistryLocalNameListResult      = "system/registry/local-name/list-result"
+	TypeRegistryResolveResult             = "system/registry/resolution-result"
+	TypeRegistryInvalidateCacheRequest    = "system/registry/invalidate-cache-request"
+	TypeRegistryLocalNameBindRequest      = "system/registry/local-name/bind-request"
+	TypeRegistryLocalNameBindResult       = "system/registry/local-name/bind-result"
+	TypeRegistryLocalNameUnbindRequest    = "system/registry/local-name/unbind-request"
+	TypeRegistryLocalNameListRequest      = "system/registry/local-name/list-request"
+	TypeRegistryLocalNameListResult       = "system/registry/local-name/list-result"
 	TypeRegistryLocalNameUpdateTransports = "system/registry/local-name/update-transports-request"
-	TypeRegistryLocalNameListEntry       = "system/registry/local-name/list-entry"
-	TypeRegistryPinnedEntry              = "system/registry/pinned-entry"
-	TypeRegistryDispatchEntry            = "system/registry/dispatch-entry"
-	TypeRegistryResolverChainEntry       = "system/registry/resolver-chain-entry"
+	TypeRegistryLocalNameListEntry        = "system/registry/local-name/list-entry"
+	TypeRegistryPinnedEntry               = "system/registry/pinned-entry"
+	TypeRegistryDispatchEntry             = "system/registry/dispatch-entry"
+	TypeRegistryResolverChainEntry        = "system/registry/resolver-chain-entry"
 )
 
 // Binding kind values per §3 / §2.4.1 vocabulary mapping (NORMATIVE
@@ -79,9 +79,9 @@ const (
 
 // ResolutionStatus values per §2.1 ResolutionResult.status enum.
 const (
-	ResolutionStatusResolved        = "resolved"
-	ResolutionStatusNotFound        = "not_found"
-	ResolutionStatusChainExhausted  = "chain_exhausted"
+	ResolutionStatusResolved       = "resolved"
+	ResolutionStatusNotFound       = "not_found"
+	ResolutionStatusChainExhausted = "chain_exhausted"
 )
 
 // TrustAnchor wire-form values per §2.4. NORMATIVE (underscored — §2.4.1
@@ -104,21 +104,21 @@ const (
 
 // REGISTRY-domain error codes per §6.5 + V7 §3.3 routing.
 const (
-	RegistryErrBindInvalidName    = "bind_invalid_name"    // 400
-	RegistryErrBindAlreadyExists  = "bind_already_exists"  // 409
+	RegistryErrBindInvalidName   = "bind_invalid_name"   // 400
+	RegistryErrBindAlreadyExists = "bind_already_exists" // 409
 )
 
 // REGISTRY default-grant cap names per §5.2 (NORMATIVE: bootstrap seed
 // policy grants the local peer all seven on first install per
 // `[[feedback_dont_drop_default_grants_implement_them]]`).
 const (
-	CapRegistryResolve        = "system/capability/registry-resolve"
-	CapRegistryConfigure      = "system/capability/registry-configure"
-	CapRegistryPin            = "system/capability/registry-pin"
-	CapRegistryCacheControl   = "system/capability/registry-cache-control"
-	CapRegistryLocalNameBind  = "system/capability/registry-local-name-bind"
+	CapRegistryResolve         = "system/capability/registry-resolve"
+	CapRegistryConfigure       = "system/capability/registry-configure"
+	CapRegistryPin             = "system/capability/registry-pin"
+	CapRegistryCacheControl    = "system/capability/registry-cache-control"
+	CapRegistryLocalNameBind   = "system/capability/registry-local-name-bind"
 	CapRegistryLocalNameUnbind = "system/capability/registry-local-name-unbind"
-	CapRegistryLocalNameList  = "system/capability/registry-local-name-list"
+	CapRegistryLocalNameList   = "system/capability/registry-local-name-list"
 )
 
 // -----------------------------------------------------------------------
@@ -170,7 +170,9 @@ func BindingDataFromEntity(e entity.Entity) (BindingData, error) {
 }
 
 // BindingStoragePath returns the universal storage path per §3:
-//   system/registry/binding/{binding_hash_hex}
+//
+//	system/registry/binding/{binding_hash_hex}
+//
 // LocalName bindings ADDITIONALLY have a tree pointer at the name-keyed
 // path returned by LocalNamePointerPath.
 func BindingStoragePath(h hash.Hash) string {
@@ -179,7 +181,9 @@ func BindingStoragePath(h hash.Hash) string {
 
 // LocalNamePointerPath returns the §6.3 tree-pointer storage path for a
 // local-name binding:
-//   system/registry/binding/local-name/{name}
+//
+//	system/registry/binding/local-name/{name}
+//
 // `name` MUST be NFC-normalized and case-folded per local-name-config before
 // being passed here; the path embeds the normalized string verbatim.
 func LocalNamePointerPath(normalizedName string) string {
@@ -188,7 +192,9 @@ func LocalNamePointerPath(normalizedName string) string {
 
 // PeerIssuedByNamePath returns the peer-issued backend's name-keyed tree
 // pointer path per PROPOSAL-PEER-ISSUED-REGISTRY-BACKEND §2.2:
-//   system/registry/binding/by-name/{nfc(name)}
+//
+//	system/registry/binding/by-name/{nfc(name)}
+//
 // Direct analog of LocalNamePointerPath, different prefix. `name` MUST be
 // NFC-normalized before being passed; the path embeds the normalized string
 // verbatim. Name-path safety per §6.3 applies (no `/`, no control chars);
@@ -359,7 +365,7 @@ const LocalNameConfigStoragePath = "system/registry/local-name-config"
 //   - backend_id:            which backend answered (null if chain_exhausted)
 //   - status:                resolved | not_found | chain_exhausted
 //   - reason:                e.g. "signature_failed", "policy_rejected",
-//                            "pin_short_circuit" — null on normal-path resolve
+//     "pin_short_circuit" — null on normal-path resolve
 //   - binding:               resolved binding hash, null otherwise
 //   - attempted_at:          ms-since-epoch
 //   - is_fallback_reresolve: true if invoked from §2.3 transport-fallback loop

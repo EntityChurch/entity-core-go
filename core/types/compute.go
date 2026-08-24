@@ -303,9 +303,9 @@ func (d ComputeClosureData) ToEntity() (entity.Entity, error) {
 // `entity_hash` (11) or `value` (5). The kind tag disambiguates an entity hash-ref
 // from a 33-byte value by construction (no shape ambiguity per N3).
 type ComputeScopeBinding struct {
-	Kind       string      `cbor:"kind"`                   // "entity" | "value"
-	EntityHash *hash.Hash  `cbor:"entity_hash,omitempty"`  // present iff kind == "entity"
-	Value      interface{} `cbor:"value,omitempty"`        // present iff kind == "value"
+	Kind       string      `cbor:"kind"`                  // "entity" | "value"
+	EntityHash *hash.Hash  `cbor:"entity_hash,omitempty"` // present iff kind == "entity"
+	Value      interface{} `cbor:"value,omitempty"`       // present iff kind == "value"
 }
 
 const (

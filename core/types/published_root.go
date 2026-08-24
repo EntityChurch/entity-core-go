@@ -14,8 +14,8 @@ import (
 // One of three entities under the §7 Q1 layering (5-team convergence):
 //   - system/peer/published-root — this entity; standalone signed tree-root pointer.
 //   - system/peer/manifest       — self-description bundle (§3); references this
-//                                  by named-pointer (NOT by-hash) so root updates
-//                                  do not force a manifest re-sign.
+//     by named-pointer (NOT by-hash) so root updates
+//     do not force a manifest re-sign.
 //   - system/substitute/snapshot-manifest — content-index optimization (untouched).
 const TypePeerPublishedRoot = "system/peer/published-root"
 

@@ -357,4 +357,3 @@ func mustBuildFromMap(t *testing.T, cs store.ContentStore, live map[string]hash.
 	}
 	return h
 }
-

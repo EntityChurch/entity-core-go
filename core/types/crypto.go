@@ -42,12 +42,17 @@ type PeerData struct {
 }
 
 // ToEntity creates a system/peer entity.
+// The floor is not the process default — it is unconditional. §4.5a item 1a
+// (v7.77): a `system/peer` entity is authored at ECFv1-SHA-256 whatever the
+// peer's home format. Using entity.NewEntity here would take the process-global
+// default, which on a SHA-384-home peer is exactly the second address space
+// item 1a exists to collapse. Mirrors crypto.Keypair.IdentityEntity.
 func (d PeerData) ToEntity() (entity.Entity, error) {
 	raw, err := ecf.Encode(d)
 	if err != nil {
 		return entity.Entity{}, err
 	}
-	return entity.NewEntity(TypePeer, cbor.RawMessage(raw))
+	return entity.NewEntityFormat(hash.AlgorithmSHA256, TypePeer, cbor.RawMessage(raw))
 }
 
 // KeyTypeByte returns the binary key_type byte for d.KeyType (the

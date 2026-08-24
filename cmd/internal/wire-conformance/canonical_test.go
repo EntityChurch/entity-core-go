@@ -81,7 +81,7 @@ func TestMapKeyOrdering(t *testing.T) {
 // so the byte-keyed entry sorts first.
 func TestMixedKeyMap(t *testing.T) {
 	m := map[interface{}]interface{}{
-		"text_key":         int64(1),
+		"text_key":              int64(1),
 		byteKey("\x6b\x65\x79"): int64(2), // h'6b6579'
 	}
 	got, err := encodeCanonical(m)

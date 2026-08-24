@@ -299,22 +299,22 @@ func ContinuationTransformDataFromEntity(e entity.Entity) (ContinuationTransform
 
 // ContinuationData is the data payload for system/continuation.
 type ContinuationData struct {
-	Target              string                     `cbor:"target"`
-	Operation           string                     `cbor:"operation"`
-	Resource            *ResourceTarget            `cbor:"resource,omitempty"`
-	Params              cbor.RawMessage            `cbor:"params,omitempty"`
-	ResultTransform     *ContinuationTransformData `cbor:"result_transform,omitempty"`
-	ResultField         string                     `cbor:"result_field,omitempty"`
+	Target          string                     `cbor:"target"`
+	Operation       string                     `cbor:"operation"`
+	Resource        *ResourceTarget            `cbor:"resource,omitempty"`
+	Params          cbor.RawMessage            `cbor:"params,omitempty"`
+	ResultTransform *ContinuationTransformData `cbor:"result_transform,omitempty"`
+	ResultField     string                     `cbor:"result_field,omitempty"`
 	// ResultMerge: when true, the post-transform value (which must be a
 	// map — typically a `select` output) is shallow-merged into the
 	// static `params` at top level rather than nested under a single
 	// `result_field` key. Mutually exclusive with `result_field`
 	// (rejected at install). Per PROPOSAL-CONTINUATION-MERGE-ASSEMBLY.
-	ResultMerge         bool                       `cbor:"result_merge,omitempty"`
-	OnError             *DeliverySpec              `cbor:"on_error,omitempty"`
-	DeliverTo           *DeliverySpec              `cbor:"deliver_to,omitempty"`
-	RemainingExecutions *uint64                    `cbor:"remaining_executions,omitempty"`
-	DispatchCapability  hash.Hash                  `cbor:"dispatch_capability,omitzero"`
+	ResultMerge         bool          `cbor:"result_merge,omitempty"`
+	OnError             *DeliverySpec `cbor:"on_error,omitempty"`
+	DeliverTo           *DeliverySpec `cbor:"deliver_to,omitempty"`
+	RemainingExecutions *uint64       `cbor:"remaining_executions,omitempty"`
+	DispatchCapability  hash.Hash     `cbor:"dispatch_capability,omitzero"`
 }
 
 // ToEntity creates a system/continuation entity.

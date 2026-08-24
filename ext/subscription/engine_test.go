@@ -594,7 +594,7 @@ func TestV315_WithinSubscriptionOrderingPreserved(t *testing.T) {
 	observed := make([]byte, 0, N)
 	engine.Deliver = func(ctx context.Context, req DeliveryRequest) error {
 		// Recover the sequence byte from req.Params (notification entity).
-		// The InboxNotificationData stores the URI; we encoded the sequence
+		// The SubscriptionNotificationData stores the URI; we encoded the sequence
 		// into the URI suffix below. Easier: parse from the URI suffix.
 		// Find the trailing "/seqXX" segment.
 		uri := req.Resource.Targets[0]
@@ -602,9 +602,9 @@ func TestV315_WithinSubscriptionOrderingPreserved(t *testing.T) {
 		// uri is the deliver_uri ("inbox") — instead we read req.Params.Data
 		// We embed sequence in PreviousHash's first byte for robustness.
 		_ = uri
-		// We'll decode the InboxNotificationData to recover Hash's first byte
+		// We'll decode the SubscriptionNotificationData to recover Hash's first byte
 		// (which we set to the sequence in the change events below).
-		if notif, err := types.InboxNotificationDataFromEntity(req.Params); err == nil {
+		if notif, err := types.SubscriptionNotificationDataFromEntity(req.Params); err == nil {
 			observed = append(observed, notif.Hash.Digest[0])
 		}
 		mu.Unlock()
@@ -700,7 +700,7 @@ func TestV315_CrossSubscriptionParallelism(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 
 		mu.Lock()
-		notif, _ := types.InboxNotificationDataFromEntity(req.Params)
+		notif, _ := types.SubscriptionNotificationDataFromEntity(req.Params)
 		delivered[notif.SubscriptionID]++
 		inFlight--
 		mu.Unlock()

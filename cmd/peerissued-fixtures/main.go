@@ -76,11 +76,11 @@ const fixTargetPeerID = "2KAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 // / REVOKED-1 / PRECEDE-1 / OFFLINE-NOTFOUND-1 all use NowResolve; EXPIRED-1
 // uses NowExpired (past issued_at + ttl).
 const (
-	ClockIssuedAt  uint64 = 1_000_000
+	ClockIssuedAt   uint64 = 1_000_000
 	ClockNowResolve uint64 = 2_000_000
-	ClockTTLShort  uint64 = 1_000
+	ClockTTLShort   uint64 = 1_000
 	ClockNowExpired uint64 = 1_001_001
-	NegativeTTL    uint64 = 30_000
+	NegativeTTL     uint64 = 30_000
 )
 
 // cohortName — the same NFC name across every vector, so the cross-impl
@@ -129,29 +129,29 @@ type vectorOutcome struct {
 }
 
 type vectorEntry struct {
-	ID                 string         `json:"id"`
-	Mode               string         `json:"mode"` // "live" or "offline"
-	Description        string         `json:"description"`
-	ClockMs            uint64         `json:"clock_ms"`
-	Name               string         `json:"name"`
-	BindingHash        string         `json:"binding_hash,omitempty"`
-	SignatureHash      string         `json:"signature_hash,omitempty"`
-	RevocationHash     string         `json:"revocation_hash,omitempty"`
-	RevocationSigHash  string         `json:"revocation_signature_hash,omitempty"`
-	ExpectedResult     vectorOutcome  `json:"expected_result"`
-	Files              []string       `json:"files"`
-	OfflinePreseed     map[string]string `json:"offline_preseed,omitempty"` // store-path → entity content_hash
+	ID                string            `json:"id"`
+	Mode              string            `json:"mode"` // "live" or "offline"
+	Description       string            `json:"description"`
+	ClockMs           uint64            `json:"clock_ms"`
+	Name              string            `json:"name"`
+	BindingHash       string            `json:"binding_hash,omitempty"`
+	SignatureHash     string            `json:"signature_hash,omitempty"`
+	RevocationHash    string            `json:"revocation_hash,omitempty"`
+	RevocationSigHash string            `json:"revocation_signature_hash,omitempty"`
+	ExpectedResult    vectorOutcome     `json:"expected_result"`
+	Files             []string          `json:"files"`
+	OfflinePreseed    map[string]string `json:"offline_preseed,omitempty"` // store-path → entity content_hash
 }
 
 type manifest struct {
-	BundleVersion       string         `json:"bundle_version"`
-	Proposal            string         `json:"proposal"`
-	Generated           string         `json:"generated_by"`
-	RegistryPeerID      string         `json:"registry_peer_id"`
+	BundleVersion        string        `json:"bundle_version"`
+	Proposal             string        `json:"proposal"`
+	Generated            string        `json:"generated_by"`
+	RegistryPeerID       string        `json:"registry_peer_id"`
 	RegistryIdentityHash string        `json:"registry_identity_hash"`
-	NegativeTTLMs       uint64         `json:"negative_ttl_ms"`
-	Vectors             []vectorEntry  `json:"vectors"`
-	Notes               []string       `json:"notes"`
+	NegativeTTLMs        uint64        `json:"negative_ttl_ms"`
+	Vectors              []vectorEntry `json:"vectors"`
+	Notes                []string      `json:"notes"`
 }
 
 func main() {
@@ -342,14 +342,14 @@ func run(outDir string) error {
 			return err
 		}
 		entry := vectorEntry{
-			ID:               "REG-PEERISSUED-REVOKED-1",
-			Mode:             "live",
-			Description:      "valid binding + verifying revocation at by-target index → rejected, chain advances",
-			ClockMs:          ClockNowResolve,
-			Name:             nameFor("REVOKED-1"),
-			BindingHash:      hex.EncodeToString(bind.ContentHash.Bytes()),
-			SignatureHash:    hex.EncodeToString(sig.ContentHash.Bytes()),
-			RevocationHash:   hex.EncodeToString(rev.ContentHash.Bytes()),
+			ID:                "REG-PEERISSUED-REVOKED-1",
+			Mode:              "live",
+			Description:       "valid binding + verifying revocation at by-target index → rejected, chain advances",
+			ClockMs:           ClockNowResolve,
+			Name:              nameFor("REVOKED-1"),
+			BindingHash:       hex.EncodeToString(bind.ContentHash.Bytes()),
+			SignatureHash:     hex.EncodeToString(sig.ContentHash.Bytes()),
+			RevocationHash:    hex.EncodeToString(rev.ContentHash.Bytes()),
 			RevocationSigHash: hex.EncodeToString(revSig.ContentHash.Bytes()),
 			ExpectedResult: vectorOutcome{
 				Error: "peerissued: binding revoked",
@@ -452,8 +452,8 @@ func run(outDir string) error {
 			},
 			Files: []string{"binding.cbor", "signature.cbor"},
 			OfflinePreseed: map[string]string{
-				types.PeerIssuedByNamePath(nameFor("PRECEDE-1")):       bh,
-				types.LocalSignaturePath(bind.ContentHash):  hex.EncodeToString(sig.ContentHash.Bytes()),
+				types.PeerIssuedByNamePath(nameFor("PRECEDE-1")): bh,
+				types.LocalSignaturePath(bind.ContentHash):       hex.EncodeToString(sig.ContentHash.Bytes()),
 			},
 		}
 		writeNotes(dir, entry,

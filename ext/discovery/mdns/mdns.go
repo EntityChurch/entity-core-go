@@ -201,17 +201,42 @@ func (b *Backend) Announce(ctx context.Context, profileRef string) error {
 	return nil
 }
 
-// AnnounceStop implements discovery.Backend. Idempotent.
+// AnnounceStop implements discovery.Backend.
+//
+// EXTENSION-DISCOVERY §3.3 (corrected 2026-08-11) is a TWO-CASE rule, and this
+// used to implement only one of them:
+//
+//	unrecognized by the backend      → ErrUnknownProfileRef (handler: 400)
+//	recognized but not announcing    → nil (handler: 200), idempotent
+//
+// It previously returned nil for everything, which is idempotency applied to a
+// question it had not asked. The ruling says so in terms: an implementation
+// whose announce-stop never maps its unknown-profile sentinel to 400 is not
+// conformant merely by being idempotent — the idempotency half covers the
+// second case only. Stopping a profile this backend has never heard of is a
+// caller error, exactly as it is on :announce.
 func (b *Backend) AnnounceStop(ctx context.Context, profileRef string) error {
 	b.mu.Lock()
 	srv, ok := b.announced[profileRef]
-	delete(b.announced, profileRef)
-	b.mu.Unlock()
-	if !ok {
-		return nil // idempotent
+	if ok {
+		delete(b.announced, profileRef)
 	}
-	srv.Shutdown()
-	return nil
+	resolver := b.resolver
+	b.mu.Unlock()
+
+	if ok {
+		srv.Shutdown()
+		return nil
+	}
+
+	// Not currently announcing. Distinguish the two cases before answering.
+	if resolver == nil {
+		return fmt.Errorf("mdns: ProfileResolver not wired — cannot classify profile_ref=%q", profileRef)
+	}
+	if _, _, err := resolver(profileRef); err != nil {
+		return fmt.Errorf("mdns: resolve profile %q: %w", profileRef, err)
+	}
+	return nil // recognized, not running — the idempotent case
 }
 
 // Scan implements discovery.Backend. Runs a bounded Browse against the

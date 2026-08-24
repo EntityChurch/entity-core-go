@@ -12,15 +12,15 @@ import (
 // handleAdopt implements §7.5 — install a remote peer's type definition
 // locally. The handler:
 //
-//   1. Resolves the type definition at source_path.
-//   2. Rewrites data.name to local_name (or derives it from source_path
-//      by stripping the peer prefix + "system/type/").
-//   3. If the parent (extends) lives on the same source peer and a local
-//      equivalent exists, rewrites the extends reference to the local
-//      name. If no local equivalent exists, leaves extends unchanged and
-//      records the dependency in the result's local_name field (via
-//      preservation, not via a separate result field — §7.5 returns a
-//      system/type entity).
+//  1. Resolves the type definition at source_path.
+//  2. Rewrites data.name to local_name (or derives it from source_path
+//     by stripping the peer prefix + "system/type/").
+//  3. If the parent (extends) lives on the same source peer and a local
+//     equivalent exists, rewrites the extends reference to the local
+//     name. If no local equivalent exists, leaves extends unchanged and
+//     records the dependency in the result's local_name field (via
+//     preservation, not via a separate result field — §7.5 returns a
+//     system/type entity).
 //
 // The handler does NOT write to the tree; the caller decides whether to
 // tree-put the result.

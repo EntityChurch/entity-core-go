@@ -152,22 +152,22 @@ func TestSizeSweep(t *testing.T) {
 	sizes := []uint64{
 		0,
 		1,
-		1024,             // 1 KiB
-		32 * 1024,        // 32 KiB — below min
-		p.Min - 1,        // 65,535 — just below min
-		p.Min,            // 65,536 — exactly min (the §10.1 MIN_CHUNK_SIZE)
-		p.Min + 1,        // 65,537 — just above min
-		128 * 1024,       // 128 KiB — between min and target
-		p.Target - 1,     // just below target
-		p.Target,         // exactly target
-		p.Target + 1,     // just above target
-		384 * 1024,       // 384 KiB — between target and max
-		p.Max - 1,        // just below max — single-chunk forced boundary
-		p.Max,            // exactly max
-		p.Max + 1,        // just above max — forces at least 2 chunks
-		2 * p.Target,     // 512 KiB
-		4 * p.Target,     // 1 MiB
-		8 * p.Target,     // 2 MiB
+		1024,         // 1 KiB
+		32 * 1024,    // 32 KiB — below min
+		p.Min - 1,    // 65,535 — just below min
+		p.Min,        // 65,536 — exactly min (the §10.1 MIN_CHUNK_SIZE)
+		p.Min + 1,    // 65,537 — just above min
+		128 * 1024,   // 128 KiB — between min and target
+		p.Target - 1, // just below target
+		p.Target,     // exactly target
+		p.Target + 1, // just above target
+		384 * 1024,   // 384 KiB — between target and max
+		p.Max - 1,    // just below max — single-chunk forced boundary
+		p.Max,        // exactly max
+		p.Max + 1,    // just above max — forces at least 2 chunks
+		2 * p.Target, // 512 KiB
+		4 * p.Target, // 1 MiB
+		8 * p.Target, // 2 MiB
 	}
 
 	patterns := []string{"rand_seed_1", "cyclic_256"}
@@ -227,9 +227,9 @@ func TestMixedContent(t *testing.T) {
 func TestTargetSweep(t *testing.T) {
 	data := makePattern("rand_seed_0xC0FFEE", 8*1024*1024)
 	targets := []uint64{
-		256 * 1024,        // 256 KiB
-		1 * 1024 * 1024,   // 1 MiB
-		4 * 1024 * 1024,   // 4 MiB (default)
+		256 * 1024,      // 256 KiB
+		1 * 1024 * 1024, // 1 MiB
+		4 * 1024 * 1024, // 4 MiB (default)
 	}
 	for _, target := range targets {
 		p := DeriveFastCDC(target)
@@ -263,9 +263,9 @@ func TestEditStabilitySweep(t *testing.T) {
 	original := makePattern("rand_seed_1", size)
 
 	positions := map[string]int{
-		"start":   1024,             // 1 KiB in
-		"mid":     size / 2,         // middle
-		"end":     size - 256*1024,  // 256 KiB from end
+		"start": 1024,            // 1 KiB in
+		"mid":   size / 2,        // middle
+		"end":   size - 256*1024, // 256 KiB from end
 	}
 
 	origRanges := ChunkFastCDC(original, target)

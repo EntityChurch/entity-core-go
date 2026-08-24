@@ -14,7 +14,6 @@ import (
 	"go.entitychurch.org/entity-core-go/core/types"
 )
 
-
 // DispatchLocalEnvelope routes a locally-originated envelope through the dispatch pipeline.
 // Unlike DispatchEnvelope (for wire-received messages), this checks if the EXECUTE targets
 // a remote peer and routes through RemoteExecute if so. This is the correct entry point
@@ -370,8 +369,8 @@ func (d *Dispatcher) makeLocalExecute(parentCtx context.Context, callerCtx *hand
 			// delivery mechanism initiated (PROPOSAL-CONTINUATION-STANDING-MODEL
 			// §3). Propagating it would wrongly tag the continuation's onward
 			// chain dispatches as reactive too.
-			ReactiveTrigger:  execOpts.ReactiveTrigger,
-			Included:         callerCtx.Included,
+			ReactiveTrigger: execOpts.ReactiveTrigger,
+			Included:        callerCtx.Included,
 		}
 		childCtx.Execute = d.makeLocalExecute(ctx, childCtx)
 		childCtx.GoAsync = d.submitAsync

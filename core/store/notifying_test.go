@@ -427,30 +427,30 @@ func TestPathMatchesPattern(t *testing.T) {
 		{"system/attestation/*", "/PIDA/system/attestation/x", true},
 		{"system/attestation/*", "/PIDB/system/attestation/y", true},
 		{"system/attestation/*", "/PIDC/system/attestation/nested/z", true},
-		{"system/attestation/*", "/PIDA/system/clock/now", false}, // wrong suffix
+		{"system/attestation/*", "/PIDA/system/clock/now", false},  // wrong suffix
 		{"system/attestation/*", "/PIDA/system/attestation", true}, // bare prefix
-		{"system/attestation",   "/PIDA/system/attestation", true}, // exact peer-rel
-		{"system/attestation",   "/PIDA/system/attestation/x", false},
+		{"system/attestation", "/PIDA/system/attestation", true},   // exact peer-rel
+		{"system/attestation", "/PIDA/system/attestation/x", false},
 
 		// ---- Absolute specific-peer patterns: that peer only ----
 		{"/PIDA/system/attestation/*", "/PIDA/system/attestation/x", true},
 		{"/PIDA/system/attestation/*", "/PIDB/system/attestation/x", false}, // other peer
-		{"/PIDA/system/exact/path",    "/PIDA/system/exact/path", true},
-		{"/PIDA/system/exact/path",    "/PIDB/system/exact/path", false},
+		{"/PIDA/system/exact/path", "/PIDA/system/exact/path", true},
+		{"/PIDA/system/exact/path", "/PIDB/system/exact/path", false},
 
 		// ---- Absolute any-peer patterns: /*/ wildcard segment ----
 		{"/*/system/attestation/*", "/PIDA/system/attestation/x", true},
 		{"/*/system/attestation/*", "/PIDB/system/attestation/y", true},
 		{"/*/system/attestation/*", "/PIDA/system/clock/now", false},
-		{"/*/system/exact",         "/PIDA/system/exact", true},
-		{"/*/system/exact",         "/PIDB/system/exact/x", false},
+		{"/*/system/exact", "/PIDA/system/exact", true},
+		{"/*/system/exact", "/PIDB/system/exact/x", false},
 
 		// ---- Backward-compatible cases on naked (non-namespaced) paths ----
-		{"system/foo",            "system/foo", true},
-		{"system/foo",            "system/foo/bar", false},
-		{"system/attestation/*",  "system/attestation/x", true},
-		{"system/attestation/*",  "system/attest", false},
-		{"system/attestation/*",  "system/attestationextra", false},
+		{"system/foo", "system/foo", true},
+		{"system/foo", "system/foo/bar", false},
+		{"system/attestation/*", "system/attestation/x", true},
+		{"system/attestation/*", "system/attest", false},
+		{"system/attestation/*", "system/attestationextra", false},
 	}
 	for _, tc := range cases {
 		got := pathMatchesPattern(tc.pattern, tc.path)

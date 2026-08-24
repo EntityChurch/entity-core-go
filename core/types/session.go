@@ -18,11 +18,11 @@ import (
 //
 //   - One path per peer: /{local_peer_id}/system/peer/session/{remote_peer_id}.
 //   - Two cap fields on a single entity (§9.1 R6-a, Option A — Go's lean):
-//     * held_capability — the cap remote granted me. Dispatch reads this.
-//     * minted_capability (optional) — the cap I issued to remote.
-//       Granter-side R3a idempotency anchor + revocation surface. NOT a
-//       reverse-delivery cap (§9.1 R6-a reconciliation): back-direction
-//       delivery still uses deliver_token, unchanged.
+//   - held_capability — the cap remote granted me. Dispatch reads this.
+//   - minted_capability (optional) — the cap I issued to remote.
+//     Granter-side R3a idempotency anchor + revocation surface. NOT a
+//     reverse-delivery cap (§9.1 R6-a reconciliation): back-direction
+//     delivery still uses deliver_token, unchanged.
 //   - DROPPED vs strawman: last_active (§9.1 R6-b — was liveness duplicating
 //     system/peer/status.last_seen) and status (§9.1 R6-c — was lifecycle
 //     duplicating system/peer/status, source of go/rust-vs-python divergence).

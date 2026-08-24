@@ -48,13 +48,13 @@ import (
 // listener was started. Outbound dispatch to other peers MUST go through
 // the multi-profile resolver's HTTP branch.
 type httpOnlyPeer struct {
-	name      string
-	peer      *peer.Peer
-	kp        crypto.Keypair
-	identity  entity.Entity
-	url       string
-	teardown  func()
-	selfCap   entity.Entity
+	name     string
+	peer     *peer.Peer
+	kp       crypto.Keypair
+	identity entity.Entity
+	url      string
+	teardown func()
+	selfCap  entity.Entity
 }
 
 // startHTTPOnlyPeer builds a peer wired with the tree handler and the

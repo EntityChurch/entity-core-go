@@ -14,8 +14,6 @@ import (
 	"go.entitychurch.org/entity-core-go/core/types"
 )
 
-
-
 // --- install operation (R0/R1 — PROPOSAL-COHERENT-CAPABILITY-AUTHORITY §3) ---
 
 // handleInstall creates a system/continuation (or system/continuation/join)

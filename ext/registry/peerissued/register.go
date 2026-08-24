@@ -113,10 +113,10 @@ func WithSeedPolicy(p types.IssuerPolicyData) IssuerOption {
 // Handle() rejects requests with 503 "not_ready" if SetupAuthority has not
 // yet been called.
 type Issuer struct {
-	mu             sync.Mutex
-	keypair        crypto.Keypair
-	signerHash     hash.Hash // content_hash(canonical(system/peer for keypair)) — the SignatureData.Signer value
-	ready          bool
+	mu         sync.Mutex
+	keypair    crypto.Keypair
+	signerHash hash.Hash // content_hash(canonical(system/peer for keypair)) — the SignatureData.Signer value
+	ready      bool
 
 	seenNonces   map[string]uint64 // "target_peer_id|hex(nonce)" → request.issued_at
 	clock        func() uint64
@@ -235,9 +235,9 @@ func (i *Issuer) RegisterTypes(r *types.TypeRegistry) {
 //
 //   - open    — peer.SeedPolicyDefault(RequestBindingSeedGrants())
 //   - manual  — peer.SeedPolicyDefault(RequestBindingSeedGrants())
-//                (request still needs to reach the handler; it queues there)
+//     (request still needs to reach the handler; it queues there)
 //   - allowlist — peer.SeedPolicyForPeerID(p, RequestBindingSeedGrants())
-//                for each p in the allowlist
+//     for each p in the allowlist
 //
 // The grants are deliberately narrow: only the register-request op and
 // only the system/signature/* tree-put for the Layer-1 ownership proof.
@@ -768,6 +768,25 @@ func (i *Issuer) handleRevokeRequest(_ context.Context, req *handler.Request) (*
 		return handler.NewErrorResponse(400, "invalid_request",
 			"binding_hash addresses a non-binding entity")
 	}
+	existing, err := types.BindingDataFromEntity(bindingEnt)
+	if err != nil {
+		return handler.NewErrorResponse(500, "internal_error",
+			"decode existing binding: "+err.Error())
+	}
+	// §6a.9 layer 1: "Signed by target_peer_id or the operator." This
+	// verified NOTHING — any peer that could reach the registry could
+	// revoke any binding in it, and the validator's own check certified
+	// that by asserting 200/202 with no proof attached. Python refused to
+	// match it and reported it instead, which is the only reason it
+	// surfaced: go-on-go stayed green throughout.
+	//
+	// The target_peer_id half is what is pinned, so it is what is enforced.
+	// The OPERATOR half has no defined proof shape anywhere in §6a.9 —
+	// routed to arch; until it is pinned, an operator revokes locally
+	// rather than over the wire.
+	if status, code, msg := i.verifyOwnershipProof(hctx, req.Params, existing.TargetPeerID); code != "" {
+		return handler.NewErrorResponse(status, code, msg)
+	}
 
 	rev := types.RevocationData{
 		Revokes:   body.BindingHash,
@@ -847,6 +866,14 @@ func (i *Issuer) handleRenewRequest(_ context.Context, req *handler.Request) (*h
 	if err != nil {
 		return handler.NewErrorResponse(500, "internal_error",
 			"decode existing binding: "+err.Error())
+	}
+	// §6a.9 layer 1: "Signed by target_peer_id (layer-1)." Replay defense
+	// alone is not authorization — it kept a captured request from being
+	// re-run, while leaving a FRESH request from any peer accepted. The
+	// nonce is keyed off the binding's target_peer_id, so an unauthorized
+	// renew also burned the real target's nonce space.
+	if status, code, msg := i.verifyOwnershipProof(hctx, req.Params, existing.TargetPeerID); code != "" {
+		return handler.NewErrorResponse(status, code, msg)
 	}
 	if status, code, msg := i.checkReplay(existing.TargetPeerID, body.Nonce, body.IssuedAt); code != "" {
 		return handler.NewErrorResponse(status, code, msg)

@@ -136,15 +136,15 @@ func extractPathRefs(data cbor.RawMessage, pathFields map[string]bool) []pathRef
 // system/tree/path values. These are derived from the type definitions
 // in the spec. For types not in this map, no path link indexing is done.
 var knownPathFields = map[string]map[string]bool{
-	"system/protocol/execute":            {"uri": true},
-	"system/delivery-spec":               {"uri": true},
-	"system/handler":                     {"interface": true, "expression_path": true},
-	"system/handler/manifest":            {"pattern": true},
-	"system/handler/interface":           {"pattern": true},
-	"system/handler/register-result":     {"pattern": true},
-	"system/subscription":                {"pattern": true, "deliver_uri": true},
-	"system/continuation":                {"target": true},
-	"system/continuation/join":           {"target": true},
-	"system/continuation/suspended":      {"target": true},
-	"system/protocol/inbox/notification": {"uri": true},
+	"system/protocol/execute":          {"uri": true},
+	"system/delivery-spec":             {"uri": true},
+	"system/handler":                   {"interface": true, "expression_path": true},
+	"system/handler/manifest":          {"pattern": true},
+	"system/handler/interface":         {"pattern": true},
+	"system/handler/register-result":   {"pattern": true},
+	"system/subscription":              {"pattern": true, "deliver_uri": true},
+	"system/continuation":              {"target": true},
+	"system/continuation/join":         {"target": true},
+	"system/continuation/suspended":    {"target": true},
+	"system/subscription/notification": {"uri": true},
 }

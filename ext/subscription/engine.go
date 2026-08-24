@@ -410,7 +410,7 @@ func (e *Engine) OnTreeChange(evt store.TreeChangeEvent) *store.ConsumerResult {
 		}
 
 		// Construct notification with canonical entity:// URI.
-		notification := types.InboxNotificationData{
+		notification := types.SubscriptionNotificationData{
 			SubscriptionID: sub.data.SubscriptionID,
 			Event:          eventStr,
 			URI:            notifURI,

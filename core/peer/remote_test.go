@@ -164,8 +164,8 @@ func TestCollectProfileCandidates_PriorityWinsOverDefault(t *testing.T) {
 		return ent
 	}
 	zero := uint64(0)
-	primaryEnt := mk("http://primary/", nil)              // default → 0
-	cdnEnt := mk("http://cdn-mirror/", &zero)             // explicit 0
+	primaryEnt := mk("http://primary/", nil)  // default → 0
+	cdnEnt := mk("http://cdn-mirror/", &zero) // explicit 0
 	hiPrioEnt := mk("http://hi/", func() *uint64 { v := uint64(50); return &v }())
 	primaryHash, _ := client.Store().Put(primaryEnt)
 	cdnHash, _ := client.Store().Put(cdnEnt)

@@ -592,7 +592,7 @@ type fakeDispatcher struct {
 	deliverErr error
 	forwardErr error
 
-	deliveredTo   string
+	deliveredTo    string
 	deliveredInner entity.Entity
 	forwardedTo    string
 	forwardedReq   types.ForwardRequestData
@@ -1113,8 +1113,8 @@ func TestForward_SourceRouteSingleElement_Terminal(t *testing.T) {
 	hctx.Included[inner.ContentHash] = inner
 
 	params, _ := types.ForwardRequestData{
-		Destination:   tFakeDest,
-		Route:         []string{tFakeDest}, // single-element route → terminal
+		Destination: tFakeDest,
+		Route:       []string{tFakeDest}, // single-element route → terminal
 		// NextHop intentionally empty — Route alone is sufficient.
 		TTLHops:       2,
 		EnvelopeInner: inner.ContentHash,

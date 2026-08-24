@@ -18,15 +18,15 @@ import (
 type stubBackend struct {
 	mu sync.Mutex
 
-	kind             string
-	candidates       []types.CandidateData
-	scanErr          error
-	announceCalls    []string
-	stopCalls        []string
-	announceErr      error
-	stopErr          error
-	observe          func(types.CandidateData)
-	reap             func(hash.Hash)
+	kind          string
+	candidates    []types.CandidateData
+	scanErr       error
+	announceCalls []string
+	stopCalls     []string
+	announceErr   error
+	stopErr       error
+	observe       func(types.CandidateData)
+	reap          func(hash.Hash)
 }
 
 func newStubBackend(kind string, candidates []types.CandidateData) *stubBackend {

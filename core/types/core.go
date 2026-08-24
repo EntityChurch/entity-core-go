@@ -407,7 +407,7 @@ func RegisterCoreTypes(r *TypeRegistry) {
 	// Phase 5b: Inbox and subscription types.
 	// SubscriptionLimitsData must be reflected before types that embed it.
 	r.ReflectType(TypeInboxDelivery, reflect.TypeOf(InboxDeliveryData{}))
-	r.ReflectType(TypeInboxNotification, reflect.TypeOf(InboxNotificationData{}))
+	r.ReflectType(TypeSubscriptionNotification, reflect.TypeOf(SubscriptionNotificationData{}))
 	r.ReflectType(TypeSubscriptionLimits, reflect.TypeOf(SubscriptionLimitsData{}))
 	r.ReflectType(TypeSubscription, reflect.TypeOf(SubscriptionData{}))
 	r.ReflectType(TypeSubscriptionRequest, reflect.TypeOf(SubscriptionRequestData{}))
@@ -723,7 +723,7 @@ func RegisterCoreTypes(r *TypeRegistry) {
 		FieldSpec{MapOf: &FieldSpec{TypeRef: "primitive/any"}, Optional: true})
 
 	// Inbox/subscription semantic type overrides.
-	r.OverrideField(TypeInboxNotification, "uri", FieldSpec{TypeRef: TypeTreePath})
+	r.OverrideField(TypeSubscriptionNotification, "uri", FieldSpec{TypeRef: TypeTreePath})
 	r.OverrideField(TypeSubscription, "pattern", FieldSpec{TypeRef: TypeTreePath})
 	r.OverrideField(TypeSubscription, "deliver_uri", FieldSpec{TypeRef: TypeTreePath})
 	r.OverrideField(TypeSubscription, "events",

@@ -12,6 +12,23 @@ import (
 // uncontaminated. Tests may swap this to discard noise.
 var progressOut = os.Stderr
 
+// excludedSelectors mirrors the -exclude set so the progress stream can say
+// which checks the report will drop. It is set before the run; Report.
+// ExcludeCategories applies the same selectors to the scored output after.
+// Selector forms match ExcludeCategories: a bare category ("serving_mode")
+// or one check ("serving_mode.content_get_out_of_scope_404").
+var excludedSelectors map[string]bool
+
+// SetExcludedSelectors records the -exclude set for progress annotation.
+func SetExcludedSelectors(sel map[string]bool) { excludedSelectors = sel }
+
+func isExcludedSelector(category, name string) bool {
+	if excludedSelectors == nil {
+		return false
+	}
+	return excludedSelectors[category] || excludedSelectors[category+"."+name]
+}
+
 // CheckRunner implements the declare-then-run validation pattern.
 // All checks are declared upfront via Declare, then executed via Run.
 // Results returns all declared checks in declaration order — any that
@@ -100,7 +117,19 @@ func (r *CheckRunner) Run(name string, fn func() CheckOutcome) {
 	}()
 
 	elapsed := time.Since(start)
-	fmt.Fprintf(progressOut, "%-4s %s.%s %s\n", outcome.severity, r.category, name, elapsed.Truncate(time.Millisecond))
+	// A check the report will EXCLUDE still runs, and its progress line
+	// still streams. That is how `FAIL serving_mode.content_get_out_of_scope_404`
+	// scrolls past during a run that then reports 0 failures and exits 0 —
+	// which reads as the report hiding a failure rather than as the check
+	// being deliberately out of scope. It cost core-py a cycle and was
+	// reported to us; annotate the line rather than suppressing it, since a
+	// dropped line would hide a genuine failure whenever someone excludes a
+	// whole category.
+	marker := ""
+	if isExcludedSelector(r.category, name) {
+		marker = "  [excluded from scoring]"
+	}
+	fmt.Fprintf(progressOut, "%-4s %s.%s %s%s\n", outcome.severity, r.category, name, elapsed.Truncate(time.Millisecond), marker)
 
 	r.results[name] = CheckResult{
 		Category:  r.category,

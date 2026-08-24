@@ -91,8 +91,8 @@ type Publisher struct {
 	li          store.LocationIndex
 	kp          *crypto.Keypair
 	identity    *entity.Entity
-	peerIDHash  hash.Hash    // content_hash of the publisher's system/peer entity (for signature.signer)
-	peerID      string       // Base58 peer-id per V7 §1.5 (for published-root.peer_id, Ruling-1)
+	peerIDHash  hash.Hash // content_hash of the publisher's system/peer entity (for signature.signer)
+	peerID      string    // Base58 peer-id per V7 §1.5 (for published-root.peer_id, Ruling-1)
 	lastSeq     uint64
 	lastHash    *hash.Hash // content_hash of the most-recently-bound published-root
 	lastEntity  *entity.Entity

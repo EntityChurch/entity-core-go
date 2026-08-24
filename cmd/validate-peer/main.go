@@ -105,6 +105,20 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
+	// Parse -exclude BEFORE the run, not just after it. The scored report is
+	// filtered below via ExcludeCategories; the progress stream needs the same
+	// set up front so an excluded check's live FAIL line can say so as it
+	// scrolls past, instead of contradicting a 0-failure report.
+	excludeSel := make(map[string]bool)
+	if *exclude != "" {
+		for _, sel := range strings.Split(*exclude, ",") {
+			if sel = strings.TrimSpace(sel); sel != "" {
+				excludeSel[sel] = true
+			}
+		}
+	}
+	validate.SetExcludedSelectors(excludeSel)
+
 	var report *validate.Report
 	var err error
 
@@ -229,11 +243,7 @@ func main() {
 	}
 
 	// Apply output filters.
-	if *exclude != "" {
-		excludeSel := make(map[string]bool)
-		for _, sel := range strings.Split(*exclude, ",") {
-			excludeSel[strings.TrimSpace(sel)] = true
-		}
+	if len(excludeSel) > 0 {
 		report.ExcludeCategories(excludeSel)
 	}
 

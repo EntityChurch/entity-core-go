@@ -79,9 +79,9 @@ func (m *MemoryCapabilityIndex) PathFor(capHash hash.Hash) (string, bool) {
 // so is_revoked falls through to the marker check — the always-safe path.
 type nopCapabilityIndex struct{}
 
-func (nopCapabilityIndex) Record(hash.Hash, string)            {}
-func (nopCapabilityIndex) Forget(hash.Hash)                    {}
-func (nopCapabilityIndex) PathFor(hash.Hash) (string, bool)    { return "", false }
+func (nopCapabilityIndex) Record(hash.Hash, string)         {}
+func (nopCapabilityIndex) Forget(hash.Hash)                 {}
+func (nopCapabilityIndex) PathFor(hash.Hash) (string, bool) { return "", false }
 
 // NopCapabilityIndex returns a CapabilityIndex that records nothing. Useful
 // as a default when no index is wired; the is_revoked marker-check path

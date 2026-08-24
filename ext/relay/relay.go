@@ -286,16 +286,16 @@ func (ns *namespaceStore) pollFiltered(sinceSeq uint64, limit int, allowed map[h
 
 // Handler implements the system/relay substrate.
 type Handler struct {
-	mu                sync.RWMutex
-	stores            map[string]*namespaceStore // namespace path → store
-	clock             Clock
-	defaultPollLimit  int
-	maxPollLimit      int
-	ready             bool
-	localPeerIDBase58 string             // captured at SetupStore for advertise placement
-	dispatcher        OutboundDispatcher // §3.1.1 outbound seam; defaults to noop
-	resolver          InboxRelayResolver // §3.5 declaration resolver; defaults to nop
-	disableDefaultFallback bool          // when true + no declared inbox-relay → no_inbox_relay/502
+	mu                     sync.RWMutex
+	stores                 map[string]*namespaceStore // namespace path → store
+	clock                  Clock
+	defaultPollLimit       int
+	maxPollLimit           int
+	ready                  bool
+	localPeerIDBase58      string             // captured at SetupStore for advertise placement
+	dispatcher             OutboundDispatcher // §3.1.1 outbound seam; defaults to noop
+	resolver               InboxRelayResolver // §3.5 declaration resolver; defaults to nop
+	disableDefaultFallback bool               // when true + no declared inbox-relay → no_inbox_relay/502
 }
 
 // NewHandler returns a substrate with empty Mode-S store + default clock /
