@@ -74,6 +74,7 @@ func main() {
 	addr := flag.String("addr", "", "TCP listen address (overrides config.toml)")
 	debug := flag.Bool("debug", false, "enable debug protocol logging")
 	openAccess := flag.Bool("open-access", false, "[DEPRECATED in v7.74; removed in v7.75] grant full access to connecting peers (degenerate seed policy default → *). Migrate to --seed-policy / WithSeedPolicy.")
+	seedPolicyFile := flag.String("seed-policy-file", "", "path to a seed-policy JSON file in the KEYSTONE CANONICAL format ({\"version\":1,\"entries\":[{\"grantee\":\"<self|default|hex|base58>\",\"grants\":[<§3.6 grant>...]}]}) — protocol-generator/shared/seed-policy/seed-policy.schema.json, per V7 v7.74 §6.9a; the v7.75 replacement for --open-access. Seeds system/capability/policy/{grantee} entries at L0. A per-identity hex grantee grants ONLY that peer, so unknown peers stay gated by the initial-grant policy — the posture a recognize-on-attest gating check needs. `self` entries are ignored (the peer-owner cap is materialized from --name).")
 	readyFile := flag.String("ready-file", "", "write JSON {addr, peer_id} to this file when ready")
 	filesRoot := flag.String("files", "", "expose filesystem directory (format: name:/path:tree/prefix/)")
 	publishDescriptors := flag.Bool("publish-descriptors", false, "DOMAIN-LOCAL-FILES v1.3 §10.5 V3: when set, the --files root is configured with publish_descriptors=true so file reads write `system/content/descriptor/{hash}` entities into the local tree. Arms local_files.v3_descriptor_publish_exercised.")
@@ -214,6 +215,9 @@ func main() {
 	if *openAccess {
 		opts = append(opts, peer.WithConnectionGrants(peer.OpenAccessGrants()))
 		log.Printf("WARNING: --open-access is DEPRECATED in v7.74 (V7 Phase 2 §6.9a / §3.7) and will be REMOVED in v7.75. Migrate to a declared seed policy (peer.WithSeedPolicy / peer.WithSeedPolicyFromFile). The flag is the degenerate seed policy default → *.")
+	}
+	if *seedPolicyFile != "" {
+		opts = append(opts, peer.WithSeedPolicyFromFile(*seedPolicyFile))
 	}
 
 	// Wire query extension: index maintainer + sync hook + handler.

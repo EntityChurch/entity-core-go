@@ -781,7 +781,7 @@ func TestMergeStrategy_SourceWins(t *testing.T) {
 	remoteHash := storeTestEntity(t, cs, "test/doc", map[string]string{"x": "remote"})
 	baseHash := storeTestEntity(t, cs, "test/doc", map[string]string{"x": "base"})
 
-	result := applyMergeStrategy(cs, strategySourceWins, "test/path", baseHash, localHash, remoteHash)
+	result := applyMergeStrategy(context.Background(), nil, cs, strategyChoice{strategy: strategySourceWins}, "test/path", baseHash, localHash, remoteHash)
 	if !result.resolved {
 		t.Fatal("source-wins should resolve")
 	}
@@ -796,7 +796,7 @@ func TestMergeStrategy_TargetWins(t *testing.T) {
 	remoteHash := storeTestEntity(t, cs, "test/doc", map[string]string{"x": "remote"})
 	baseHash := storeTestEntity(t, cs, "test/doc", map[string]string{"x": "base"})
 
-	result := applyMergeStrategy(cs, strategyTargetWins, "test/path", baseHash, localHash, remoteHash)
+	result := applyMergeStrategy(context.Background(), nil, cs, strategyChoice{strategy: strategyTargetWins}, "test/path", baseHash, localHash, remoteHash)
 	if !result.resolved {
 		t.Fatal("target-wins should resolve")
 	}
@@ -811,7 +811,7 @@ func TestMergeStrategy_KeepBoth(t *testing.T) {
 	remoteHash := storeTestEntity(t, cs, "test/doc", map[string]string{"x": "remote"})
 	baseHash := storeTestEntity(t, cs, "test/doc", map[string]string{"x": "base"})
 
-	result := applyMergeStrategy(cs, strategyKeepBoth, "docs/readme", baseHash, localHash, remoteHash)
+	result := applyMergeStrategy(context.Background(), nil, cs, strategyChoice{strategy: strategyKeepBoth}, "docs/readme", baseHash, localHash, remoteHash)
 	if !result.resolved {
 		t.Fatal("keep-both should resolve for edit-vs-edit")
 	}
@@ -837,7 +837,7 @@ func TestMergeStrategy_KeepBoth_DeleteVsEdit(t *testing.T) {
 	cs := store.NewMemoryContentStore()
 	localHash := storeTestEntity(t, cs, "test/doc", map[string]string{"x": "local"})
 
-	result := applyMergeStrategy(cs, strategyKeepBoth, "test/path", hash.Hash{}, localHash, hash.Hash{})
+	result := applyMergeStrategy(context.Background(), nil, cs, strategyChoice{strategy: strategyKeepBoth}, "test/path", hash.Hash{}, localHash, hash.Hash{})
 	if result.resolved {
 		t.Fatal("keep-both should not resolve for delete-vs-edit")
 	}
@@ -849,7 +849,7 @@ func TestMergeStrategy_ThreeWay_Clean(t *testing.T) {
 	localHash := storeTestEntity(t, cs, "test/doc", map[string]interface{}{"a": "local", "b": "base"})
 	remoteHash := storeTestEntity(t, cs, "test/doc", map[string]interface{}{"a": "base", "b": "remote"})
 
-	result := applyMergeStrategy(cs, strategyThreeWay, "test/path", baseHash, localHash, remoteHash)
+	result := applyMergeStrategy(context.Background(), nil, cs, strategyChoice{strategy: strategyThreeWay}, "test/path", baseHash, localHash, remoteHash)
 	if !result.resolved {
 		t.Fatal("three-way should resolve when changes don't overlap")
 	}
@@ -875,7 +875,7 @@ func TestMergeStrategy_ThreeWay_Conflict(t *testing.T) {
 	localHash := storeTestEntity(t, cs, "test/doc", map[string]interface{}{"a": "local"})
 	remoteHash := storeTestEntity(t, cs, "test/doc", map[string]interface{}{"a": "remote"})
 
-	result := applyMergeStrategy(cs, strategyThreeWay, "test/path", baseHash, localHash, remoteHash)
+	result := applyMergeStrategy(context.Background(), nil, cs, strategyChoice{strategy: strategyThreeWay}, "test/path", baseHash, localHash, remoteHash)
 	if result.resolved {
 		t.Fatal("three-way should not resolve when same field changed to different values")
 	}
@@ -883,7 +883,7 @@ func TestMergeStrategy_ThreeWay_Conflict(t *testing.T) {
 
 func TestMergeStrategy_Manual(t *testing.T) {
 	cs := store.NewMemoryContentStore()
-	result := applyMergeStrategy(cs, strategyManual, "test/path", hash.Hash{}, hash.Hash{}, hash.Hash{})
+	result := applyMergeStrategy(context.Background(), nil, cs, strategyChoice{strategy: strategyManual}, "test/path", hash.Hash{}, hash.Hash{}, hash.Hash{})
 	if result.resolved {
 		t.Fatal("manual should never resolve")
 	}

@@ -113,13 +113,30 @@ func RevisionConflictDataFromEntity(e entity.Entity) (RevisionConflictData, erro
 
 // RevisionMergeConfigData is the data payload for system/revision/merge-config.
 //
-// Strategy is the entity-vs-entity merge strategy (source-wins, target-wins,
-// three-way, deterministic, keep-both, manual).
+// Strategy is the entity-vs-entity merge strategy. The vocabulary is
+// EXTENSION-REVISION §2.3's built-in table — the authority per v3.9:
+//
+//	three-way | source-wins | target-wins | lww | keep-both | manual
+//
+// plus `handler`, the custom-dispatch SENTINEL, whose path travels in the
+// companion Handler field (never as the strategy value — v3.9 retracted the
+// reading where any path string is a strategy). Validated at config-write
+// time by ext/revision.ValidateMergeStrategy; §2.3 pins that rejection as
+// `400 invalid_strategy`.
+//
+// This comment previously read "source-wins, target-wins, three-way,
+// deterministic, keep-both, manual" — a FOURTH vocabulary, carrying
+// `deterministic` (which is a deletion_resolution value, not a strategy) and
+// omitting `lww` and the sentinel. v3.9 exists because the corpus declared
+// this three incompatible ways; ours was the fourth, and the same class of
+// defect: a value set copied rather than read from the table.
 //
 // DeletionResolution is the strategy for deletion-vs-entity divergent merges
-// per PROPOSAL-DELETION-MARKERS A.8 Amendment 4. Empty string → spec default
-// (`deletion-wins`). Values: deletion-wins | lww | deterministic | keep-both
-// | custom-handler. See `applyDeletionResolution` for semantics.
+// (§2.3, Amendment 4). Empty string → spec default `preserve-on-conflict`.
+// Values: preserve-on-conflict | deletion-wins | three-way-fallthrough |
+// deterministic. `lww` and `keep-both` are explicitly REJECTED here with
+// `invalid_strategy` — the prior comment listed both as accepted values and
+// named the wrong default. See `applyDeletionResolution` for semantics.
 type RevisionMergeConfigData struct {
 	Pattern            string `cbor:"pattern"`
 	Strategy           string `cbor:"strategy"`
@@ -1011,7 +1028,20 @@ func RevisionRevertResultDataFromEntity(e entity.Entity) (RevisionRevertResultDa
 
 // --- Merge delegation types ---
 
-// RevisionMergeRequestData is the data payload for system/revision/merge-request.
+// RevisionMergeRequestData is the data payload for
+// system/revision/merge-request — what the revision handler dispatches to a
+// custom merge handler when a merge config selects the `handler` sentinel
+// (EXTENSION-REVISION §5.3).
+//
+// SHAPE: the §5.3 type block, which declares {base, local, remote} and no
+// `path`. §5.3's own EXECUTE example passes a fourth `path` field and §5.1's
+// dispatch_merge_handler pseudocode does not — three sites, two shapes. We
+// build the type block because it is the normative site and §5.1 agrees with
+// it; the EXECUTE example predates the v3.9 sentinel correction that rewrote
+// this area. Filed as A-6 E1 under docs/validation/spec-issues/. If arch rules
+// for `path`, this struct and the vector move together.
+//
+// Base is optional (§5.3: "null if no ancestor") and carries `omitzero`.
 type RevisionMergeRequestData struct {
 	Base   hash.Hash `cbor:"base,omitzero"`
 	Local  hash.Hash `cbor:"local"`
@@ -1034,7 +1064,13 @@ func RevisionMergeRequestDataFromEntity(e entity.Entity) (RevisionMergeRequestDa
 	return d, nil
 }
 
-// RevisionMergeResponseData is the data payload for system/revision/merge-response.
+// RevisionMergeResponseData is the data payload for
+// system/revision/merge-response — what a custom merge handler returns (§5.3).
+//
+// Entity is the merged entity hash, present only when Resolved is true; Reason
+// is free-text explaining a refusal. Both optional per §5.3. A `resolved: true`
+// carrying no Entity, or an Entity naming a hash the store cannot resolve, is
+// treated as unresolved by the dispatch — see dispatchMergeHandler.
 type RevisionMergeResponseData struct {
 	Resolved bool      `cbor:"resolved"`
 	Entity   hash.Hash `cbor:"entity,omitzero"`

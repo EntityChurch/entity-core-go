@@ -65,6 +65,11 @@ import (
 
 const catSubstitute = "substitute"
 
+// codeWrongSubstituteType is the refusal code EXTENSION-SUBSTITUTE §6 pins for
+// an entry naming another convention (v1.1), and which v1.2 requires the
+// vector to assert rather than settling for the shared `400`.
+const codeWrongSubstituteType = "wrong_substitute_type"
+
 func substituteURI(peerID string) string {
 	return "entity://" + peerID + "/" + storagesubstitutehttp.HandlerPattern
 }
@@ -103,7 +108,7 @@ func runSubstitute(ctx context.Context, client *PeerClient) []CheckResult {
 
 	r.Declare("surface_registered", "EXTENSION-SUBSTITUTE §6/§7 — the http convention handler is registered at system/substitute/http and answers `try`. §6's whole dispatch model is that a convention is found by ORDINARY handler dispatch, so an unreachable handler means the convention model is not wired, not merely that a fetch failed")
 	r.Declare("https_required_at_consume", "EXTENSION-SUBSTITUTE §7 / TV-CDN-TLS-1 — an `http://` endpoint MUST be refused at consume time. This is the extension's security floor: the convention performs an OUTBOUND FETCH and then ingests what comes back, so a plaintext scheme silently downgrades every substituted byte to a tamper-able channel. Hash-verification catches tampering after the fact; it does not make plaintext acceptable, and a peer that fetches first and verifies later has already leaked which hashes it wants")
-	r.Declare("wrong_substitute_type_refused", "EXTENSION-SUBSTITUTE §6 — a convention handler handed an entry whose `substitute_type` names a DIFFERENT convention. §6 pins the ORCHESTRATOR's routing (`handler_uri = system/substitute/ + entry.substitute_type`) and says nothing about handler-side validation, so this is UNPINNED and cannot be a FAIL. It is measured because the two live answers differ materially: go refuses 400, py performs the outbound fetch. Refusing is the safe direction — a handler that serves any entry handed to it will fetch over HTTP for an entry its publisher addressed to a more restricted convention. Routed to arch to pin; WARN until then")
+	r.Declare("wrong_substitute_type_refused", "EXTENSION-SUBSTITUTE §6 — a convention handler handed an entry whose `substitute_type` names a DIFFERENT convention. Asserts the CODE, not merely the 400 (§6 [MUST], v1.2 — 400 is shared by every malformed-entry refusal here, so a status-only check leaves the pinned code asserted by nothing). PINNED by SUBSTITUTE v1.1 (E2, ruled 2026-08-14): a convention handler MUST refuse an entry whose `substitute_type` is not its own with 400 wrong_substitute_type, BEFORE any outbound fetch. `entry` is publisher-supplied input to a component whose job is fetching on someone's behalf, so the safe direction is the one that does nothing. Was a WARN while unpinned — we routed the divergence rather than failing a peer against our own reading")
 	r.Declare("wrong_entry_type_refused", "EXTENSION-SUBSTITUTE §2.3 — try-request.entry MUST be a system/substitute/source. A handler that accepts an arbitrary entity here is fetching on the say-so of an unvalidated payload")
 	r.Declare("no_endpoint_refused", "EXTENSION-SUBSTITUTE §2.2 — an entry with no endpoint block MUST be refused rather than guessed at (legacy fetch_template is out of scope for v1)")
 	r.Declare("content_url_prefix_required_no_derivation", "EXTENSION-SUBSTITUTE §2.2 [pinned ruling] — `content_url_prefix` is REQUIRED and there is NO derivation default: an endpoint carrying only `tree_url_prefix` MUST be refused, NOT resolved to `{tree_url_prefix}/content`. \"An impl that treats it as optional-with-derivation is non-conformant.\" What it protects is deployment scenario S4 (tree on one host, dedup'd content on a shared bucket): a deriving consumer fetches from an origin the publisher never committed to, which either 404s or exists and serves a different peer's bytes")
@@ -195,19 +200,49 @@ func runSubstitute(ctx context.Context, client *PeerClient) []CheckResult {
 		if err != nil {
 			return FailCheck("try: " + err.Error())
 		}
-		// WARN, not FAIL. §6 pins the orchestrator's type→handler routing and
-		// is silent on whether the handler re-validates, so a peer that does
-		// not is not violating anything written down. Failing a peer against
-		// a rule the spec does not carry is a too-strict probe, and the
-		// correct move is to flag the divergence in writing and route it —
-		// not to gate a cycle on our own reading.
+		// FAIL as of SUBSTITUTE v1.1 [RULED 2026-08-14, E2]. This was a WARN,
+		// correctly: §6 pinned only the orchestrator's type→handler routing
+		// and said nothing about handler-side re-validation, so failing a
+		// peer against our own reading would have been a too-strict probe.
+		// We flagged the divergence and routed it instead of gating on it.
+		//
+		// v1.1 ruled it our way and made it normative: a convention handler
+		// MUST refuse an entry whose `substitute_type` is not its own,
+		// `400 wrong_substitute_type`, BEFORE any outbound fetch — `entry` is
+		// publisher-supplied input to a component whose job is fetching on
+		// someone's behalf, so the safe direction is the one that does
+		// nothing. It is a spec-side DELTA for python, not a defect report:
+		// nothing was written for them to violate when they built it.
 		if status != 400 {
-			return WarnCheck(fmt.Sprintf("an entry with substitute_type=%q handed to the http convention "+
-				"answered %d/%q rather than refusing — the peer treated an entry addressed to another "+
-				"convention as its own and proceeded to the outbound fetch. §6 does not pin handler-side "+
-				"validation, so this is a DIVERGENCE, not a violation; routed to arch "+
-				"(spec-issues/2026-08-13-e). go refuses 400, py fetches",
+			return FailCheck(fmt.Sprintf("an entry with substitute_type=%q handed to the http convention "+
+				"answered %d/%q rather than refusing — EXTENSION-SUBSTITUTE §6 (v1.1) [MUST]: a convention "+
+				"handler MUST refuse an entry naming another convention with 400 wrong_substitute_type "+
+				"BEFORE any outbound fetch. Proceeding makes the handler fetch over HTTP for an entry its "+
+				"publisher addressed to a more restricted convention",
 				types.SubstituteTypePeerToPeer, status, code))
+		}
+		// THE CODE, not just the status — §6 [MUST], added v1.2 after this
+		// check shipped the defect the rule is about.
+		//
+		// v1.1 pinned `wrong_substitute_type` and this check gated on
+		// `status != 400` alone, so the pinned code was a value NOTHING
+		// ASSERTED — GUIDE-CONFORMANCE §5.2b.2's shape exactly. `400` is
+		// shared by every malformed-entry refusal on this handler, so a
+		// status-only assertion cannot distinguish "refused because it names
+		// another convention" from "refused because the entry was garbage",
+		// and a caller branching on the two needs them distinguishable.
+		//
+		// It was hiding a live divergence: python `14775ce` refuses correctly
+		// and before any fetch — the load-bearing half — but answers
+		// `invalid_entry`, the generic code it uses for three different
+		// refusals. Their behaviour conforms; their code does not, and this
+		// check could not see it.
+		if code != codeWrongSubstituteType {
+			return FailCheck(fmt.Sprintf("refused 400 as required, but with code %q — §6 [MUST] (v1.2): "+
+				"the refusal MUST carry %q. 400 is shared by every malformed-entry refusal on this "+
+				"handler, so a generic code makes \"names another convention\" indistinguishable from "+
+				"\"the entry was garbage\" for a caller that branches on the two",
+				code, codeWrongSubstituteType))
 		}
 		return PassCheck("mismatched substitute_type refused 400/" + code)
 	}))

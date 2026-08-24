@@ -211,41 +211,63 @@ func WithSeedPolicy(entries []SeedPolicyEntry) Option {
 // entries via WithSeedPolicy. CLI / config sugar that desugars to the
 // builder per SDK-OPERATIONS §3.5.
 //
-// JSON shape (one object per entry):
+// JSON shape — the KEYSTONE CANONICAL §6.9a schema
+// (protocol-generator/shared/seed-policy/seed-policy.schema.json), the ONE
+// cross-impl format go, rust, and python all read:
 //
-//	[
-//	  {
-//	    "pattern": "abc123...",              // hex form, Base58 form, or "default"
-//	    "grants": [ { ...GrantEntry... } ],
-//	    "ttl_ms": 3600000,                    // optional
-//	    "notes": "operator admin entry"       // optional
-//	  }
-//	]
+//	{
+//	  "version": 1,
+//	  "entries": [
+//	    {
+//	      "grantee": "abc123...",            // "self" | "default" | 66-char hex | Base58
+//	      "grants":  [ { ...§3.6 grant... } ] // lowercase handlers/resources/operations
+//	    }
+//	  ]
+//	}
 //
-// Keystone's protocol-generator/shared/seed-policy/ is the canonical
-// cross-impl file-format authority once authored; this is a minimal
-// shape pinned by Go's CapabilityPolicyEntryData CBOR field names.
+// `self` entries are ignored (the peer-owner cap is materialized from --name).
+// A per-identity hex grantee grants ONLY that peer, leaving unknown peers gated
+// by the initial-grant policy — the admin-seeded-restrictive posture.
+//
+// This converged onto the keystone shape in 7887646; the earlier Go-only
+// [{pattern,grants,ttl_ms,notes}] array is gone (no dual-read). Locked by
+// core/peer/seed_policy_canonical_test.go.
 func WithSeedPolicyFromFile(path string) Option {
 	return func(c *config) {
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			panic(fmt.Errorf("WithSeedPolicyFromFile: read %s: %w", path, err))
 		}
-		var rawEntries []struct {
-			Pattern string             `json:"pattern"`
-			Grants  []types.GrantEntry `json:"grants"`
-			TTLMs   *uint64            `json:"ttl_ms,omitempty"`
-			Notes   string             `json:"notes,omitempty"`
+		// The keystone-owned canonical §6.9a seed-policy schema
+		// (protocol-generator/shared/seed-policy/seed-policy.schema.json):
+		//   {"version":1,"entries":[{"grantee":"<self|default|hex|base58>",
+		//                            "grants":[<§3.6 grant-entry>...]}]}
+		// Grant entries use the lowercase §3.6 field shape (handlers/resources/
+		// operations with include/exclude) — matched by GrantEntry's json tags.
+		var doc struct {
+			Version int `json:"version"`
+			Entries []struct {
+				Grantee string             `json:"grantee"`
+				Grants  []types.GrantEntry `json:"grants"`
+			} `json:"entries"`
 		}
-		if err := json.Unmarshal(raw, &rawEntries); err != nil {
+		if err := json.Unmarshal(raw, &doc); err != nil {
 			panic(fmt.Errorf("WithSeedPolicyFromFile: parse %s: %w", path, err))
 		}
-		for _, e := range rawEntries {
+		if doc.Version != 1 {
+			panic(fmt.Errorf("WithSeedPolicyFromFile: %s: unsupported version %d (schema requires version 1)", path, doc.Version))
+		}
+		for _, e := range doc.Entries {
+			// "self" is the peer-owner capability — materialized eagerly at
+			// peer-init from the owner identity (WithOwnerIdentity), not from a
+			// file. Skip it so a file entry cannot conflict with the self-owner
+			// seed (keystone README §1, the §6.9a.0 minimum).
+			if e.Grantee == "self" {
+				continue
+			}
 			c.seedPolicy = append(c.seedPolicy, SeedPolicyEntry{
-				Pattern: e.Pattern,
+				Pattern: e.Grantee,
 				Grants:  e.Grants,
-				TTLMs:   e.TTLMs,
-				Notes:   e.Notes,
 			})
 		}
 	}

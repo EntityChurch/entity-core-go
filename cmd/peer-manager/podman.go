@@ -26,6 +26,13 @@ import (
 const (
 	defaultRustImage   = "entity-core-rust"
 	defaultPythonImage = "entity-core-py"
+
+	// In-container $HOME/.entity mount targets (containerSpec.homeEntity). The
+	// rust runtime image runs as root; the python image runs as USER entity.
+	// Named once so the seed-policy path translation and the containerSpec that
+	// mounts it can never drift apart.
+	rustHomeEntity   = "/root/.entity"
+	pythonHomeEntity = "/home/entity/.entity"
 )
 
 // envOr returns the environment variable value or a fallback default.

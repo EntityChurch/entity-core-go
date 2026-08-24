@@ -408,9 +408,26 @@ func (r *Report) WriteText(w io.Writer, failuresOnly bool) {
 		}
 	}
 
-	fmt.Fprintf(w, "Summary: %d total, %d passed, %d warned, %d failed, %d skipped (elapsed %s)\n",
-		r.Summary.Total, r.Summary.Passed, r.Summary.Warned, r.Summary.Failed, r.Summary.Skipped,
-		(time.Duration(r.Summary.ElapsedMs) * time.Millisecond).Truncate(time.Millisecond))
+	// G-23: stamp the headline total PARTIAL when surfaces went unexercised.
+	// The COVERAGE roll-up below already names what did not run, but the
+	// "Summary:" line is the one a reader lifts out of context — and twice this
+	// cycle a bare-peer partial total (27-28 surfaces unexercised) was reported
+	// as a full-surface number. Marking the total itself means the number cannot
+	// travel without the caveat attached. A fully-configured run (e.g.
+	// validate-complete.sh) has zero unexercised surfaces and prints the clean
+	// form unchanged.
+	unexercised := r.unexercisedSurfaces()
+	if len(unexercised) > 0 {
+		fmt.Fprintf(w, "Summary: PARTIAL — %d total ran, but %d surface(s) were UNEXERCISED (see COVERAGE); this is NOT a full-surface measurement — do not cite this total as one. Use scripts/validate-complete.sh <impl>.\n",
+			r.Summary.Total, len(unexercised))
+		fmt.Fprintf(w, "         %d passed, %d warned, %d failed, %d skipped (elapsed %s)\n",
+			r.Summary.Passed, r.Summary.Warned, r.Summary.Failed, r.Summary.Skipped,
+			(time.Duration(r.Summary.ElapsedMs) * time.Millisecond).Truncate(time.Millisecond))
+	} else {
+		fmt.Fprintf(w, "Summary: %d total, %d passed, %d warned, %d failed, %d skipped (elapsed %s)\n",
+			r.Summary.Total, r.Summary.Passed, r.Summary.Warned, r.Summary.Failed, r.Summary.Skipped,
+			(time.Duration(r.Summary.ElapsedMs) * time.Millisecond).Truncate(time.Millisecond))
+	}
 
 	// Self-checks, said out loud. Without this line a reader comparing two
 	// peers' totals is silently comparing a number that includes ~29 results
@@ -450,7 +467,7 @@ func (r *Report) WriteText(w io.Writer, failuresOnly bool) {
 	//
 	// So: name every unexercised surface, grouped, with the switch that closes
 	// it. This project implements everything, which means the target is zero.
-	if unexercised := r.unexercisedSurfaces(); len(unexercised) > 0 {
+	if len(unexercised) > 0 {
 		fmt.Fprintf(w, "\nCOVERAGE: %d check(s) did not run, across %d surface(s). An unexercised surface is an\n", unallowedSkip+allowedSkip, len(unexercised))
 		fmt.Fprintln(w, "          UNTESTED surface — this run does NOT prove the full system works.")
 		fmt.Fprintln(w, "          Close each; do not allowlist:")

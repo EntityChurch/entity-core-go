@@ -69,6 +69,14 @@ func runRevision(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("merge_config_set_accepts_valid_deletion_resolution", "REVISION v3.3 §4.4.18")
 	r.Declare("merge_config_set_idempotent", "REVISION v3.3 §4.4.18")
 	r.Declare("merge_config_delete", "REVISION v3.3 §4.4.18")
+	// §5.1 cascade step 1 + §5.3 delegation — first coverage in any impl (2026-08-14).
+	r.Declare("merge_config_cascade_control_no_config_conflicts", "REVISION v3.10 §5.1 (control)")
+	r.Declare("merge_config_type_scope_is_consulted", "REVISION v3.10 §5.1 (step 1)")
+	r.Declare("merge_config_type_scope_outranks_path_scope", "REVISION v3.10 §5.1 (cascade order)")
+	r.Declare("merge_config_star_pattern_matches_nested_path", "REVISION v3.10 §5.1 (Path argument scope)")
+	r.Declare("merge_config_accepts_handler_sentinel", "REVISION v3.10 §2.3 (sentinel)")
+	r.Declare("merge_config_rejects_handler_sentinel_without_path", "REVISION v3.10 §2.3 (sentinel companion)")
+	r.Declare("merge_strategy_handler_unreachable_degrades_to_conflict", "REVISION v3.10 §5.3")
 
 	// Step 2: Type registration
 	r.Declare("type_entry", "REVISION §2")
@@ -1984,6 +1992,371 @@ func runRevision(ctx context.Context, client *PeerClient) []CheckResult {
 			return FailCheck("delete: path still bound after delete")
 		}
 		return PassCheck("delete unbound the merge-config path; result status=deleted")
+	})
+
+	// --- Step: §5.1 cascade step 1 (per-TYPE config) and §5.3 delegation ---
+	//
+	// NEW 2026-08-14. Until this block the suite drove per-PATH merge config
+	// ONLY, so two whole limbs of §5.1 were unmeasured against every peer:
+	// step 1 of the cascade, and the `handler` sentinel. Both were unbuilt in
+	// go, rust and py, and a 1574-check 0-FAIL gate could not see either —
+	// neither gap could move a number. The absence of a vector is why the
+	// absence of a build survived.
+	//
+	// scrubMergeConfigs removes every merge config these checks install, by
+	// name, BEFORE each one runs.
+	//
+	// Not belt-and-braces: the peer under test is long-lived and merge configs
+	// at `system/revision/config/merge/path/**` are GLOBAL by design (§5.1) —
+	// they are not prefix-scoped, so they outlive the prefix a check created
+	// them for and apply to every later merge in the suite. A leaked
+	// `pattern: "*"` + `source-wins` config is condition (3) of §4.4.4's
+	// oscillation precondition set (asymmetric resolution strategy), which is
+	// how a leftover from one check turns a later check's clean divergence into
+	// `oscillation_detected` on a conformant peer.
+	//
+	// That is not hypothetical — it is what a first run of this block did to
+	// `entity-core-rust`, and the deferred cleanup below was not enough because
+	// a run that panics or is interrupted never fires it. `keep_both_strategy_
+	// applied` carries the same scrub for the same reason, discovered the same
+	// way. Cleaning up after yourself is insufficient; the peer must be cleaned
+	// BEFORE you measure it.
+	scrubMergeConfigs := func() {
+		for _, n := range []string{"prec-all", "star-all", "validate-mc-handler", "validate-mc-handler-nopath"} {
+			_, _ = sendMergeConfig(types.RevisionMergeConfigParamsData{Scope: "path", Name: n, Action: "delete"})
+		}
+		for _, tn := range []string{
+			"test/revision-typed-doc", "test/revision-precedence-doc",
+			"test/revision-star-doc", "test/revision-handler-doc", "test/revision-control-doc",
+		} {
+			_, _ = sendMergeConfig(types.RevisionMergeConfigParamsData{Scope: "type", Name: tn, Action: "delete"})
+		}
+	}
+
+	// mergeConfigTypePath mirrors mergeConfigPath for the type scope.
+	mergeConfigTypePath := func(typeName string) string {
+		return "system/revision/config/merge/type/" + typeName
+	}
+
+	// divergeAndMerge drives a two-branch edit-vs-edit conflict on one path and
+	// returns the merge result. Shared by the checks below so each one differs
+	// only in the config it installs.
+	// SHAPE NOTE — the divergence carries a second, NON-conflicting path on
+	// purpose. A merge in which *every* path conflicts is not the shape the
+	// rest of this suite drives: `merge_diverged_status`, green against all
+	// three impls, always has clean paths alongside the conflicting one. A
+	// first cut of this helper used a single conflicting path and
+	// `entity-core-rust` cc6cb56 answered `oscillation_detected` rather than
+	// `merged_with_conflicts` on a freshly started peer — reproducible, and NOT
+	// leaked config state. Rather than gate the cascade rows on that, the
+	// helper matches the shape the suite already tolerates; the
+	// all-paths-conflict observation is reported separately with its repro.
+	divergeAndMerge := func(prefix, docType, key string) (types.RevisionMergeResultData, error) {
+		// Stable companion path: identical on both branches, so it merges
+		// cleanly and the merge is not all-conflict.
+		stable := mustCreateEntity(docType, map[string]string{"content": "stable"})
+		client.TreePut(ctx, prefix+"stable", stable)
+
+		base := mustCreateEntity(docType, map[string]string{"content": "base"})
+		client.TreePut(ctx, prefix+key, base)
+		resp, _ := client.RevisionExecute(ctx, "commit", types.RevisionCommitParamsData{Prefix: prefix})
+		var baseResult types.RevisionCommitResultData
+		decodeRevisionResult(resp, &baseResult)
+
+		localMod := mustCreateEntity(docType, map[string]string{"content": "local-edit"})
+		client.TreePut(ctx, prefix+key, localMod)
+		resp, _ = client.RevisionExecute(ctx, "commit", types.RevisionCommitParamsData{Prefix: prefix})
+		var localResult types.RevisionCommitResultData
+		decodeRevisionResult(resp, &localResult)
+
+		client.RevisionExecute(ctx, "checkout", types.RevisionCheckoutParamsData{
+			Prefix: prefix, Version: baseResult.Version,
+		})
+		remoteMod := mustCreateEntity(docType, map[string]string{"content": "remote-edit"})
+		client.TreePut(ctx, prefix+key, remoteMod)
+		resp, _ = client.RevisionExecute(ctx, "commit", types.RevisionCommitParamsData{Prefix: prefix})
+		var remoteResult types.RevisionCommitResultData
+		decodeRevisionResult(resp, &remoteResult)
+
+		client.RevisionExecute(ctx, "checkout", types.RevisionCheckoutParamsData{
+			Prefix: prefix, Version: localResult.Version,
+		})
+		resp, err := client.RevisionExecute(ctx, "merge", types.RevisionMergeParamsData{
+			Prefix: prefix, RemoteVersion: remoteResult.Version,
+		})
+		var mergeResult types.RevisionMergeResultData
+		if err != nil {
+			return mergeResult, err
+		}
+		if resp.Status != 200 {
+			return mergeResult, fmt.Errorf("merge returned %d", resp.Status)
+		}
+		decodeRevisionResult(resp, &mergeResult)
+		return mergeResult, nil
+	}
+
+	// CONTROL for every cascade check below. Runs the IDENTICAL divergence with
+	// NO merge config installed and asserts it conflicts. Without this row, a
+	// peer whose merge resolves edit-vs-edit by some other route would PASS the
+	// per-type check for a reason that has nothing to do with per-type config —
+	// the check would be unable to fail, which is the §2.4a defect this suite
+	// has caught in its own rows twice.
+	//
+	// Read the cascade results ONLY in light of this row. If it does not report
+	// a conflict, the checks after it are not measuring what they claim.
+	r.Run("merge_config_cascade_control_no_config_conflicts", func() CheckOutcome {
+		scrubMergeConfigs()
+		docType := "test/revision-control-doc"
+		prefix := revisionTestPrefix("mcctl")
+
+		mergeResult, err := divergeAndMerge(prefix, docType, "ctl")
+		if err != nil {
+			return FailCheck("control merge: " + err.Error())
+		}
+		if mergeResult.Status == "merged_with_conflicts" {
+			return PassCheck("control: with no merge config, edit-vs-edit on one path conflicts — the cascade checks below can fail")
+		}
+		return FailCheck(fmt.Sprintf(
+			"CONTROL FAILED: with no merge config the same divergence reported %q, not \"merged_with_conflicts\". "+
+				"Every cascade check below is uninterpretable against this peer — a PASS there cannot be "+
+				"attributed to the config, and a FAIL cannot be attributed to its absence",
+			mergeResult.Status))
+	})
+
+	// §5.1 step 1: a per-TYPE merge config MUST be consulted. The write path
+	// has always accepted `scope: "type"` and answered 200 "set"; this is the
+	// first check in any implementation that asserts the config then does
+	// anything. A peer that accepts the write and ignores the config resolves
+	// this conflict by the default three-way (→ conflict, since both sides
+	// changed the same field differently) instead of source-wins.
+	r.Run("merge_config_type_scope_is_consulted", func() CheckOutcome {
+		if out, ok := r.Require("merge_config_cascade_control_no_config_conflicts"); !ok {
+			return out
+		}
+		scrubMergeConfigs()
+		docType := "test/revision-typed-doc"
+		prefix := revisionTestPrefix("mctype")
+
+		if _, err := sendMergeConfig(types.RevisionMergeConfigParamsData{
+			Scope: "type", Name: docType, Action: "set",
+			Config: &types.RevisionMergeConfigData{Strategy: "source-wins"},
+		}); err != nil {
+			return FailCheck("setup: per-type merge-config set failed: " + err.Error())
+		}
+		defer sendMergeConfig(types.RevisionMergeConfigParamsData{
+			Scope: "type", Name: docType, Action: "delete",
+		})
+		if _, _, gerr := client.TreeGet(ctx, mergeConfigTypePath(docType)); gerr != nil {
+			return FailCheck("setup: per-type config did not bind at " + mergeConfigTypePath(docType))
+		}
+
+		mergeResult, err := divergeAndMerge(prefix, docType, "typed")
+		if err != nil {
+			return FailCheck("merge: " + err.Error())
+		}
+		if mergeResult.Status == "merged" {
+			return PassCheck("per-type merge-config consulted: source-wins resolved an edit-vs-edit conflict (§5.1 step 1)")
+		}
+		return FailCheck(fmt.Sprintf(
+			"per-type merge-config was written and receipted but NOT consulted — merge status %q, want \"merged\". "+
+				"§5.1 step 1 requires the per-type lookup at %s before per-path and before the default three-way",
+			mergeResult.Status, mergeConfigTypePath(docType)))
+	})
+
+	// §5.1 orders per-type BEFORE per-path. Without this, type-keyed dispatch
+	// is unreachable on any peer carrying a wildcard path config — the common
+	// deployment.
+	r.Run("merge_config_type_scope_outranks_path_scope", func() CheckOutcome {
+		if out, ok := r.Require("merge_config_cascade_control_no_config_conflicts"); !ok {
+			return out
+		}
+		scrubMergeConfigs()
+		docType := "test/revision-precedence-doc"
+		prefix := revisionTestPrefix("mcprec")
+
+		if _, err := sendMergeConfig(types.RevisionMergeConfigParamsData{
+			Scope: "path", Name: "prec-all", Action: "set",
+			Config: &types.RevisionMergeConfigData{Pattern: "**", Strategy: "manual"},
+		}); err != nil {
+			return FailCheck("setup: per-path merge-config set failed: " + err.Error())
+		}
+		defer sendMergeConfig(types.RevisionMergeConfigParamsData{
+			Scope: "path", Name: "prec-all", Action: "delete",
+		})
+		if _, err := sendMergeConfig(types.RevisionMergeConfigParamsData{
+			Scope: "type", Name: docType, Action: "set",
+			Config: &types.RevisionMergeConfigData{Strategy: "source-wins"},
+		}); err != nil {
+			return FailCheck("setup: per-type merge-config set failed: " + err.Error())
+		}
+		defer sendMergeConfig(types.RevisionMergeConfigParamsData{
+			Scope: "type", Name: docType, Action: "delete",
+		})
+
+		mergeResult, err := divergeAndMerge(prefix, docType, "prec")
+		if err != nil {
+			return FailCheck("merge: " + err.Error())
+		}
+		// `manual` always conflicts; `source-wins` always resolves. The status
+		// therefore names which config won outright.
+		if mergeResult.Status == "merged" {
+			return PassCheck("per-type config outranked a matching per-path config (§5.1 cascade order)")
+		}
+		return FailCheck(fmt.Sprintf(
+			"per-path config won over per-type — merge status %q, want \"merged\". §5.1 checks per-type (step 1) first",
+			mergeResult.Status))
+	})
+
+	// §5.1 "Path argument scope": `pattern: "*"` matches ALL paths within any
+	// merge, regardless of prefix — and v7.70 Amendment 1 names `"*"` as the
+	// peer-WIDE footgun alongside `"**"`. An implementation using single-
+	// segment glob semantics (Go's path.Match, Python's fnmatch on a segment,
+	// Rust's default glob) silently narrows an operator's peer-wide config to
+	// top-level keys.
+	//
+	// This is a NEW assertion, not a re-scoping of `keep_both_strategy_applied`
+	// — that row drives a single-segment key and so cannot distinguish the two
+	// readings. It was found in `entity-core-go`, which had the narrowing.
+	r.Run("merge_config_star_pattern_matches_nested_path", func() CheckOutcome {
+		if out, ok := r.Require("merge_config_cascade_control_no_config_conflicts"); !ok {
+			return out
+		}
+		scrubMergeConfigs()
+		docType := "test/revision-star-doc"
+		prefix := revisionTestPrefix("mcstar")
+
+		if _, err := sendMergeConfig(types.RevisionMergeConfigParamsData{
+			Scope: "path", Name: "star-all", Action: "set",
+			Config: &types.RevisionMergeConfigData{Pattern: "*", Strategy: "source-wins"},
+		}); err != nil {
+			return FailCheck("setup: merge-config set failed: " + err.Error())
+		}
+		defer sendMergeConfig(types.RevisionMergeConfigParamsData{
+			Scope: "path", Name: "star-all", Action: "delete",
+		})
+
+		// A NESTED trie-relative key — this is the whole point of the check.
+		mergeResult, err := divergeAndMerge(prefix, docType, "docs/deep/readme")
+		if err != nil {
+			return FailCheck("merge: " + err.Error())
+		}
+		if mergeResult.Status == "merged" {
+			return PassCheck("`pattern: \"*\"` reached a nested path (§5.1 \"matches all paths within any merge\")")
+		}
+		return FailCheck(fmt.Sprintf(
+			"`pattern: \"*\"` did not reach the nested key docs/deep/readme — merge status %q, want \"merged\". "+
+				"§5.1: a `*` config \"matches all paths within any merge, regardless of prefix\"; single-segment "+
+				"glob semantics silently narrow a peer-wide operator config to top-level keys",
+			mergeResult.Status))
+	})
+
+	// §2.3 + §5.3: the sentinel is in the vocabulary and its companion field is
+	// load-bearing. `handler` must be ACCEPTED at config-write time (v3.10
+	// rules it dispatchable-as-written), and the path travels in the companion
+	// `handler` field — never as the strategy value, an encoding v3.9 retracted
+	// because `400 invalid_strategy` cannot exist over a value set admitting
+	// any path string.
+	r.Run("merge_config_accepts_handler_sentinel", func() CheckOutcome {
+		scrubMergeConfigs()
+		name := "validate-mc-handler"
+		env, err := sendMergeConfig(types.RevisionMergeConfigParamsData{
+			Scope: "path", Name: name, Action: "set",
+			Config: &types.RevisionMergeConfigData{
+				Pattern: name, Strategy: "handler", Handler: "app/merge/text-handler",
+			},
+		})
+		if err != nil {
+			return FailCheck("send: " + err.Error())
+		}
+		defer sendMergeConfig(types.RevisionMergeConfigParamsData{
+			Scope: "path", Name: name, Action: "delete",
+		})
+		respData, _ := types.ExecuteResponseDataFromEntity(env.Root)
+		if respData.Status != 200 {
+			return FailCheck(fmt.Sprintf(
+				"`strategy: \"handler\"` rejected with %d — v3.10 rules the sentinel dispatchable as written; "+
+					"it is in the §2.3 built-in table and MUST NOT be rejected at config-write time", respData.Status))
+		}
+		return PassCheck("`strategy: \"handler\"` accepted with its companion handler path (§2.3 sentinel encoding)")
+	})
+
+	// The sentinel without its companion path is not a usable config: there is
+	// nothing to dispatch to. Rejecting at write time is what keeps the failure
+	// at the operator rather than at merge time on some later path.
+	r.Run("merge_config_rejects_handler_sentinel_without_path", func() CheckOutcome {
+		scrubMergeConfigs()
+		name := "validate-mc-handler-nopath"
+		env, err := sendMergeConfig(types.RevisionMergeConfigParamsData{
+			Scope: "path", Name: name, Action: "set",
+			Config: &types.RevisionMergeConfigData{Pattern: name, Strategy: "handler"},
+		})
+		if err != nil {
+			return FailCheck("send: " + err.Error())
+		}
+		respData, _ := types.ExecuteResponseDataFromEntity(env.Root)
+		if respData.Status == 200 {
+			sendMergeConfig(types.RevisionMergeConfigParamsData{Scope: "path", Name: name, Action: "delete"})
+			return FailCheck(
+				"`strategy: \"handler\"` with no companion `handler` path was accepted — the config can never " +
+					"dispatch, so the misconfiguration surfaces at merge time on an unrelated path instead of at " +
+					"the write that caused it")
+		}
+		if respData.Status != 400 {
+			return FailCheck(fmt.Sprintf("rejected with %d, §2.3 pins 400 invalid_strategy", respData.Status))
+		}
+		return PassCheck("sentinel without its companion handler path rejected 400 at config-write time")
+	})
+
+	// §5.3 disposition: a `handler` config whose path resolves to nothing MUST
+	// degrade to a conflict entity — never an error that fails the whole merge,
+	// and never a silent auto-resolve. This is the wire-drivable half of the
+	// delegation.
+	//
+	// DECLARED LIMIT, stated in the check's own output rather than left to a
+	// reader: the RESOLVING half of §5.3 (a live driver returning a merged
+	// entity) is NOT drivable from this validator, because it requires
+	// installing an application handler on the peer under test and no
+	// conformance surface exists for that. It is covered in-process instead —
+	// `entity-core-go` ext/revision/merge_delegation_test.go. Do not read this
+	// row as coverage of the successful dispatch path.
+	r.Run("merge_strategy_handler_unreachable_degrades_to_conflict", func() CheckOutcome {
+		if out, ok := r.Require("merge_config_cascade_control_no_config_conflicts"); !ok {
+			return out
+		}
+		scrubMergeConfigs()
+		docType := "test/revision-handler-doc"
+		prefix := revisionTestPrefix("mchdlr")
+
+		if _, err := sendMergeConfig(types.RevisionMergeConfigParamsData{
+			Scope: "type", Name: docType, Action: "set",
+			Config: &types.RevisionMergeConfigData{
+				Strategy: "handler", Handler: "app/merge/definitely-not-installed",
+			},
+		}); err != nil {
+			return FailCheck("setup: merge-config set failed: " + err.Error())
+		}
+		defer sendMergeConfig(types.RevisionMergeConfigParamsData{
+			Scope: "type", Name: docType, Action: "delete",
+		})
+
+		mergeResult, err := divergeAndMerge(prefix, docType, "hdlr")
+		if err != nil {
+			return FailCheck(
+				"merge FAILED outright with an unreachable handler path (" + err.Error() + ") — §5.3 " +
+					"misconfiguration must degrade to a conflict entity for the one path, not fail the merge")
+		}
+		if mergeResult.Status == "merged" {
+			return FailCheck(
+				"an unreachable merge handler silently AUTO-RESOLVED the conflict — the merge must not " +
+					"invent a resolution the configured driver never produced")
+		}
+		if mergeResult.Status == "merged_with_conflicts" {
+			return PassCheck(
+				"unreachable handler degraded to a conflict entity (§5.3). NOTE: the resolving half of the " +
+					"delegation is not wire-drivable — no surface installs an app handler on the peer under " +
+					"test — and is covered in-process, not by this row")
+		}
+		return FailCheck(fmt.Sprintf("unexpected merge status %q", mergeResult.Status))
 	})
 
 	return r.Results()

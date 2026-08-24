@@ -96,15 +96,22 @@ const (
 // unobserved.
 //
 // `denied` is the THIRD value, added 2026-08-13 by §6a.9.3's operations
-// table (`deny-request` → `register-result {status: "denied"}`). Note that
-// §6a.9's declaration of this type still reads `status: "bound" |
-// "pending_review"` — two values — so v1.3 introduced a branch its own
-// declared return type does not enumerate. That is precisely the defect
-// §6a.9 recorded about ITSELF one screen up ("an operation whose declared
-// return type does not enumerate every branch of its own pseudocode is an
-// interop bug already in flight"), recurring one subsection later. We
-// implement the ruled value and route the declaration gap —
-// docs/validation/spec-issues/2026-08-13-d-*.
+// table (`deny-request` → `register-result {status: "denied"}`).
+//
+// CLOSED 2026-08-14 by REGISTRY v1.4. v1.3 introduced a branch its own
+// declared return type did not enumerate — §6a.9 read `"bound" |
+// "pending_review"`, two values — which is precisely the defect §6a.9
+// recorded about ITSELF one screen up, recurring one subsection later. All
+// three implementations emitted `"denied"` as the table said and all three
+// routed the enumeration gap; v1.4 adds the value to the declaration and
+// pins that **both `binding_hash` and `pending_hash` are absent on
+// `"denied"`** — the request is decided and nothing was issued. We already
+// emit exactly that (`RegistryRegisterResultData{Status: denied}`, no hash
+// fields; ext/registry/peerissued/register.go).
+//
+// This comment previously ended "and route the declaration gap" and would
+// have read as an open item indefinitely. A citation is a build-state claim
+// about a document and decays the same way.
 const (
 	RegisterStatusBound         = "bound"
 	RegisterStatusPendingReview = "pending_review"

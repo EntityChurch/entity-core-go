@@ -99,6 +99,7 @@ func (h *Handler) handleCherryPick(ctx context.Context, req *handler.Request) (*
 
 	// Recursive three-way merge.
 	mergedBindings, deletions, conflicts := trieMergeBindings(
+		ctx,
 		hctx.Store, hctx, params.Prefix, "",
 		ancestorRoot, localVer.Root, pickedVer.Root,
 		localHead, params.Version,

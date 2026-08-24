@@ -237,6 +237,31 @@ func (d *Dispatcher) makeLocalExecute(parentCtx context.Context, callerCtx *hand
 					DeliverTo:    execOpts.DeliverTo,
 					DeliverToken: callerCtx.HandlerGrant,
 				}
+				// §4.2 Step 4 line 2: generate_internal_deliver_token. The
+				// caller's HandlerGrant above is NOT a deliver_token — its
+				// grantee is the caller, so the peer we are dispatching to
+				// cannot author the delivery under it and has to improvise
+				// (see mintDeliverToken for what each impl improvises, and
+				// why go→go passed while go→rust did not). Mint the real
+				// one: self-rooted, granted to THAT peer, scoped to this one
+				// delivery.
+				//
+				// Fail-soft by design. A mint failure leaves the pre-existing
+				// HandlerGrant in place, so this is strictly additive: the
+				// paths that worked before still take exactly the route they
+				// took before, and nothing new can 500 a dispatch that used
+				// to succeed.
+				if targetURI, uerr := entity.ParseURI(uri); execOpts.MintDeliverToken && uerr == nil {
+					dtCap, dtSig, dtIdent, mintErr := d.mintDeliverToken(crypto.PeerID(targetURI.PeerID), execOpts.DeliverTo)
+					if mintErr != nil {
+						d.debugf("deliver_token: not minted, falling back to caller handler grant: %v", mintErr)
+					} else {
+						ad.DeliverToken = dtCap
+						deliverTokenExtras(ad, dtCap, dtSig, dtIdent)
+						d.debugf("deliver_token: minted for %s scoped to %s:%s",
+							targetURI.PeerID, execOpts.DeliverTo.URI, execOpts.DeliverTo.Operation)
+					}
+				}
 			}
 			if execOpts.Capability.Type != "" || len(execOpts.IncludedChain) > 0 {
 				if ad == nil {
@@ -349,6 +374,11 @@ func (d *Dispatcher) makeLocalExecute(parentCtx context.Context, callerCtx *hand
 		// WithCapability only affects the level-1 cap check above — it must NOT
 		// overwrite the propagated initiator, which history attribution relies on.
 		childCallerCap := callerCtx.CallerCapability
+		// EXTENSION-CONTINUATION §3.6b: a continuation advance is a new chain
+		// root and re-roots the initiator at its own dispatch_capability.
+		if execOpts.CallerCapabilityOverride.Type != "" {
+			childCallerCap = execOpts.CallerCapabilityOverride
+		}
 
 		childCtx := &handler.HandlerContext{
 			Author:           callerCtx.Author,

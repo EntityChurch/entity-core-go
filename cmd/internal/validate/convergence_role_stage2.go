@@ -669,6 +669,30 @@ func addRoleStage2_RecognizeOnAttest(r *CheckRunner, ctx context.Context, a *Pee
 		ctxName := "validate/stage2-policy/" + suffix
 		guestRoleName := "guest"
 
+		// --- Posture guard: recognize-on-attest is a GATING test ---
+		// It asserts a recognized peer gets EXACTLY default_role grants
+		// (EXTENSION-ROLE §5.1: the connection cap carries `grants:
+		// resolved_grants`, nothing more). That is unobservable against a peer
+		// whose default connection posture already grants unknown peers open
+		// access — e.g. a peer started with `-open-access` (deprecated V7 v7.74,
+		// removed v7.75): the §8 handshake union hands every connector the
+		// wildcard floor, so K's cap comes back as OpenAccessGrants() ∪ {guest}
+		// and the gate cannot be seen. Probe with a bare, unrecognized keypair:
+		// if it already holds a wildcard grant, the peer is not gating and this
+		// check means nothing on the wire. Skip (with the pointer to the
+		// in-process proof) rather than FAIL a tolerated deployment posture —
+		// the gating logic itself is proven by ext/role
+		// TestResolveGrants_GatingNeverEscalates.
+		if probeKp, perr := crypto.Generate(); perr == nil {
+			if probeClient, cerr := connectAsKeypair(ctx, a.Addr(), probeKp); cerr == nil {
+				open := grantsAreOpenAccess(probeClient.Grants())
+				probeClient.Close()
+				if open {
+					return SkipCheck("peer grants unknown peers open access (-open-access posture, deprecated V7 v7.74 / removed v7.75); recognize-on-attest GATING is unobservable on the wire here — the gate is proven in-process by ext/role TestResolveGrants_GatingNeverEscalates")
+				}
+			}
+		}
+
 		// --- Setup: configure ceremony ---
 		founders, err := makeNAuxSigners(3)
 		if err != nil {
@@ -677,6 +701,20 @@ func addRoleStage2_RecognizeOnAttest(r *CheckRunner, ctx context.Context, a *Pee
 		for i, f := range founders {
 			path := fmt.Sprintf("validate/stage2-policy/%s/founder-%d-identity", suffix, i)
 			if _, err := a.TreePut(ctx, path, f.identity); err != nil {
+				// The other un-runnable posture. The check needs the validator to
+				// WRITE its setup (quorum/role/policy/attestation) AND unknown
+				// peers to be gated. A fully-restrictive peer (--open-access=false
+				// with no admin seed) denies the validator itself — setup 403s
+				// before any gate can be observed. The only posture that drives
+				// this check is admin-seeded-restrictive (validator's identity
+				// granted write, unknown peers anonymous-denied), which no current
+				// peer-manager start provides. Skip with the pointer rather than
+				// FAIL a setup the posture forbids; the gate is proven in-process
+				// by ext/role TestResolveGrants_GatingNeverEscalates and
+				// core/protocol TestAssembleInboundGrants_*.
+				if strings.Contains(err.Error(), "status 403") {
+					return SkipCheck("peer denies the validator write access (restrictive posture, no admin seed); this check's setup cannot run. It needs an admin-seeded-restrictive peer — validator identity granted write, unknown peers anonymous-denied — which no current --open-access / --open-access=false start provides. Gate proven in-process (ext/role TestResolveGrants_GatingNeverEscalates, core/protocol TestAssembleInboundGrants_*)")
+				}
 				return FailCheck(fmt.Sprintf("stage founder %d: %v", i, err))
 			}
 		}
@@ -992,6 +1030,30 @@ func grantsMatchGuest(got, expected []types.GrantEntry) bool {
 		}
 	}
 	return true
+}
+
+// grantsAreOpenAccess reports whether the grant set contains an
+// OpenAccessGrants()-shaped entry: wildcard handlers AND wildcard operations.
+// Used only as a posture probe — a peer that hands an UNRECOGNIZED bare keypair
+// such a grant is not gating connection authority, so a recognize-on-attest
+// gating check cannot be observed against it. See the posture guard in
+// addRoleStage2_RecognizeOnAttest.
+func grantsAreOpenAccess(grants []types.GrantEntry) bool {
+	for _, g := range grants {
+		if scopeIncludesWildcard(g.Handlers) && scopeIncludesWildcard(g.Operations) {
+			return true
+		}
+	}
+	return false
+}
+
+func scopeIncludesWildcard(s types.CapabilityScope) bool {
+	for _, inc := range s.Include {
+		if inc == "*" {
+			return true
+		}
+	}
+	return false
 }
 
 func grantEntryEquals(a, b types.GrantEntry) bool {

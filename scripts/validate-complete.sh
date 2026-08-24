@@ -96,7 +96,20 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Impl is the POSITIONAL arg, never $TYPE. The env-var form reads natural
+# (`TYPE=rust ./validate-complete.sh`) and is the exact footgun that shipped a
+# perfect go score labelled as rust this cycle: $TYPE gets overwritten by
+# ${1:-go} below, so the run silently measures go. Refuse it loudly rather than
+# print a plausible wrong number.
+_ENV_TYPE="${TYPE:-}"
 TYPE="${1:-go}"
+if [ -n "$_ENV_TYPE" ] && [ "$_ENV_TYPE" != "$TYPE" ]; then
+    echo "REFUSING TO RUN: impl is the POSITIONAL arg, not \$TYPE." >&2
+    echo "  You exported TYPE=$_ENV_TYPE, but this script reads \$1 (='$TYPE')." >&2
+    echo "  As written it would measure '$TYPE' and print it as a '$_ENV_TYPE' score." >&2
+    echo "  Run:  ./scripts/validate-complete.sh $_ENV_TYPE" >&2
+    exit 2
+fi
 STAMP="c$$"
 TARGET="vc-${STAMP}"
 REF="vcref-${STAMP}"

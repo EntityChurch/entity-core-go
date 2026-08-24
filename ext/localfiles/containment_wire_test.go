@@ -7,6 +7,9 @@ import (
 	"testing"
 
 	"go.entitychurch.org/entity-core-go/core/handler"
+	"go.entitychurch.org/entity-core-go/core/types"
+	"go.entitychurch.org/entity-core-go/ext/content"
+	"go.entitychurch.org/entity-core-go/ext/content/chunker"
 )
 
 // The §8.3 containment audit AT THE HANDLER, not at the helper.
@@ -108,8 +111,29 @@ func TestListRefusesPathThroughEscapingSymlinkedDirectory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sub, "secret.txt"), []byte("OUTSIDE THE SANDBOX"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(root, "escape-dir")); err != nil {
+	link := filepath.Join(root, "escape-dir")
+	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+
+	// TEETH — absent until 2026-08-14, when core-rust's audit reported that
+	// their own first version had covered `list` of a leaf and `read` through
+	// an intermediate but never asserted the fixture could actually serve the
+	// leak. Ours had teeth on case 1 only, so this case and the `read` below
+	// were the two that could have passed for free. Same defect they found,
+	// found in us by them.
+	if entries, rerr := os.ReadDir(filepath.Join(link, "sub")); rerr != nil {
+		t.Fatalf("fixture is inert: the escaping PARENT does not resolve (%v) — a refusal here would prove nothing", rerr)
+	} else {
+		var found bool
+		for _, e := range entries {
+			if e.Name() == "secret.txt" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("fixture is inert: the escaping parent resolves but exposes no secret.txt — nothing to leak")
+		}
 	}
 
 	resp, err := h.Handle(context.Background(), &handler.Request{
@@ -131,17 +155,43 @@ func TestListRefusesPathThroughEscapingSymlinkedDirectory(t *testing.T) {
 	}
 }
 
-// The read direction, for completeness — the milder half of the same defect,
-// and the one the wire probe DOES reach.
+// The read direction — and the case with the blind spot core-rust named on
+// 2026-08-14 (their routing (q) item 6).
+//
+// THE SHAPE OF THE BLIND SPOT. A `list` leak surfaces as outside FILENAMES in
+// the response body, so a body scan catches it. A `read` leak does not:
+// `handleRead` chunks the file, writes every chunk AND the blob into
+// `hctx.Store`, and returns only a `Content` HANDLE. The outside bytes never
+// appear inline. Rust hit this when their mutation caught case 1 and missed
+// case 3 — a body-byte assertion reads clean on the case that leaks hardest.
+//
+// Go's assertion was on the status code, which does catch a leak that returns
+// 2xx — so we were not blind in rust's exact way. But status-only cannot see
+// the worse ordering: a handler that stores the blob and THEN refuses. The
+// bytes are in the peer's content store, addressable by anyone holding the
+// hash, and V3 descriptor publication would advertise them — while the test
+// reads green on a clean 403.
+//
+// So assert the property, not the status: the outside bytes MUST NOT be in the
+// content store, regardless of what came back.
 func TestReadRefusesEscapingSymlinkedDirectory(t *testing.T) {
 	h, hctx, root := newTestHandler(t)
 
+	secret := []byte("OUTSIDE THE SANDBOX")
 	outside := t.TempDir()
-	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("OUTSIDE THE SANDBOX"), 0o644); err != nil {
+	link := filepath.Join(root, "escape-dir")
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), secret, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(root, "escape-dir")); err != nil {
+	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+
+	// TEETH: prove the kernel would have served the file through this link.
+	if got, rerr := os.ReadFile(filepath.Join(link, "secret.txt")); rerr != nil {
+		t.Fatalf("fixture is inert: the escape link does not serve the file (%v) — a refusal would prove nothing", rerr)
+	} else if string(got) != string(secret) {
+		t.Fatalf("fixture is inert: read through the link returned %q, not the planted secret", got)
 	}
 
 	resp, err := h.Handle(context.Background(), &handler.Request{
@@ -151,7 +201,73 @@ func TestReadRefusesEscapingSymlinkedDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
+
+	// Name the token that would be present if it leaked — the blob and chunk
+	// entities handleRead would have written, derived through the SAME
+	// chunker+BuildBlob path so this cannot drift from what the handler does.
+	ranges := chunker.ChunkFastCDC(secret, types.DefaultChunkSize)
+	blobEnt, chunkEntities, berr := content.BuildBlob(secret, ranges, types.ChunkingFastCDC, types.DefaultChunkSize)
+	if berr != nil {
+		t.Fatalf("build expected blob: %v", berr)
+	}
+	if _, ok := hctx.Store.Get(blobEnt.ContentHash); ok {
+		t.Fatalf("SECURITY: the blob for an outside file is in the content store (%s) — the bytes leaked behind the content handle even though the response said %d",
+			blobEnt.ContentHash, resp.Status)
+	}
+	for _, c := range chunkEntities {
+		if _, ok := hctx.Store.Get(c.ContentHash); ok {
+			t.Fatalf("SECURITY: a chunk of an outside file is in the content store (%s) — response status %d did not prevent the ingest",
+				c.ContentHash, resp.Status)
+		}
+	}
+
 	if resp.Status >= 200 && resp.Status < 300 {
 		t.Fatalf("SECURITY: read through an escaping symlinked directory returned %d — content outside the root is being served", resp.Status)
+	}
+}
+
+// The control that makes the assertion above meaningful.
+//
+// `TestReadRefusesEscapingSymlinkedDirectory` proves the outside blob is ABSENT
+// from the content store. Absence passes for free if the hash it derives is not
+// the hash `handleRead` would have written — a renamed chunker, a changed
+// default chunk size, a different blob construction, and the leak assertion
+// silently stops looking at anything.
+//
+// So: read a file that IS inside the root, derive the blob hash the same way,
+// and assert it IS present. Same derivation, opposite expectation. If this
+// fails, the leak test above is no longer checking what it claims to.
+func TestReadInsideRootStoresTheBlobUnderTheDerivedHash(t *testing.T) {
+	h, hctx, root := newTestHandler(t)
+
+	body := []byte("INSIDE THE SANDBOX")
+	if err := os.WriteFile(filepath.Join(root, "ordinary.txt"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := h.Handle(context.Background(), &handler.Request{
+		Operation: "read",
+		Context:   withResource(hctx, "local/files/test/ordinary.txt"),
+	})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if resp.Status < 200 || resp.Status >= 300 {
+		t.Fatalf("ordinary in-root read returned %d, want success — the control cannot speak for the leak test if the read never happened", resp.Status)
+	}
+
+	ranges := chunker.ChunkFastCDC(body, types.DefaultChunkSize)
+	blobEnt, chunkEntities, berr := content.BuildBlob(body, ranges, types.ChunkingFastCDC, types.DefaultChunkSize)
+	if berr != nil {
+		t.Fatalf("build expected blob: %v", berr)
+	}
+	if _, ok := hctx.Store.Get(blobEnt.ContentHash); !ok {
+		t.Fatalf("a successful read did NOT store the blob at the derived hash %s — this derivation no longer matches handleRead's, so the containment leak assertion is checking a hash that could never appear",
+			blobEnt.ContentHash)
+	}
+	for _, c := range chunkEntities {
+		if _, ok := hctx.Store.Get(c.ContentHash); !ok {
+			t.Fatalf("a successful read did NOT store chunk %s — the chunk half of the leak assertion is inert", c.ContentHash)
+		}
 	}
 }

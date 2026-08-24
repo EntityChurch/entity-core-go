@@ -2,6 +2,7 @@ package capability
 
 import (
 	"encoding/hex"
+	"errors"
 	"testing"
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
@@ -115,11 +116,26 @@ func TestCollectChainBundle(t *testing.T) {
 	}
 }
 
-// TestCollectChainBundleBestEffort — a link whose signature/identity is not
-// locally resolvable is simply omitted; the walk still returns the caps it
-// could collect (the verifier fails closed later if it actually needed the
-// missing piece). No error, no panic.
-func TestCollectChainBundleBestEffort(t *testing.T) {
+// TestCollectChainBundleFailsClosedOnUnresolvableIdentity — the inversion of
+// what this test used to assert.
+//
+// It was `TestCollectChainBundleBestEffort`, and it pinned the opposite rule:
+// "a link whose signature/identity is not locally resolvable is simply
+// omitted … No error, no panic." EXTENSION-CONTINUATION §4.3 (v1.22) makes
+// that non-conformant — the bundle MUST carry a `system/peer` identity for
+// every granter AND grantee in the chain, and a bundler that cannot resolve
+// one MUST fail with `chain_unreachable` rather than dispatch an incomplete
+// bundle.
+//
+// Why the old rule was wrong, recorded because it cost two cycles: the far
+// side's verify step 2a resolves every link's grantee and answers 401
+// `UnresolvableGrantee` when it cannot. A verifier MUST paired with a
+// best-effort bundler is an interop bug by construction — the omission is
+// silent here and surfaces there, so the peer that REPORTS the failure looks
+// like the peer that CAUSED it. That is exactly how this got routed at
+// core-rust twice. Failing at bundle time puts the error where the missing
+// entity is.
+func TestCollectChainBundleFailsClosedOnUnresolvableIdentity(t *testing.T) {
 	cs := store.NewMemoryContentStore()
 	li := store.NewMemoryLocationIndex()
 
@@ -138,15 +154,48 @@ func TestCollectChainBundleBestEffort(t *testing.T) {
 	}
 
 	bundle, err := CollectChainBundle(capEnt, cs, li)
+	if err == nil {
+		t.Fatal("bundled a chain whose granter identity is unresolvable — §4.3 requires chain_unreachable at bundle time, not a quiet omission the far side reports as ITS problem")
+	}
+	if !errors.Is(err, ErrChainUnreachable) {
+		t.Fatalf("error must be ErrChainUnreachable so callers can classify it, got: %v", err)
+	}
+	if bundle != nil {
+		t.Fatal("a failed bundle must return nil, not a partial map a caller might dispatch anyway")
+	}
+}
+
+// The positive control: with the identity present, the same chain bundles
+// cleanly. Without this, the test above passes for free the moment
+// CollectChainBundle starts erroring on everything.
+func TestCollectChainBundleSucceedsWhenIdentityIsResolvable(t *testing.T) {
+	cs := store.NewMemoryContentStore()
+	li := store.NewMemoryLocationIndex()
+
+	kp, _ := crypto.Generate()
+	id, _ := kp.IdentityEntity()
+	if _, err := cs.Put(id); err != nil {
+		t.Fatal(err)
+	}
+	capData := types.CapabilityTokenData{
+		Grants:    []types.GrantEntry{{Operations: types.CapabilityScope{Include: []string{"get"}}}},
+		Granter:   types.SingleSigGranter(id.ContentHash),
+		Grantee:   id.ContentHash,
+		CreatedAt: 1,
+	}
+	capEnt, _ := capData.ToEntity()
+	if _, err := cs.Put(capEnt); err != nil {
+		t.Fatal(err)
+	}
+
+	bundle, err := CollectChainBundle(capEnt, cs, li)
 	if err != nil {
-		t.Fatalf("best-effort bundle must not error: %v", err)
+		t.Fatalf("a fully resolvable chain must bundle: %v", err)
 	}
 	if _, ok := bundle[capEnt.ContentHash]; !ok {
-		t.Fatal("the resolvable cap must still be in the bundle")
+		t.Fatal("the cap must be in the bundle")
 	}
-	for _, e := range bundle {
-		if e.Type == types.TypeSignature {
-			t.Fatal("no signature should be present (none was resolvable)")
-		}
+	if _, ok := bundle[id.ContentHash]; !ok {
+		t.Fatal("the granter/grantee identity must be in the bundle — §4.3 completeness")
 	}
 }

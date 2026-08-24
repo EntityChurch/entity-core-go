@@ -105,6 +105,37 @@ type ExecuteOpts struct {
 	Capability entity.Entity
 	DeliverTo  *types.DeliverySpec
 	Bounds     *types.BoundsData
+	// MintDeliverToken opts this dispatch into EXTENSION-CONTINUATION §4.2
+	// Step 4's `generate_internal_deliver_token`: the dispatcher mints a
+	// capability naming the SERVICING peer as grantee, so that peer can
+	// author the result delivery back to us. Without it the servicing peer
+	// improvises, and what it improvises differs per implementation (see
+	// Dispatcher.mintDeliverToken).
+	//
+	// OPT-IN, and deliberately not the default for every `deliver_to`
+	// dispatch. A minted token is correctly SCOPED — one handler, one path,
+	// one operation — where the pre-existing fallback rides the connection's
+	// broad session authority. Flows whose onward work inherits authority
+	// from the delivery therefore behave differently under it, so the switch
+	// belongs to the caller that knows its own authority model. §4.2 pins it
+	// for continuation advance; that is where it is set.
+	MintDeliverToken bool
+	// CallerCapabilityOverride re-roots the propagated chain initiator for
+	// this dispatch and everything below it.
+	//
+	// CallerCapability normally propagates unchanged — it is the chain
+	// INITIATOR, and Level 2 (`CheckPathCapability`, V7 §6.3) consults it.
+	// That is right for an ordinary sub-dispatch, which is work done on behalf
+	// of the caller. It is wrong for a continuation advance:
+	// EXTENSION-CONTINUATION §3.6b [MUST] makes the advance a NEW CHAIN ROOT
+	// running under its own `dispatch_capability`, and forbids the onward
+	// dispatch running under the authority of the delivery that triggered it —
+	// §6.8's confused deputy, and worse, because the continuation's effective
+	// authority would otherwise depend on which peer delivered the trigger and
+	// how broad that peer's connection grant happened to be.
+	//
+	// Zero value = propagate unchanged (every other dispatch site).
+	CallerCapabilityOverride entity.Entity
 	// IncludedChain carries extra entities that MUST travel in a cross-peer
 	// dispatched EXECUTE's `included` map beyond what the general V7
 	// §3.1/§3.2 rule places (which is only the leaf cap). Used for the
@@ -150,6 +181,20 @@ func WithCapability(cap entity.Entity) ExecuteOption {
 // WithDeliverTo attaches a delivery spec to the dispatched EXECUTE.
 func WithDeliverTo(spec *types.DeliverySpec) ExecuteOption {
 	return func(o *ExecuteOpts) { o.DeliverTo = spec }
+}
+
+// WithCallerCapability re-roots the propagated chain initiator for this
+// dispatch. See ExecuteOpts.CallerCapabilityOverride — set by continuation
+// advance per EXTENSION-CONTINUATION §3.6b.
+func WithCallerCapability(cap entity.Entity) ExecuteOption {
+	return func(o *ExecuteOpts) { o.CallerCapabilityOverride = cap }
+}
+
+// WithDeliverTokenMint opts the dispatch into minting a real deliver_token for
+// the servicing peer (EXTENSION-CONTINUATION §4.2 Step 4). See
+// ExecuteOpts.MintDeliverToken for why this is opt-in.
+func WithDeliverTokenMint() ExecuteOption {
+	return func(o *ExecuteOpts) { o.MintDeliverToken = true }
 }
 
 // WithIncludedChain attaches extra entities (a capability's full authority

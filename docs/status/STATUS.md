@@ -1,6 +1,6 @@
 # entity-core-go — status
 
-_Updated: 2026-08-12 · public: v0.8.0 (master) · **live tracker: `docs/status/WORK-STATUS.md`**_
+_Updated: 2026-08-14 · public: v0.8.0 (master) · **live tracker: `docs/status/WORK-STATUS.md`**_
 
 ## Where it is
 
@@ -10,7 +10,7 @@ SDK prototype + interop oracle. Because Go **leads on new protocol features**,
 cross-implementation convergence is downstream feedback here, not a gate, and
 the other implementations validate against this one as the interop baseline.
 The codebase is a three-module `go.work` workspace — `core` (the protocol
-library, a strict 14-package DAG: `errors → ecf → hash → entity, crypto,
+library, a strict 13-package DAG: `errors → ecf → hash → entity, crypto,
 store, types, wire → capability → handler → protocol, tree → peer`), `ext`
 (system extensions, each depending only on `core` — **28 packages**), and `cmd`
 (CLIs, the **66-category** validation suite, and cross-impl interop tooling). Go 1.25, only
@@ -27,7 +27,73 @@ live-HTTP transport surfaces.
 
 ## Where we left off
 
-> **NEXT SESSION STARTS HERE — 2026-08-12 (c): the new MUST fails in BOTH siblings, and R-6
+> **NEXT SESSION STARTS HERE — 2026-08-14 (b): CONTINUATION v1.22 is implemented and the
+> cross-impl seam is CLOSED — 99 P / 0 F in all three pairings.**
+>
+> Arch landed **CONTINUATION v1.22**, **REGISTRY v1.4**, SUBSTITUTE v1.1, REVISION v3.9.
+> **Read the text, not the summary:** §3.6a and §3.6b are **new normative subsections**, not
+> rulings we had overlooked — and §3.6a's `mint_result_deliver_token` matches the shape we had
+> already built at `3c13009` **slot for slot**. Implemented all four v1.22 MUSTs (`26675e9`):
+> the mint is **on**; the advance re-roots the chain initiator at its own `dispatch_capability`
+> (§3.6b — the advance is a **new chain root**); the connection-authority fallback is **removed**
+> (§3.6a MUST NOT); and `CollectChainBundle` now collects **grantee** identities — it never did —
+> failing `ErrChainUnreachable` rather than omitting silently (**§4.3 — rust's ask 5, ruled their
+> way**).
+>
+> **Both of our "blocking" asks resolved against the FIXTURES, not the rule**, and §3.6b says so
+> outright: *"fix the fixture, not the rule."* It is right. The validator's dispatch capabilities
+> were scoped **peer-relative**, so §PR-8 canonicalized them against the *validator's* namespace
+> rather than the executing peer's — they only ever matched because the advance ran under the
+> delivery's broader capability. **The vectors were asserting the escalation.**
+>
+> **Measured: `convergence` 99 P / 0 F — go→go, go→rust AND go→python.** Gate
+> `1574 · 0F · 0S · 0W / 636 / 55 / 27 / 8`, six passes exit 0. Only residue is `odr2`, an
+> unconfigured `--inbox-relay-registry` surface that fails go-against-go.
+>
+> **Already conformant, verified not assumed:** REVISION's merge-strategy vocabulary (arch found
+> the corpus declared it three incompatible ways) — we read the §2.2 table, carry all five values
+> incl. `manual`, and have no `field-level` anywhere. REGISTRY v1.4's `"denied"` branch — we emit
+> `{status: "denied"}` with **neither** hash, which is what v1.4 pins.
+>
+> **PRIOR — 2026-08-14: the rexec seam was OURS, and the fix has two halves.**
+> **To arch (send this):**
+> `docs/status/ROUTING-2026-08-14-the-rexec-seam-was-ours-and-fixing-it-exposed-what-was-holding-it-up.md`
+> — three numbered asks in §2a, plus the §6a.9.3 four still unruled.
+>
+> **`convergence.rexec_delivered` failed go→rust for three sessions and we routed it at rust
+> twice. It was ours.** Ran rust's own discriminator probe: `UnresolvableGrantee` **0**,
+> `operation permission denied` **1 — and that one is the C-3 negative control**. Neither of
+> their candidates fires. **rust's B served the `tree:get` 200 and dispatched the result back;
+> the 403 is at A — us**, `grantee <A> != author <B>`.
+> **`EXTENSION-CONTINUATION` §4.2 Step 4 is two lines and go implemented one.**
+> `execute.deliver_token = generate_internal_deliver_token(...)` was never built — there was no
+> `WithDeliverToken` in `core/handler` at all. So the EXECUTE named a delivery it never
+> authorized, and each impl improvised: **go's B fell back to connection authority — which is the
+> only reason go→go ever passed**, and `async.go`'s own comment already called that *"works by
+> accident."*
+>
+> **Built (`3c13009`): `Dispatcher.mintDeliverToken`. ENABLED NOWHERE, and that is the finding.**
+> The switch makes rexec pass go→rust in 201 ms. With the **second half** (re-root the chain
+> initiator at the `dispatch_capability`, which §4.2's table and our own `ReactiveTrigger` note
+> already describe), **`convergence` is 99 P / 0 F in BOTH pairings — go→go and go→rust.** It
+> costs two local vectors (`deref_included_resolves`, `request_side_included_preserved`), because
+> **Level 2 (`CheckPathCapability`) consults the chain initiator** and these fixtures'
+> `dispatch_capability`s cover handler+operation but not resource. §6.8 answers Level 1 and is
+> **silent on Level 2** — that silence is where both defects live. Not shipped: we do not buy a
+> cross-impl fix with a local regression.
+>
+> **A claim withdrawn before it was routed.** An earlier draft listed "six go↔rust sync
+> divergences." **There are none.** Switch off, they all report `blocked: depends on
+> rexec_delivered`; switch on, the go→rust failing set is a **strict subset** of go→go
+> (`comm -13` empty). One go-internal defect, both pairings, no cross-impl gap.
+>
+> **Siblings re-measured from live trees: rust `cc6cb56` and py `808d9e6` are BOTH
+> `registry_issuer` 27/27 and 0 F on the full surface** (rust was 9 F, py 7 F — every
+> `pending_hash` failure closed; rust's ask 7 confirmed). **Containment closed in all three
+> seats**, so the meta's one open security item is answerable.
+> **Gate: `1574 · 0F · 0S · 0W / 636 / 55 / 27 / 8`, six passes exit 0.**
+>
+> **PRIOR — 2026-08-12 (c): the new MUST fails in BOTH siblings, and R-6
 > found a row nothing measured.**
 > **To arch (send this):**
 > `docs/status/ROUTING-2026-08-12-c-r6-found-an-unmeasured-row-and-the-new-must-fails-in-both-siblings.md`

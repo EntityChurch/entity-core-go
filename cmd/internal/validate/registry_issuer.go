@@ -75,7 +75,7 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("pending_second_decision_rejected", "EXTENSION-REGISTRY §6a.9.3 — a second decision on a decided head MUST answer 409 already_decided. The dangerous failure is a 200: approving an already-denied request overturns the operator's refusal by retry, and re-approving mints a second binding for one request")
 	r.Declare("pending_approve_issues_and_leaves_head", "EXTENSION-REGISTRY §6a.9.3 REG-PENDING-DECIDE-1 (approve half) — approve issues a binding that resolves BY NAME and leaves an `approved` head carrying its binding_hash")
 	r.Declare("pending_decide_unknown_handle_404", "EXTENSION-REGISTRY §6a.9.3 — a pending_hash naming no stored pending-binding MUST answer 404 not_found. Probed with a well-formed body the registry never minted, not a random hash: a peer that rejects garbage but accepts a plausible unminted entity has the weaker check")
-	r.Declare("name_constraints_rejects_nonmatching","EXTENSION-REGISTRY §6a.9.1 — a name outside the policy's name_constraints glob MUST be refused 403 not_entitled")
+	r.Declare("name_constraints_rejects_nonmatching", "EXTENSION-REGISTRY §6a.9.1 — a name outside the policy's name_constraints glob MUST be refused 403 not_entitled")
 	r.Declare("layer1_unsigned_request_rejected", "EXTENSION-REGISTRY §6a.9 layer 1 — a register-request with no system/signature at its invariant pointer MUST be refused; ownership proof is the floor beneath every policy mode")
 	r.Declare("revoke_request_publishes_revocation", "EXTENSION-REGISTRY §6a.9 — revoke-request MUST publish a verifying revocation at the by-target index, which is the §2.1 step-4 signal a resolver excludes the binding on. Revocation is ADDITIVE: the immutable binding and its by-name pointer stay put.")
 	r.Declare("renew_request_accepted", "EXTENSION-REGISTRY §6a.9 — renew-request extends an existing binding's expiry")
@@ -513,7 +513,17 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 		if out, ok := r.Require("pending_pointer_resolves"); !ok {
 			return out
 		}
-		status, code, resp, _, err := issuerRegisterResp(ctx, client, uri, manualName)
+		// Vary a SCHEMA-CARRIED field, per §6a.9.3 R4 [RULED 2026-08-14].
+		// This vector used to send a byte-identical repeat and then assert
+		// the pending_hash CHANGED — two defects in one: a pending-binding
+		// carries no nonce, so two identical requests inside one millisecond
+		// encode identically and content-address to ONE body. That collapse
+		// is correct ("one head, one hash"), so the old assertion FAILed a
+		// conformant peer on timing, and the vector was unobservable when it
+		// did not. core-rust reported the fragility; arch ruled the collapse
+		// intended and made varying a carried field the obligation.
+		supersedingTTL := uint64(7_200_000)
+		status, code, resp, _, err := issuerRegisterRespTTL(ctx, client, uri, manualName, &supersedingTTL)
 		if err != nil {
 			return FailCheck("superseding register-request: " + err.Error())
 		}
@@ -525,9 +535,9 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 		if !ok {
 			return FailCheck("superseding request returned no pending_hash")
 		}
-		if newPH == manualPendingHash {
-			return FailCheck("superseding request returned the SAME pending_hash — the head was not replaced")
-		}
+		// NOT asserted: newPH != manualPendingHash. §6a.9.3 R4 forbids using
+		// "the pending_hash changed" as the supersession signal. The signal
+		// is the POINTER, and the body it names.
 		ptr := types.PendingBindingByRequestPath(string(client.LocalPeerID()), manualName)
 		ent, _, err := client.TreeGet(ctx, ptr)
 		if err != nil {
@@ -536,8 +546,24 @@ func runRegistryIssuer(ctx context.Context, client *PeerClient) []CheckResult {
 		if ent.ContentHash != newPH {
 			return FailCheck("by-request pointer still names the superseded head — §6a.9.3 [MUST]: one pending head per (target_peer_id, name)")
 		}
+		// The observable that replaces the hash-inequality check: the body the
+		// pointer now names MUST carry the superseding request's terms. This
+		// is what "the head was replaced" actually means, and unlike a hash
+		// comparison it cannot pass by accident of clock resolution.
+		pend, perr := types.PendingBindingDataFromEntity(ent)
+		if perr != nil {
+			return FailCheck("by-request pointer resolves to something that is not a pending-binding: " + perr.Error())
+		}
+		if pend.RequestedTTL == nil || *pend.RequestedTTL != supersedingTTL {
+			got := "absent"
+			if pend.RequestedTTL != nil {
+				got = fmt.Sprintf("%d", *pend.RequestedTTL)
+			}
+			return FailCheck(fmt.Sprintf("the head names requested_ttl=%s but the superseding request sent %d"+
+				" — the pointer moved to a body that is not the superseding one", got, supersedingTTL))
+		}
 		manualPendingHash = newPH
-		return PassCheck("a repeat request superseded the head; the pointer names the new body")
+		return PassCheck("a repeat request superseded the head; the pointer names a body carrying the superseding terms")
 	}))
 
 	// REG-PENDING-DECIDE-1, deny half. Run FIRST and on the name already in
@@ -1192,9 +1218,24 @@ func setIssuerPolicy(ctx context.Context, client *PeerClient, policy types.Issue
 // validator as target_peer_id. It does NOT publish the ownership proof — see
 // issuerRegister for the signed path.
 func buildRegisterRequest(client *PeerClient, name string) (entity.Entity, error) {
+	return buildRegisterRequestTTL(client, name, nil)
+}
+
+// buildRegisterRequestTTL builds a register-request carrying an explicit
+// `requested_ttl`, the SCHEMA-CARRIED field the supersession vector varies.
+//
+// §6a.9.3 R4 [RULED 2026-08-14]: a pending-binding carries no nonce, so two
+// retries of one intent inside a single millisecond encode identically and
+// content-address to ONE body. That collapse is correct and intended — one
+// head, one hash — so a supersession vector MUST vary a field the schema
+// carries (`requested_ttl` / `transports`), never the nonce, and no
+// implementation may use "the `pending_hash` changed" as its supersession
+// signal.
+func buildRegisterRequestTTL(client *PeerClient, name string, ttl *uint64) (entity.Entity, error) {
 	return types.RegistryRegisterRequestData{
 		Name:         name,
 		TargetPeerID: string(client.LocalPeerID()),
+		RequestedTTL: ttl,
 		Nonce:        issuerNonce(),
 		IssuedAt:     uint64(time.Now().UnixMilli()),
 	}.ToEntity()
@@ -1239,6 +1280,18 @@ func issuerRegister(ctx context.Context, client *PeerClient, uri, name string) (
 // issuerRegisterResp is issuerRegister with the full response kept, for the
 // one row whose value may ride in the RESULT body rather than as an error
 // code (§6a.9's 202 — see policy_manual_queues).
+func issuerRegisterRespTTL(ctx context.Context, client *PeerClient, uri, name string, ttl *uint64) (uint, string, types.ExecuteResponseData, hash.Hash, error) {
+	reqEnt, err := buildRegisterRequestTTL(client, name, ttl)
+	if err != nil {
+		return 0, "", types.ExecuteResponseData{}, hash.Hash{}, fmt.Errorf("build request: %w", err)
+	}
+	if err := publishOwnershipProof(ctx, client, reqEnt); err != nil {
+		return 0, "", types.ExecuteResponseData{}, hash.Hash{}, err
+	}
+	status, code, resp, err := issuerDispatchFull(ctx, client, uri, peerissued.OpRegisterRequest, reqEnt)
+	return status, code, resp, reqEnt.ContentHash, err
+}
+
 func issuerRegisterResp(ctx context.Context, client *PeerClient, uri, name string) (uint, string, types.ExecuteResponseData, hash.Hash, error) {
 	reqEnt, err := buildRegisterRequest(client, name)
 	if err != nil {

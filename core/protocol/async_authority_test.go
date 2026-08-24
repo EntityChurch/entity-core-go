@@ -148,10 +148,20 @@ func TestRemoteInboxDeliveryCarriesDeliverToken(t *testing.T) {
 
 // TestRemoteInboxDeliveryRejectsForeignDeliverToken pins the guard: a
 // deliver_token that does not name us as grantee cannot authorize a dispatch
-// we author (V7 §5.2 `grantee == author`), so it MUST NOT be presented as the
-// delivery's capability. The local-async entry point synthesizes a token from
-// the caller's own HandlerGrant, which is locally rooted and grants us nothing
-// at a remote peer — that is the case this guard keeps off the wire.
+// we author (V7 §5.2 `grantee == author`).
+//
+// STRENGTHENED for EXTENSION-CONTINUATION §3.6a (v1.22). This test used to
+// assert only that such a token is not PRESENTED as the delivery's
+// capability — and then let the delivery proceed on the connection's session
+// authority. §3.6a makes that fallback an explicit MUST NOT: "the receiver
+// MUST refuse the delivery … MUST NOT fall back to the connection's session
+// capability, to the inbound dispatch capability, or to any other capability
+// it happens to hold."
+//
+// The old assertion passed under both the conformant and the non-conformant
+// behaviour, which is why it never caught the fallback it sat next to. It now
+// asserts the refusal, and keeps the original property as the second half:
+// nothing reaches the wire at all.
 func TestRemoteInboxDeliveryRejectsForeignDeliverToken(t *testing.T) {
 	var captured capturedDispatch
 	d, _, _ := newDeliveryDispatcher(t, &captured)
@@ -169,13 +179,14 @@ func TestRemoteInboxDeliveryRejectsForeignDeliverToken(t *testing.T) {
 	token := mintToken(t, requesterHash, strangerIdentity.ContentHash)
 
 	execData := types.ExecuteData{RequestID: "req-2", DeliverTo: spec, DeliverToken: token.ContentHash}
-	if err := d.deliverToInbox(context.Background(), execData, stubResponse(t), token, nil); err != nil {
-		t.Fatalf("deliverToInbox: %v", err)
+	err = d.deliverToInbox(context.Background(), execData, stubResponse(t), token, nil)
+	if err == nil {
+		t.Fatal("deliverToInbox accepted a deliver_token granted to a third party — §3.6a requires the delivery be REFUSED, not re-authorized under whatever else we hold")
 	}
 
-	for _, ad := range captured.async {
-		if ad != nil && ad.CapabilityOverride != nil {
-			t.Fatalf("a deliver_token granted to somebody else was presented as the delivery capability — it can only fail `grantee != author` at the far side")
-		}
+	// And the original property, which the refusal subsumes: nothing was
+	// dispatched, so no other credential was substituted on the way out.
+	if len(captured.async) != 0 || captured.uri != "" {
+		t.Fatalf("a delivery was dispatched despite an unusable deliver_token (uri=%q) — the fallback §3.6a forbids", captured.uri)
 	}
 }

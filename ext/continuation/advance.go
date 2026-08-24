@@ -578,6 +578,15 @@ func (h *Handler) executeDispatch(ctx context.Context, hctx *handler.HandlerCont
 	// Step 4: deliver_to on continuation becomes deliver_to on the dispatched EXECUTE.
 	if cont.DeliverTo != nil {
 		opts = append(opts, handler.WithDeliverTo(cont.DeliverTo))
+		// §4.2 Step 4 line 2, now defined by §3.6a as
+		// `mint_result_deliver_token`. Go implemented line 1 and never this
+		// one, so a cross-peer continuation asked a peer to deliver a result
+		// back without authorizing it to, and each impl improvised the
+		// absent-field case differently — go fell back to connection
+		// authority (which is why go→go passed), rust presented the inbound
+		// dispatch cap and was refused `grantee != author`. §3.6a now makes
+		// both the mint and the receiver's refusal MUSTs.
+		opts = append(opts, handler.WithDeliverTokenMint())
 	}
 
 	// Step 5: Capability — dispatch_capability is required (W9).
@@ -591,6 +600,13 @@ func (h *Handler) executeDispatch(ctx context.Context, hctx *handler.HandlerCont
 		return nil, &errInvalidContinuation{msg: "dispatch_capability entity not in content store"}
 	}
 	opts = append(opts, handler.WithCapability(capEnt))
+	// §3.6b [MUST]: the dispatch_capability is the advance's CALLER capability
+	// too, not merely its level-1 gate. The advance is a new chain root; the
+	// delivery that woke it is a trigger, not a caller. Without this the
+	// onward dispatch runs under the delivery's authority — the escalation
+	// §3.6b and V7 §6.8 both forbid, and the one that made a continuation's
+	// effective authority depend on who delivered the trigger.
+	opts = append(opts, handler.WithCallerCapability(capEnt))
 
 	// Cross-peer chain transport (EXTENSION-CONTINUATION §4.2 case 3 / §4.3
 	// / §8.1): the dispatched EXECUTE to a remote target MUST carry the

@@ -307,6 +307,7 @@ func (h *Handler) performMerge(ctx context.Context, hctx *handler.HandlerContext
 
 	// Recursive three-way merge — skips unchanged subtrees via hash comparison.
 	mergedBindings, deletions, conflicts := trieMergeBindings(
+		ctx,
 		hctx.Store, hctx, params.Prefix, params.Strategy,
 		ancestorVer.Root, mergeLocalRoot, mergeRemoteRoot,
 		mergeLocalHead, mergeRemoteVersion,

@@ -37,7 +37,42 @@ func installContinuationFromData(ctx context.Context, client *PeerClient, path s
 	// check matches against any peer's namespace, not just the granter's.
 	resources := []string{"/*/*"}
 	if cont.Resource != nil && len(cont.Resource.Targets) > 0 {
-		resources = cont.Resource.Targets
+		// Qualify peer-relative targets to the TARGET peer's namespace.
+		//
+		// The same §PR-8 trap the comment above describes for bare "*",
+		// one case over: a cap resource pattern canonicalizes against the
+		// GRANTER — us, the validator — while the dispatch's resource target
+		// canonicalizes against the peer executing it. A peer-relative
+		// `system/validate/x` in this cap therefore names
+		// /{validator_pid}/system/validate/x and matches nothing the peer
+		// dispatches. The absolute form names the peer's namespace explicitly
+		// regardless of who signs it, which is why the rexec fixture has
+		// always built its grant that way.
+		//
+		// This was invisible until EXTENSION-CONTINUATION §3.6b: the advance
+		// used to run under the DELIVERY's capability — our broad connect
+		// cap — which covered the target anyway. The fixture was asserting
+		// that escalation, not the rule (§3.6b: "fix the fixture, not the
+		// rule"). Under §3.6b the advance runs under this capability alone,
+		// so a mis-namespaced pattern now fails, correctly.
+		targetPeer := peerFromTargetURI(cont.Target)
+		resources = make([]string, 0, len(cont.Resource.Targets))
+		for _, t := range cont.Resource.Targets {
+			if targetPeer != "" && !strings.HasPrefix(t, "/") {
+				resources = append(resources, "/"+targetPeer+"/"+t)
+				continue
+			}
+			resources = append(resources, t)
+		}
+	}
+	// The on_error route is a dispatch the continuation makes under its OWN
+	// authority too, to a DIFFERENT resource than the forward target. §4.2
+	// requires the dispatch_capability cover the resource of every dispatch it
+	// authorizes, so the sink belongs in scope. Same fixture defect as above,
+	// one dispatch over — and it was equally invisible while the advance ran
+	// under the delivery's broader capability.
+	if cont.OnError != nil && cont.OnError.URI != "" {
+		resources = append(resources, entity.NormalizePath(cont.OnError.URI))
 	}
 	dispatchCap, dispatchSig, err := client.CreateDispatchCapability(
 		[]string{handlerPattern}, resources, []string{cont.Operation},
@@ -376,6 +411,19 @@ func installJoinFromData(ctx context.Context, client *PeerClient, path string, j
 // handlerFromTargetURI extracts the handler pattern from an entity URI.
 // "entity://peer/system/inbox" → "system/inbox". Returns the input unchanged
 // for non-URI targets.
+// peerFromTargetURI returns the peer_id from an `entity://{peer}/rest` target,
+// or "" when the target carries none (a peer-relative handler path).
+func peerFromTargetURI(target string) string {
+	if !strings.HasPrefix(target, "entity://") {
+		return ""
+	}
+	rest := strings.TrimPrefix(target, "entity://")
+	if idx := strings.Index(rest, "/"); idx >= 0 {
+		return rest[:idx]
+	}
+	return rest
+}
+
 func handlerFromTargetURI(target string) string {
 	if !strings.HasPrefix(target, "entity://") {
 		return target

@@ -1,6 +1,7 @@
 package revision
 
 import (
+	"context"
 	"sort"
 
 	"go.entitychurch.org/entity-core-go/core/handler"
@@ -24,6 +25,7 @@ import (
 //
 // configPrefix is used only for merge strategy lookup, not for output paths.
 func trieMergeBindings(
+	ctx context.Context,
 	cs store.ContentStore,
 	hctx *handler.HandlerContext,
 	configPrefix, strategyOverride string,
@@ -43,7 +45,7 @@ func trieMergeBindings(
 	nodeRemote := loadOrEmpty(cs, remoteRoot)
 
 	mergeNodes(
-		cs, hctx, configPrefix, strategyOverride,
+		ctx, cs, hctx, configPrefix, strategyOverride,
 		nodeBase, nodeLocal, nodeRemote,
 		localVersion, remoteVersion,
 		merged, &deletions, &conflicts,
@@ -70,6 +72,7 @@ func loadOrEmpty(cs store.ContentStore, h hash.Hash) types.SnapshotNodeData {
 // site and lifts leaf-bucket tuples up into the merged map per the
 // per-key merge logic.
 func mergeNodes(
+	ctx context.Context,
 	cs store.ContentStore,
 	hctx *handler.HandlerContext,
 	configPrefix, strategyOverride string,
@@ -103,7 +106,7 @@ func mergeNodes(
 		// at this bitmap position into a per-key map; merge per key.
 		_, _, _ = hB, hL, hR
 		mergeEntries(
-			cs, hctx, configPrefix, strategyOverride,
+			ctx, cs, hctx, configPrefix, strategyOverride,
 			eB, eL, eR,
 			localVersion, remoteVersion,
 			merged, deletions, conflicts,
@@ -133,6 +136,7 @@ func entryAt(node types.SnapshotNodeData, p int) (*types.NodeEntry, hash.Hash) {
 // caller short-circuits before reaching here. When two of three links
 // match, we still walk per-key because the third may differ.
 func mergeEntries(
+	ctx context.Context,
 	cs store.ContentStore,
 	hctx *handler.HandlerContext,
 	configPrefix, strategyOverride string,
@@ -170,7 +174,7 @@ func mergeEntries(
 		lp := ptrIfPresent(tuplesL, k)
 		rp := ptrIfPresent(tuplesR, k)
 		mergeBindingAtPath(
-			cs, hctx, k, configPrefix, strategyOverride,
+			ctx, cs, hctx, k, configPrefix, strategyOverride,
 			bp, lp, rp,
 			localVersion, remoteVersion,
 			merged, deletions, conflicts,
@@ -227,6 +231,7 @@ func trailingZeros32(u uint32) int {
 // nil side means "absent" (which today's deletion-vs-modify rules treat
 // as "haven't seen yet", not "intentional delete").
 func mergeBindingAtPath(
+	ctx context.Context,
 	cs store.ContentStore,
 	hctx *handler.HandlerContext,
 	relativeKey, configPrefix, strategyOverride string,
@@ -292,8 +297,8 @@ func mergeBindingAtPath(
 			return
 		}
 
-		strategy := findMergeStrategy(hctx, configPrefix, relativeKey, strategyOverride)
-		result := applyMergeStrategy(cs, strategy, relativeKey, hashBase, hashLocal, hashRemote)
+		choice := findMergeStrategy(hctx, configPrefix, relativeKey, strategyOverride, hashLocal, hashRemote)
+		result := applyMergeStrategy(ctx, hctx, cs, choice, relativeKey, hashBase, hashLocal, hashRemote)
 
 		if result.resolved {
 			merged[relativeKey] = result.hash
@@ -303,7 +308,7 @@ func mergeBindingAtPath(
 		} else {
 			conflict := types.RevisionConflictData{
 				Path:          relativeKey,
-				Strategy:      string(strategy),
+				Strategy:      string(choice.strategy),
 				VersionLocal:  localVersion,
 				VersionRemote: remoteVersion,
 			}

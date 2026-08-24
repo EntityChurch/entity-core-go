@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -14,7 +15,90 @@ import (
 	"time"
 
 	"go.entitychurch.org/entity-core-go/cmd/internal/validate"
+	"go.entitychurch.org/entity-core-go/core/crypto"
+	"go.entitychurch.org/entity-core-go/core/peer"
+	"go.entitychurch.org/entity-core-go/core/types"
 )
+
+// writeAdminSeedPolicy loads the named identity, resolves its identity-entity
+// hash, and writes a seed-policy file in the KEYSTONE CANONICAL format
+// (protocol-generator/shared/seed-policy/seed-policy.schema.json — the
+// operator-admin.json shape): {"version":1,"entries":[{"grantee":"<hex>",
+// "grants":[...]}]}. The single entry grants THAT identity (keyed by its 66-char
+// hex, never `default`) the open-access grant set; unknown peers match no entry
+// and fall to the intrinsic §4.4 discovery floor, staying gated by the
+// initial-grant policy — the restrictive posture a gating check needs, with the
+// one exception that the admin can stage its own setup. Returns the file path.
+func writeAdminSeedPolicy(identityName string) (string, error) {
+	kp, err := crypto.LoadIdentity(identityName)
+	if err != nil {
+		return "", fmt.Errorf("load identity %q: %w", identityName, err)
+	}
+	id, err := kp.IdentityEntity()
+	if err != nil {
+		return "", fmt.Errorf("identity entity for %q: %w", identityName, err)
+	}
+	doc := struct {
+		Version int `json:"version"`
+		Entries []struct {
+			Comment string             `json:"_comment,omitempty"`
+			Grantee string             `json:"grantee"`
+			Grants  []types.GrantEntry `json:"grants"`
+		} `json:"entries"`
+	}{Version: 1}
+	doc.Entries = append(doc.Entries, struct {
+		Comment string             `json:"_comment,omitempty"`
+		Grantee string             `json:"grantee"`
+		Grants  []types.GrantEntry `json:"grants"`
+	}{
+		Comment: "admin-seeded-restrictive: broad write for " + identityName + " only; unknown peers gated by the initial-grant policy",
+		Grantee: hex.EncodeToString(id.ContentHash.Bytes()),
+		Grants:  peer.OpenAccessGrants(),
+	})
+	raw, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal seed policy: %w", err)
+	}
+	// Write into $HOME/.entity — the ONE directory podmanRunBase bind-mounts into
+	// every container peer (as homeEntity). os.TempDir() is host-only and is NOT
+	// visible inside the rust/python containers, so a policy written there loaded
+	// on go (native) but silently vanished on the siblings — the peer came up
+	// unseeded and non-restrictive, defeating the gating posture. The seed-policies/
+	// subdir keeps it out of the peers/ + store/ tree; the name is deterministic
+	// per identity (not timestamped) so it neither accumulates nor races between
+	// the adm1/adm2 pair, which seed an identical policy.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	dir := filepath.Join(home, ".entity", "seed-policies")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create seed-policy dir %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, fmt.Sprintf("entity-seed-policy-%s.json", identityName))
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		return "", fmt.Errorf("write seed policy %s: %w", path, err)
+	}
+	return path, nil
+}
+
+// containerSeedPolicyPath maps a host seed-policy path (under $HOME/.entity, per
+// writeAdminSeedPolicy) to where it appears INSIDE a container peer, whose
+// homeEntity mount target ("/root/.entity", "/home/entity/.entity") stands in for
+// the host's $HOME/.entity. Go peers run native and use the host path directly;
+// only the rust/python container starts need this translation.
+func containerSeedPolicyPath(hostPath, homeEntity string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return hostPath
+	}
+	hostEntity := filepath.Join(home, ".entity")
+	rel, err := filepath.Rel(hostEntity, hostPath)
+	if err != nil {
+		return hostPath
+	}
+	return filepath.Join(homeEntity, rel)
+}
 
 // The sibling-surface verification pin — ONE pin for every present-tense
 // "honored by …" / "absent from …" claim in this file.
@@ -72,6 +156,7 @@ func cmdStart(args []string) {
 	peerType := fs.String("type", "go", "peer type: go, rust, python")
 	addr := fs.String("addr", "127.0.0.1:0", "listen address (default: random port)")
 	openAccess := fs.Bool("open-access", true, "grant open access to connecting peers")
+	adminIdentity := fs.String("admin-identity", "", "seed a restrictive peer where ONLY this named identity (from ~/.entity/identities/) gets broad write access — unknown peers stay gated by the initial-grant policy. Implies --open-access=false. This is the admin-seeded-restrictive posture the recognize-on-attest / anonymous-deny gating checks need: the validator (run with the same -identity) can stage its setup, but K/M/N are gated so the gate is observable.")
 	debug := fs.Bool("debug", false, "enable debug logging")
 	storage := fs.String("storage", "", "storage backend: memory (default), sqlite (go + rust)")
 	files := fs.String("files", "", "expose filesystem directory (format: name:/path:tree/prefix/) — supported by all three impls' --files flag")
@@ -191,21 +276,50 @@ func cmdStart(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: --keepalive: %v\n", err)
 		os.Exit(1)
 	}
+
+	// --admin-identity establishes the restrictive posture: a per-identity seed
+	// grant for the admin only, and open-access OFF so unknown peers are gated.
+	// --admin-identity establishes the restrictive posture on ALL THREE impls now
+	// that the siblings read the keystone canonical seed-policy container:
+	//   - go    reads --seed-policy-file (entity-peer/main.go)
+	//   - rust  reads --seed-policy (peer.rs with_seed_policy_from_file; refuses
+	//           the flag alongside --debug-grants, so startRustPeer drops the
+	//           unconditional --debug-grants when a policy is set)
+	//   - python reads --seed-policy (entity-cli/main.py); its --debug flag ALSO
+	//           re-enables open-access (main.py: open_access = args.debug or …),
+	//           so startPythonPeer suppresses --debug in this posture — otherwise
+	//           the very gate we want to observe would be hidden.
+	// The single emitted file lives under $HOME/.entity so every container sees it.
+	seedPolicyFile := ""
+	if *adminIdentity != "" {
+		if *peerType != "go" && *peerType != "rust" && *peerType != "python" {
+			fmt.Fprintf(os.Stderr, "Unknown peer type: %s (supported: go, rust, python)\n", *peerType)
+			os.Exit(1)
+		}
+		p, err := writeAdminSeedPolicy(*adminIdentity)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: --admin-identity: %v\n", err)
+			os.Exit(1)
+		}
+		seedPolicyFile = p
+		*openAccess = false
+	}
+
 	switch *peerType {
 	case "go":
-		entry = startGoPeer(*name, *addr, *debug, *openAccess, *files, *history, *storage, *httpAddr, *httpPath, *wsAddr, *wsPath, *keyType, *hashType, registryPeerIDs, *clockTickMs, ka, pollFlags, logFile, lf)
+		entry = startGoPeer(*name, *addr, *debug, *openAccess, *files, *history, *storage, *httpAddr, *httpPath, *wsAddr, *wsPath, *keyType, *hashType, registryPeerIDs, *clockTickMs, ka, pollFlags, logFile, seedPolicyFile, lf)
 	case "rust":
 		// [historical] Rust 474bb11 (Chunk D), 58d9188 (Chunk E flags), 0616727 (v7.70 home-format).
 		// Rust ships --ws-listen for NETWORK §6.5.2b; cohort flag string is
 		// --ws-addr at the peer-manager boundary, translated below.
-		entry = startRustPeer(*name, *addr, *debug, *storage, *history, *files, *httpAddr, *httpPath, *wsAddr, *keyType, *hashType, ka, pollFlags, logFile, lf)
+		entry = startRustPeer(*name, *addr, *debug, *storage, *history, *files, *httpAddr, *httpPath, *wsAddr, *keyType, *hashType, ka, pollFlags, logFile, seedPolicyFile, lf)
 	case "python":
 		// [historical] Python aligned with Chunk D and 74b3335 (Chunk E flags); Python
 		// ships --key-type from f231406 and --hash-type from ff6d1e2 (v7.70).
 		if *wsAddr != "" {
 			fmt.Fprintf(os.Stderr, "Note: --ws-addr has no Python equivalent; ignored for Python peer %q\n", *name)
 		}
-		entry = startPythonPeer(*name, *addr, *debug, *openAccess, *history, *files, *httpAddr, *httpPath, *keyType, *hashType, ka, pollFlags, logFile, lf)
+		entry = startPythonPeer(*name, *addr, *debug, *openAccess, *history, *files, *httpAddr, *httpPath, *keyType, *hashType, ka, pollFlags, logFile, seedPolicyFile, lf)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown peer type: %s (supported: go, rust, python)\n", *peerType)
 		os.Exit(1)
@@ -340,7 +454,7 @@ func (ka keepaliveSpec) args(dash string) []string {
 
 // --- Go peer ---
 
-func startGoPeer(name, addr string, debug, openAccess bool, files, history, storage, httpAddr, httpPath, wsAddr, wsPath, keyType, hashType, inboxRelayRegistry string, clockTickMs uint64, keepalive keepaliveSpec, poll chunkEFlags, logFile string, lf *os.File) *PeerEntry {
+func startGoPeer(name, addr string, debug, openAccess bool, files, history, storage, httpAddr, httpPath, wsAddr, wsPath, keyType, hashType, inboxRelayRegistry string, clockTickMs uint64, keepalive keepaliveSpec, poll chunkEFlags, logFile, seedPolicyFile string, lf *os.File) *PeerEntry {
 	readyFile := filepath.Join(os.TempDir(), fmt.Sprintf("entity-peer-%s-%d.ready", name, time.Now().UnixNano()))
 
 	// Pass -name so the Go peer loads (or creates) its keypair at
@@ -366,6 +480,9 @@ func startGoPeer(name, addr string, debug, openAccess bool, files, history, stor
 	}
 	if openAccess {
 		cmdArgs = append(cmdArgs, "-open-access")
+	}
+	if seedPolicyFile != "" {
+		cmdArgs = append(cmdArgs, "-seed-policy-file", seedPolicyFile)
 	}
 	if debug {
 		cmdArgs = append(cmdArgs, "-debug")
@@ -519,7 +636,7 @@ func findGoBinary() string {
 
 // --- Rust peer ---
 
-func startRustPeer(name, addr string, debug bool, storage, history, files, httpAddr, httpPath, wsAddr, keyType, hashType string, keepalive keepaliveSpec, poll chunkEFlags, logFile string, lf *os.File) *PeerEntry {
+func startRustPeer(name, addr string, debug bool, storage, history, files, httpAddr, httpPath, wsAddr, keyType, hashType string, keepalive keepaliveSpec, poll chunkEFlags, logFile, seedPolicyFile string, lf *os.File) *PeerEntry {
 	requirePodman()
 	rustDir := findRustDir()
 	rustImage := envOr("ENTITY_RUST_IMAGE", defaultRustImage)
@@ -532,8 +649,8 @@ func startRustPeer(name, addr string, debug bool, storage, history, files, httpA
 	spec := containerSpec{
 		name:       name,
 		image:      rustImage,
-		homeEntity: "/root/.entity", // rust runtime image runs as root
-		userns:     false,           // container root maps to host user; bind-mount is writable without keep-id
+		homeEntity: rustHomeEntity, // rust runtime image runs as root
+		userns:     false,          // container root maps to host user; bind-mount is writable without keep-id
 		filesArg:   files,
 		addr:       addr,
 		logFile:    logFile,
@@ -555,12 +672,22 @@ func startRustPeer(name, addr string, debug bool, storage, history, files, httpA
 	initCheck.Stdout = lf
 	initCheck.Run() // Ignore error — may already exist.
 
-	// Build command: entity peer -v start <name> -l <addr> --debug-grants
+	// Build command: entity peer -v start <name> -l <addr> [--debug-grants | --seed-policy <file>]
 	cmdArgs := []string{"peer", "-v"}
 	if debug {
 		cmdArgs = append(cmdArgs, "--trace-entities")
 	}
-	cmdArgs = append(cmdArgs, "start", name, "-l", addr, "--debug-grants")
+	cmdArgs = append(cmdArgs, "start", name, "-l", addr)
+	// Admission posture. --debug-grants is the default open floor; the
+	// admin-seeded-restrictive posture replaces it with a --seed-policy file
+	// (keystone canonical container, read by rust's with_seed_policy_from_file).
+	// Rust REFUSES the two together at the clap level (open grants would hide the
+	// exact gate the policy declares), so it is one XOR the other — never both.
+	if seedPolicyFile != "" {
+		cmdArgs = append(cmdArgs, "--seed-policy", containerSeedPolicyPath(seedPolicyFile, spec.homeEntity))
+	} else {
+		cmdArgs = append(cmdArgs, "--debug-grants")
+	}
 	if storage != "" {
 		cmdArgs = append(cmdArgs, "--storage", storage)
 	}
@@ -630,8 +757,11 @@ func startRustPeer(name, addr string, debug bool, storage, history, files, httpA
 		// public PeerBuilder::handler seam entity-signaling-node uses, so any
 		// peer can serve it. Rust's own flag doc requires pairing it with an
 		// admission posture — the handler is registered but grants nobody
-		// access, and without one every verb is 403 at the §4.4 floor. We
-		// pass --debug-grants unconditionally above, so that pairing holds.
+		// access, and without one every verb is 403 at the §4.4 floor. The
+		// default --debug-grants above supplies that pairing; the
+		// admin-seeded-restrictive posture (--seed-policy, no --debug-grants) is
+		// for gating validation, not for serving a signaling node, and the two
+		// are not combined.
 		cmdArgs = append(cmdArgs, "--signaling-node")
 	}
 	if poll.publishDescriptors {
@@ -779,7 +909,7 @@ func discoverPeerID(addr string) string {
 
 // --- Python peer ---
 
-func startPythonPeer(name, addr string, debug, openAccess bool, history, files, httpAddr, httpPath, keyType, hashType string, keepalive keepaliveSpec, poll chunkEFlags, logFile string, lf *os.File) *PeerEntry {
+func startPythonPeer(name, addr string, debug, openAccess bool, history, files, httpAddr, httpPath, keyType, hashType string, keepalive keepaliveSpec, poll chunkEFlags, logFile, seedPolicyFile string, lf *os.File) *PeerEntry {
 	// Identity provisioning. [historical] Python 91f8f77 ships the algorithm-tagged PEM
 	// loader, so the prior Ed448 skip can drop.
 	if err := ensureIdentity(name, keyType); err != nil {
@@ -805,10 +935,22 @@ func startPythonPeer(name, addr string, debug, openAccess bool, history, files, 
 		// flag still work for ed25519 identities.
 		cmdArgs = append(cmdArgs, "--key-type", keyType)
 	}
-	if debug {
+	// Python's --debug ALSO turns on open-access (main.py: open_access =
+	// bool(args.debug) or …), so under the admin-seeded-restrictive posture it
+	// would silently re-open the very gate the seed policy declares. Suppress it
+	// there — the trace output is not worth defeating the posture. (Rust keeps its
+	// --trace-entities under the same posture because rust does NOT conflate the
+	// two; only python does.)
+	if debug && seedPolicyFile == "" {
 		cmdArgs = append(cmdArgs, "--debug")
 	}
-	if openAccess {
+	if seedPolicyFile != "" {
+		// Admin-seeded-restrictive: the keystone canonical container, read by
+		// python's with_seed_policy_from_file. The admin identity gets write;
+		// unknown peers stay gated. Mutually exclusive with --open-access (set
+		// false by the dispatcher) and --debug (suppressed above).
+		cmdArgs = append(cmdArgs, "--seed-policy", containerSeedPolicyPath(seedPolicyFile, pythonHomeEntity))
+	} else if openAccess {
 		// Python's open-access flag — cross-impl-aligned with Go's --open-access
 		// and Rust's --debug-grants. Without this, the Python peer narrows
 		// authorization on system/inbox/* reads/extracts/merges, producing
@@ -950,8 +1092,8 @@ func startPythonPeer(name, addr string, debug, openAccess bool, history, files, 
 	return runContainerPeer(containerSpec{
 		name:       name,
 		image:      pyImage,
-		homeEntity: "/home/entity/.entity", // python runtime image runs as USER entity
-		userns:     true,                   // map host uid 1000 → container `entity` (1000) so the bind-mount is writable
+		homeEntity: pythonHomeEntity, // python runtime image runs as USER entity
+		userns:     true,             // map host uid 1000 → container `entity` (1000) so the bind-mount is writable
 		filesArg:   files,
 		args:       cmdArgs,
 		addr:       addr,

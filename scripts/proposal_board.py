@@ -85,8 +85,10 @@ def tokens(path):
 MAX_DF = 3
 
 
-def distinctive_sets(pdir, active):
-    raw = {p: tokens(os.path.join(pdir, p + ".md")) for p in active}
+def distinctive_sets(paths, active):
+    # paths: proposal name -> absolute file path. Was `pdir` + name + ".md",
+    # which broke when proposals moved into state subdirectories.
+    raw = {p: tokens(paths[p]) for p in active}
     df = collections.Counter()
     for toks in raw.values():
         for t in toks:
@@ -138,8 +140,38 @@ def grep_count(tok):
 
 def main():
     pdir = os.path.join(ARCH, "docs/proposals")
-    active = sorted(x[:-3] for x in os.listdir(pdir)
-                    if x.startswith("PROPOSAL-") and x.endswith(".md"))
+
+    # WALK, do not listdir. Arch restructured docs/proposals/ into state
+    # directories on 2026-08-13 (`1e80f40`, "tier is the second axis") —
+    # active/ deferred/ implemented/ superseded/, each with its own subtree.
+    # This function used a FLAT os.listdir + PROPOSAL-*.md filter, so from
+    # that commit it matched nothing and the board printed a clean, empty,
+    # confident-looking table: zero rows, no error, "nothing owed."
+    #
+    # That is the failure shape this repo keeps finding and it is the worst
+    # one — not a wrong answer, an authoritative-looking absence. A tool that
+    # reports "no findings" because it looked at nothing is indistinguishable
+    # from one that looked and found nothing, which is why the guard below
+    # exists and why it is fatal rather than a warning.
+    #
+    # The restructure is also an UPGRADE we now consume: proposal state used
+    # to be prose inside the file; it is now the directory. This board is
+    # about ACTIVE proposals, so read active/ and stop guessing.
+    active_dir = os.path.join(pdir, "active")
+    scan_root = active_dir if os.path.isdir(active_dir) else pdir
+    paths = {}
+    for dirpath, _dirnames, filenames in os.walk(scan_root):
+        for x in filenames:
+            if x.startswith("PROPOSAL-") and x.endswith(".md"):
+                paths[x[:-3]] = os.path.join(dirpath, x)
+    active = sorted(paths)
+
+    if not active:
+        sys.exit(
+            "proposal_board: found ZERO proposals under %s.\n"
+            "This is a discovery failure, not an empty backlog — refusing to print an\n"
+            "empty board that would read as 'nothing is fold-owed'. Check whether the\n"
+            "arch proposals tree moved again." % scan_root)
 
     cited = collections.Counter()
     if REG and os.path.exists(REG):
@@ -157,7 +189,7 @@ def main():
     print("-" * 100)
 
     landed = landed_corpus()
-    distinct = distinctive_sets(pdir, active)
+    distinct = distinctive_sets(paths, active)
     buckets = collections.defaultdict(list)
     for p in active:
         toks = distinct[p]
@@ -192,8 +224,25 @@ def main():
     print()
 
     if buckets["folded"]:
-        print("ALREADY FOLDED (%d) — built here, and the concepts ARE in a landed spec:"
+        # NOT "already folded". This bucket means only: the fuzzy concept
+        # matcher found no token that is absent from every landed spec. That is
+        # a WEAK signal and it over-claims in one specific direction — a
+        # proposal still in DRAFT whose vocabulary happens to overlap landed
+        # prose lands here and reads as done.
+        #
+        # Measured 2026-08-14: of the 10 rows in this bucket, THREE are marked
+        # DRAFT in arch's own WORKSTREAMS (APP-CONVENTION-CHAT,
+        # INBOX-OPEN-DELIVERY-ADMISSION with an open [ASK-ARCH-CAP-1], and
+        # SUB-PEER-ISOLATION-MODEL) and seven are not tracked there at all. The
+        # header used to read "ALREADY FOLDED — built here, and the concepts
+        # ARE in a landed spec", which is a claim this data cannot support, and
+        # it was reported upward as fact.
+        print("NO UNFOLDED CONCEPTS DETECTED (%d) — WEAK SIGNAL, NOT A FOLD VERDICT:"
               % len(buckets["folded"]))
+        print("    The fuzzy matcher found nothing in our tree that is absent from every")
+        print("    landed spec. That is not evidence the proposal is folded — a DRAFT whose")
+        print("    vocabulary overlaps landed prose looks identical here. Cross-check arch's")
+        print("    WORKSTREAMS before reporting any of these as done.")
         for p, _ in buckets["folded"]:
             print(f"    {p}")
         print()

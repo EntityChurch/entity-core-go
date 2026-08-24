@@ -79,6 +79,15 @@ func (h *Handler) handleMergeConfig(_ context.Context, req *handler.Request) (*h
 		if err := ValidateDeletionResolution(cfg.DeletionResolution); err != nil {
 			return handler.NewErrorResponse(400, "invalid_strategy", err.Error())
 		}
+		// §2.3 also pins the contract for `strategy` itself — and until
+		// 2026-08-14 this path validated ONLY deletion_resolution, so a
+		// config carrying any garbage strategy was accepted and the pinned
+		// rejection could never fire for the field it was written about.
+		// Found by auditing against v3.9 (arch's ask to all three seats),
+		// not by a failing test: nothing measured the accept side.
+		if err := ValidateMergeStrategy(cfg.Strategy, cfg.Handler); err != nil {
+			return handler.NewErrorResponse(400, "invalid_strategy", err.Error())
+		}
 
 		// Idempotent: re-issuing identical content returns no_change.
 		cfgEntity, err := cfg.ToEntity()

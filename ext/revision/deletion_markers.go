@@ -397,7 +397,7 @@ func resolveDeletionStrategy(hctx *handler.HandlerContext, configPrefix, relPath
 		if ValidateDeletionResolution(cfg.DeletionResolution) != nil {
 			continue
 		}
-		if globMatch(cfg.Pattern, relPath) {
+		if mergePatternMatch(cfg.Pattern, relPath) {
 			specificity := patternSpecificity(cfg.Pattern)
 			if specificity > bestSpecificity {
 				bestMatch = deletionStrategy(cfg.DeletionResolution)

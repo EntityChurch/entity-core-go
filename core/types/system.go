@@ -289,8 +289,8 @@ func CapabilityTokenDataFromEntity(e entity.Entity) (CapabilityTokenData, error)
 
 // CapabilityScope defines include/exclude lists for a single capability dimension.
 type CapabilityScope struct {
-	Include []string `cbor:"include"`
-	Exclude []string `cbor:"exclude,omitempty"`
+	Include []string `cbor:"include" json:"include"`
+	Exclude []string `cbor:"exclude,omitempty" json:"exclude,omitempty"`
 }
 
 // MarshalCBOR encodes the scope so an unset Include serializes as an empty
@@ -316,12 +316,17 @@ func (s CapabilityScope) MarshalCBOR() ([]byte, error) {
 
 // GrantEntry is the data for system/capability/grant-entry.
 type GrantEntry struct {
-	Handlers    CapabilityScope  `cbor:"handlers"`
-	Resources   CapabilityScope  `cbor:"resources"`
-	Operations  CapabilityScope  `cbor:"operations"`
-	Peers       *CapabilityScope `cbor:"peers,omitempty"`
-	Constraints cbor.RawMessage  `cbor:"constraints,omitempty"` // primitive/map — narrowing fields
-	Allowances  cbor.RawMessage  `cbor:"allowances,omitempty"`  // primitive/map — expanding fields
+	Handlers   CapabilityScope  `cbor:"handlers" json:"handlers"`
+	Resources  CapabilityScope  `cbor:"resources" json:"resources"`
+	Operations CapabilityScope  `cbor:"operations" json:"operations"`
+	Peers      *CapabilityScope `cbor:"peers,omitempty" json:"peers,omitempty"`
+	// NOTE: constraints/allowances are raw CBOR in memory; over JSON they would
+	// encode as base64, not the keystone schema's object shape. They are
+	// intentionally omitted from JSON here (the seed-policy convention grants
+	// that use them are not yet cross-impl aligned — flagged in the 2026-08-14
+	// cross-impl seed-policy report). The operator-admin/floor grants carry none.
+	Constraints cbor.RawMessage `cbor:"constraints,omitempty" json:"-"` // primitive/map — narrowing fields
+	Allowances  cbor.RawMessage `cbor:"allowances,omitempty" json:"-"`  // primitive/map — expanding fields
 }
 
 // CapabilityGrantData is the data payload for system/capability/grant.

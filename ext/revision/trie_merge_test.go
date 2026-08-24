@@ -1,6 +1,7 @@
 package revision
 
 import (
+	"context"
 	"math/rand"
 	"sort"
 	"testing"
@@ -25,6 +26,7 @@ func TestTrieMerge_AllIdentical(t *testing.T) {
 	hctx.Store = cs
 
 	merged, deletions, conflicts := trieMergeBindings(
+		context.Background(),
 		cs, hctx, "data/", "",
 		root, root, root,
 		hash.Hash{}, hash.Hash{},
@@ -62,6 +64,7 @@ func TestTrieMerge_OneAddedOnOneSide(t *testing.T) {
 	hctx.Store = cs
 
 	merged, deletions, conflicts := trieMergeBindings(
+		context.Background(),
 		cs, hctx, "data/", "",
 		baseRoot, localRoot, remoteRoot,
 		hash.Hash{}, hash.Hash{},
@@ -106,6 +109,7 @@ func TestTrieMerge_BothAddSamePath_DifferentValue(t *testing.T) {
 	hctx.Store = cs
 
 	_, _, conflicts := trieMergeBindings(
+		context.Background(),
 		cs, hctx, "data/", "",
 		baseRoot, localRoot, remoteRoot,
 		hash.Hash{Digest: hash.ExtendDigest([32]byte{1})}, hash.Hash{Digest: hash.ExtendDigest([32]byte{2})},
@@ -165,6 +169,7 @@ func TestTrieMerge_DeleteVsEdit(t *testing.T) {
 	hctx.Store = cs
 
 	merged, _, conflicts := trieMergeBindings(
+		context.Background(),
 		cs, hctx, "data/", "",
 		baseRoot, localRoot, remoteRoot,
 		hash.Hash{Digest: hash.ExtendDigest([32]byte{1})}, hash.Hash{Digest: hash.ExtendDigest([32]byte{2})},
@@ -217,6 +222,7 @@ func TestTrieMerge_DeleteVsEditExplicitDeletionWins(t *testing.T) {
 	storeEntity(t, hctx, "system/revision/config/merge/path/wildcard", "system/revision/merge-config", cfg)
 
 	merged, _, conflicts := trieMergeBindings(
+		context.Background(),
 		cs, hctx, "data/", "",
 		baseRoot, localRoot, remoteRoot,
 		hash.Hash{Digest: hash.ExtendDigest([32]byte{1})}, hash.Hash{Digest: hash.ExtendDigest([32]byte{2})},
@@ -256,6 +262,7 @@ func TestTrieMerge_SubtreeSkip(t *testing.T) {
 	hctx.Store = cs
 
 	merged, deletions, conflicts := trieMergeBindings(
+		context.Background(),
 		cs, hctx, "data/", "",
 		baseRoot, localRoot, remoteRoot,
 		hash.Hash{}, hash.Hash{},
@@ -313,6 +320,7 @@ func TestTrieMerge_BothDeleteSamePath(t *testing.T) {
 	hctx.Store = cs
 
 	merged, deletions, conflicts := trieMergeBindings(
+		context.Background(),
 		cs, hctx, "data/", "",
 		baseRoot, localRoot, remoteRoot,
 		hash.Hash{}, hash.Hash{},
@@ -365,6 +373,7 @@ func TestTrieMerge_NonConflictingEditsOnBothSides(t *testing.T) {
 	hctx.Store = cs
 
 	merged, deletions, conflicts := trieMergeBindings(
+		context.Background(),
 		cs, hctx, "data/", "",
 		baseRoot, localRoot, remoteRoot,
 		hash.Hash{}, hash.Hash{},
@@ -405,6 +414,7 @@ func TestTrieMerge_EmptyBase(t *testing.T) {
 	hctx.Store = cs
 
 	merged, deletions, conflicts := trieMergeBindings(
+		context.Background(),
 		cs, hctx, "data/", "",
 		baseRoot, localRoot, remoteRoot,
 		hash.Hash{}, hash.Hash{},
@@ -449,6 +459,7 @@ func TestTrieMerge_CompressionMismatch(t *testing.T) {
 	hctx.Store = cs
 
 	merged, deletions, conflicts := trieMergeBindings(
+		context.Background(),
 		cs, hctx, "data/", "",
 		baseRoot, localRoot, remoteRoot,
 		hash.Hash{}, hash.Hash{},
@@ -493,6 +504,7 @@ func TestTrieMerge_BothAddSamePath_SameValue(t *testing.T) {
 	hctx.Store = cs
 
 	merged, _, conflicts := trieMergeBindings(
+		context.Background(),
 		cs, hctx, "data/", "",
 		baseRoot, localRoot, remoteRoot,
 		hash.Hash{}, hash.Hash{},
@@ -530,6 +542,7 @@ func TestTrieMerge_DeepSubtreeChange(t *testing.T) {
 	hctx.Store = cs
 
 	merged, deletions, conflicts := trieMergeBindings(
+		context.Background(),
 		cs, hctx, "data/", "",
 		baseRoot, localRoot, remoteRoot,
 		hash.Hash{}, hash.Hash{},
@@ -590,6 +603,7 @@ func TestTrieMerge_DeleteSubtreeVsAddToSubtree(t *testing.T) {
 	hctx.Store = cs
 
 	merged, deletions, conflicts := trieMergeBindings(
+		context.Background(),
 		cs, hctx, "data/", "",
 		baseRoot, localRoot, remoteRoot,
 		hash.Hash{}, hash.Hash{},
@@ -689,6 +703,7 @@ func TestTrieMerge_MatchesFlatMerge(t *testing.T) {
 
 		// Recursive merge.
 		rMerged, rDeletions, rConflicts := trieMergeBindings(
+			context.Background(),
 			cs, hctx, "data/", "",
 			baseRoot, localRoot, remoteRoot,
 			localVersion, remoteVersion,
@@ -699,6 +714,7 @@ func TestTrieMerge_MatchesFlatMerge(t *testing.T) {
 		flatLocal := trieToBindings(cs, localRoot)
 		flatRemote := trieToBindings(cs, remoteRoot)
 		fMerged, fDeletions, fConflicts := mergeSnapshots(
+			context.Background(),
 			hctx, "data/", "",
 			flatBase, flatLocal, flatRemote,
 			localVersion, remoteVersion,

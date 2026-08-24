@@ -116,7 +116,20 @@ func (d *Dispatcher) deliverToInbox(ctx context.Context, execData types.ExecuteD
 				Extras: originalIncluded,
 			})
 		} else {
-			d.debugf("delivery: deliver_token does not name us as grantee; remote delivery falls back to connection authority")
+			// EXTENSION-CONTINUATION §3.6a [MUST]: "When `deliver_token` is
+			// absent or does not name the delivering peer, the receiver MUST
+			// refuse the delivery. It MUST NOT fall back to the connection's
+			// session capability, to the inbound dispatch capability, or to
+			// any other capability it happens to hold."
+			//
+			// This branch WAS that fallback. It is the go half of the
+			// improvisation §3.6a's rationale records: it verifies on a
+			// dialed connection, so go→go passed and the defect was visible
+			// only to the cross-impl pairing — which we then routed at the
+			// peer that reported it, twice. Refusing here is what makes the
+			// missing field observable in the pairing that can see it.
+			return fmt.Errorf("refusing remote inbox delivery to %s: deliver_token absent or does not name us as grantee (EXTENSION-CONTINUATION §3.6a MUST — no fallback to session or dispatch authority)",
+				execData.DeliverTo.URI)
 		}
 		resp, err := d.RemoteExecute(ctx, execData.DeliverTo.URI, op, deliveryEntity, resource, async...)
 		if err != nil {

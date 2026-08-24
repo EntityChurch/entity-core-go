@@ -115,6 +115,7 @@ func (h *Handler) handleRevert(ctx context.Context, req *handler.Request) (*hand
 	// Recursive three-way merge: ancestor=version's root, local=current,
 	// remote=augmented parent (parent with markers at V_target's additions).
 	mergedBindings, deletions, conflicts := trieMergeBindings(
+		ctx,
 		hctx.Store, hctx, params.Prefix, "",
 		revertVer.Root, localVer.Root, augmentedParentRoot,
 		localHead, params.Version,

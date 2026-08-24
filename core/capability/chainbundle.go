@@ -1,12 +1,22 @@
 package capability
 
 import (
+	"errors"
+	"fmt"
+
 	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/store"
 	"go.entitychurch.org/entity-core-go/core/types"
 )
+
+// ErrChainUnreachable is returned when a capability chain cannot be bundled
+// completely — an identity entity for some granter or grantee in the chain is
+// not resolvable locally. EXTENSION-CONTINUATION §4.3 (v1.22) makes this a
+// bundle-time failure: dispatching an incomplete bundle produces a 401 at the
+// far side that names the WRONG peer as the problem.
+var ErrChainUnreachable = errors.New("chain_unreachable")
 
 // StoreResolver wraps a content store as an EntityResolver for chain walks
 // over locally-persisted entities (e.g. a continuation's dispatch_capability
@@ -59,12 +69,34 @@ func CollectChainBundle(
 			signers = append(signers, m.Signers...)
 		}
 		for _, signer := range signers {
-			if idEnt, ok := cs.Get(signer); ok && idEnt.Type == types.TypePeer {
-				bundle[idEnt.ContentHash] = idEnt
-				if sigEnt, ok := findBoundSignature(cs, li, capEnt.ContentHash, idEnt); ok {
-					bundle[sigEnt.ContentHash] = sigEnt
-				}
+			idEnt, ok := cs.Get(signer)
+			if !ok || idEnt.Type != types.TypePeer {
+				// EXTENSION-CONTINUATION §4.3 [MUST] (v1.22): fail at BUNDLE
+				// time rather than dispatch an incomplete bundle. This used to
+				// `continue`, and the omission was silent by design.
+				return nil, fmt.Errorf("%w: granter identity %s for capability %s is not resolvable locally",
+					ErrChainUnreachable, signer, capEnt.ContentHash)
 			}
+			bundle[idEnt.ContentHash] = idEnt
+			if sigEnt, ok := findBoundSignature(cs, li, capEnt.ContentHash, idEnt); ok {
+				bundle[sigEnt.ContentHash] = sigEnt
+			}
+		}
+
+		// GRANTEE identities, which this bundler never collected at all —
+		// they arrived only where a grantee happened also to be a granter.
+		// §4.3 (v1.22) requires one for EVERY granter and grantee, because
+		// the far side's verify step 2a resolves the grantee of every link
+		// and 401s `UnresolvableGrantee` when it cannot. A verifier MUST
+		// paired with a best-effort bundler is an interop bug by
+		// construction — core-rust's routing (q) §5, ruled their way.
+		if !capData.Grantee.IsZero() {
+			idEnt, ok := cs.Get(capData.Grantee)
+			if !ok || idEnt.Type != types.TypePeer {
+				return nil, fmt.Errorf("%w: grantee identity %s for capability %s is not resolvable locally",
+					ErrChainUnreachable, capData.Grantee, capEnt.ContentHash)
+			}
+			bundle[idEnt.ContentHash] = idEnt
 		}
 	}
 	return bundle, nil
