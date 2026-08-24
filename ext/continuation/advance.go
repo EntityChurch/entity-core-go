@@ -42,9 +42,27 @@ func (h *Handler) handleAdvance(ctx context.Context, req *handler.Request) (*han
 		return handler.NewErrorResponse(400, "invalid_params", "resource target path is required")
 	}
 
-	// Level 2 capability check.
-	if resp := hctx.CheckPathCapability("advance", path); resp != nil {
-		return resp, nil
+	// Level 2 capability check — split by trigger kind per
+	// PROPOSAL-CONTINUATION-STANDING-MODEL §3 (Q2 ruling, MUST):
+	//
+	//   - Administrative invoke (a bare `advance` EXECUTE — operator/handler
+	//     directly managing continuations) stays path-cap-gated on the
+	//     continuation path. This is the local/operator path.
+	//   - Reactive trigger (an advancement driven by a delivered event — an
+	//     inbox route, a subscription poke, flagged via WithReactiveTrigger)
+	//     is NOT path-cap-gated here. Delivery-reachability was already enforced
+	//     upstream (the receive that delivered to this path passed its own Level-2
+	//     check); the advance then dispatches under the continuation's OWN
+	//     dispatch_capability (advanceForward → executeDispatch). Requiring the
+	//     trigger to also hold advance-cap on the path is the over-restriction
+	//     that broke reactive standing continuations cross-peer — a remote peer
+	//     would need advance rights on the target's own continuation. §6.1's
+	//     escalation mitigation is the install-time in-chain check on
+	//     dispatch_capability, not an advance-time caller check.
+	if !hctx.ReactiveTrigger {
+		if resp := hctx.CheckPathCapability("advance", path); resp != nil {
+			return resp, nil
+		}
 	}
 
 	status := uint(200)
@@ -392,16 +410,18 @@ func generateChainID() string {
 //
 // The ttl/budget handling mirrors the dispatcher's own default path exactly
 // (core/protocol/local.go decrementBounds), because passing explicit bounds
-// opts OUT of that path — the only intended difference is that chain_id is
-// now always populated. A parentless advance yields bounds that carry the
-// chain id alone, which is the honest shape for a root chain: no inherited
-// ttl to decrement, but a real coordinate.
+// opts OUT of that path — the intended differences are that chain_id is now
+// always populated and that a root chain is seeded with the uniform
+// types.DefaultChainTTL. A parentless advance used to yield bounds carrying
+// the chain id alone; that shape was honest about inheritance but left ttl
+// absent on the wire, which is precisely how TTL ended up unspecified
+// cross-peer.
 //
 // Note the spec's step 6 also shows ttl/budget being reset to peer defaults
 // on each dispatch. Go decrements instead, which is the stricter reading and
 // is what every existing bounds test pins; that difference is orthogonal to
 // the chain id and is left alone here rather than smuggled in.
-func dispatchBounds(parent *types.BoundsData, chainID string) (*types.BoundsData, error) {
+func dispatchBounds(parent *types.BoundsData, chainID string, ttlSeed uint64) (*types.BoundsData, error) {
 	var child types.BoundsData
 	if parent != nil {
 		child = *parent
@@ -412,6 +432,18 @@ func dispatchBounds(parent *types.BoundsData, chainID string) (*types.BoundsData
 			newTTL := *child.TTL - 1
 			child.TTL = &newTTL
 		}
+	}
+	// Seed the uniform TTL when none is inherited — the root-chain case this
+	// function's comment used to simply accept ("no inherited ttl to
+	// decrement"). Accepting it is what left TTL unspecified cross-peer: a
+	// chain Go rooted carried no ttl at all, so whether TTL bounded it was
+	// decided by whichever peer it happened to reach. Seeding here makes every
+	// chain carry one, decremented exactly once per hop by the branch above.
+	// Deliberately above the §3.9 depth ceiling (see types.DefaultChainTTL) so
+	// chain_depth stays the binding global brake rather than racing TTL.
+	if child.TTL == nil {
+		seed := ttlSeed
+		child.TTL = &seed
 	}
 	child.ChainID = chainID
 	return &child, nil
@@ -489,7 +521,7 @@ func (h *Handler) executeDispatch(ctx context.Context, hctx *handler.HandlerCont
 	// scope (which fires only for chain dispatches) — previously they fell
 	// outside it for want of a chain id, which was the same defect wearing a
 	// different hat.
-	childBounds, boundsErr := dispatchBounds(hctx.Bounds, chainID)
+	childBounds, boundsErr := dispatchBounds(hctx.Bounds, chainID, h.chainTTLSeed)
 	if boundsErr != nil {
 		return handler.NewErrorResponse(429, "bounds_exceeded", boundsErr.Error())
 	}

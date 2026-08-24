@@ -365,6 +365,12 @@ func (d *Dispatcher) makeLocalExecute(parentCtx context.Context, callerCtx *hand
 			RequestID:        callerCtx.RequestID,
 			Bounds:           childBounds,
 			ChainDepth:       childDepth,
+			// ReactiveTrigger is sourced per-dispatch from the option, NOT
+			// inherited from callerCtx: it marks only the one advance the
+			// delivery mechanism initiated (PROPOSAL-CONTINUATION-STANDING-MODEL
+			// §3). Propagating it would wrongly tag the continuation's onward
+			// chain dispatches as reactive too.
+			ReactiveTrigger:  execOpts.ReactiveTrigger,
 			Included:         callerCtx.Included,
 		}
 		childCtx.Execute = d.makeLocalExecute(ctx, childCtx)

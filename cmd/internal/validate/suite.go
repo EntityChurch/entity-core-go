@@ -295,6 +295,15 @@ func (s *ValidationSuite) Run(ctx context.Context) (*Report, error) {
 		return skipCategory(catContinuations, "connection grants do not cover inbox operations")
 	})
 
+	// Category 7b: Continuation §3.9 chain_depth brake + O1 (bounds-propagation
+	// convergence surface). Distinct from resource_bounds.r2 (§4.10(b) cap chain).
+	runCat(catContinuationBounds, func() []CheckResult {
+		if grantsAllow(client.Grants(), "system/inbox", "system/inbox/*", "receive") {
+			return runContinuationBounds(ctx, client)
+		}
+		return skipCategory(catContinuationBounds, "connection grants do not cover inbox operations")
+	})
+
 	// Category 8: Revision extension (commit, log, branch, merge, etc.).
 	// Gate probes the shared runner family (revisionTestFamily), not a literal
 	// instance, so gating matches the randomized paths the runner writes.
@@ -736,6 +745,12 @@ func (s *ValidationSuite) RunCategory(ctx context.Context, category string) (*Re
 		} else {
 			report.AddAll(skipCategory(catContinuations, "connection grants do not cover inbox operations"))
 		}
+	case catContinuationBounds:
+		if grantsAllow(client.Grants(), "system/inbox", "system/inbox/*", "receive") {
+			report.AddAll(runContinuationBounds(ctx, client))
+		} else {
+			report.AddAll(skipCategory(catContinuationBounds, "connection grants do not cover inbox operations"))
+		}
 	case catRevision:
 		if client.GrantsAllow("system/validate/revision-main-0/") {
 			report.AddAll(runRevision(ctx, client))
@@ -963,6 +978,12 @@ func (s *ValidationSuite) RunConvergence(ctx context.Context, peerAddrs []string
 	// across 30+ convergence tests; this gate surfaces it as one
 	// named failure with a pointed diagnostic.
 	report.AddAll(runCrossPeerTCPSubscription(ctx, clients))
+
+	// Cross-peer continuation chain_depth (PROPOSAL-CONTINUATION-BOUNDS-
+	// PROPAGATION anchor 1): a synchronous A→B→A advancement ping-pong must
+	// terminate at the GLOBAL depth count because chain_depth is inherited
+	// across the wire. Runs before convergence so the marker sinks are clean.
+	report.AddAll(runContinuationBoundsCrossPeer(ctx, clients))
 
 	// Run convergence tests.
 	report.AddAll(runConvergence(ctx, clients))

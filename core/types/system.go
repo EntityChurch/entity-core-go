@@ -50,6 +50,45 @@ const (
 	TypeTreeListingEntry = "system/tree/listing-entry"
 )
 
+// DefaultChainTTL is the uniform TTL seeded into a continuation chain's bounds
+// when no TTL is inherited (a root chain). Before this existed, Go seeded
+// nothing: a root chain rode the wire with ttl absent, so TTL bounded the chain
+// only if some *other* peer happened to seed it. That is the "TTL is
+// unspecified cross-peer" divergence — Go and Rust seed nothing (the chain runs
+// to the §3.9 depth ceiling), Python seeds and decrements more than once per
+// hop (the chain dies on TTL long before depth). Same chain, three outcomes.
+//
+// The magnitude is deliberately NOT core/protocol.DefaultMaxChainDepth (64).
+// When the TTL seed equals the depth ceiling the two brakes race and no
+// observer can tell which bound the chain — the confound that made
+// EXTENSION-CONTINUATION §3.9's global depth brake undemonstrable cross-peer.
+// PROPOSAL-CONTINUATION-BOUNDS-PROPAGATION §4a Ruling 2 requires ceiling <= TTL
+// budget so chain_depth is the deterministic primary brake and TTL is a pure
+// resource backstop.
+//
+// What the RATIO means (the number alone means little). The two counters do not
+// tick together: `chain_depth` increments only on a continuation ADVANCEMENT
+// (ext/continuation advanceForward is the sole incrementing site), while `ttl`
+// is decremented by EVERY dispatch — including the internal sub-dispatches one
+// advancement makes, which inherit chain_depth unchanged (core/protocol/local.go
+// takes the inherit branch for depth and the decrement branch for bounds). So:
+//
+//	seed / ceiling = the dispatch operations one causal level may spend
+//	                 before TTL, not depth, becomes the binding brake.
+//
+// At 512/64 that is 8. A chain advancing plainly (one dispatch per level) always
+// hits the depth-64 brake first, deterministically, which is what §3.9 claims
+// and what anchor 1 measures. A chain fanning out more than ~8 dispatches per
+// level trips the resource backstop instead — the "expensive/fan-out step" case
+// Ruling 2 describes.
+//
+// NOT cohort-pinned. Ruling 1 requires every impl to seed the SAME default, and
+// §8 anchor 1 requires the same hop count on every impl pair, but the proposal
+// names no magnitude. 512 is Go's choice pending that pin; see
+// docs/validation/spec-issues/2026-07-19-chain-ttl-seed-magnitude-unpinned.md.
+// Operators override per-peer via continuation.WithChainTTLSeed.
+const DefaultChainTTL uint64 = 512
+
 // BoundsData is the data payload for system/bounds.
 type BoundsData struct {
 	TTL           *uint64  `cbor:"ttl,omitempty"`

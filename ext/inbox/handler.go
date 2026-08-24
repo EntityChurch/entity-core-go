@@ -132,14 +132,30 @@ func (h *Handler) handleReceive(ctx context.Context, req *handler.Request) (*han
 				if err == nil {
 					resource := &types.ResourceTarget{Targets: []string{path}}
 					advanceFn := func() {
+						// WithReactiveTrigger: this advance is driven by a delivered
+						// event reaching the continuation's path (delivery-
+						// reachability already enforced by this receive's own
+						// Level-2 check). Per PROPOSAL-CONTINUATION-STANDING-MODEL
+						// §3 the reactive path advances under the continuation's
+						// own dispatch_capability and MUST NOT require the trigger
+						// to hold advance-cap on the path — which is what unblocks
+						// a cross-peer/standing continuation (browser-defer).
 						resp, err := hctx.Execute(ctx, "system/continuation", "advance", advEntity,
-							handler.WithResource(resource))
+							handler.WithResource(resource), handler.WithReactiveTrigger())
 						if err != nil {
 							h.debugf("advance error at %s: %v", path, err)
 						} else if resp != nil {
 							var advResult map[string]interface{}
 							cbor.Unmarshal(resp.Result.Data, &advResult)
-							h.debugf("advance at %s: status=%d advanced=%v", path, resp.Status, advResult["advanced"])
+							if resp.Status >= 400 {
+								// Surface the sub-reason on a failed advance — the
+								// dispatched continuation's error code/message.
+								// Without this a cross-peer advance denial reads as
+								// a bare "status=403" with no cause.
+								h.debugf("advance at %s: status=%d code=%v message=%v", path, resp.Status, advResult["code"], advResult["message"])
+							} else {
+								h.debugf("advance at %s: status=%d advanced=%v", path, resp.Status, advResult["advanced"])
+							}
 							// Clean up write-ahead message on success.
 							if advResult["advanced"] == true {
 								hctx.TreeRemove(storagePath, "receive")

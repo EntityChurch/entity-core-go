@@ -20,6 +20,9 @@ type Handler struct {
 	// markerRetentionMs is the §3.10 chain-error marker retention window.
 	// RetainMarkersForever (0) disables collection. See marker_collect.go.
 	markerRetentionMs uint64
+	// chainTTLSeed is the uniform ttl seeded into a root chain's bounds.
+	// See WithChainTTLSeed.
+	chainTTLSeed uint64
 	// lastCollect throttles the bind-time sweep.
 	lastCollect time.Time
 }
@@ -38,11 +41,31 @@ func WithMarkerRetention(ms uint64) HandlerOption {
 	return func(h *Handler) { h.markerRetentionMs = ms }
 }
 
+// WithChainTTLSeed sets the uniform ttl seeded into a root continuation chain
+// (types.DefaultChainTTL by default).
+//
+// This is the operator counterpart to the dispatcher's MaxChainDepth: the two
+// bounds are meant to be tuned together, because what matters is the RATIO
+// between them, not either number alone. chain_depth counts causal advancement
+// levels; ttl is decremented by every dispatch, including the internal
+// sub-dispatches a single advancement makes. So seed/ceiling is roughly "how
+// many dispatch operations one causal level may spend before the resource
+// backstop fires instead of the deterministic depth brake."
+//
+// Raising this alone widens the resource allowance; to change how LONG a chain
+// may get, move the dispatcher's MaxChainDepth. Setting it below the depth
+// ceiling re-creates the confound this seed exists to remove (ttl fires first
+// and masks the depth brake), so keep seed > ceiling.
+func WithChainTTLSeed(ttl uint64) HandlerOption {
+	return func(h *Handler) { h.chainTTLSeed = ttl }
+}
+
 // NewHandler creates a new continuation handler.
 func NewHandler(opts ...HandlerOption) *Handler {
 	h := &Handler{
 		joinLocks:         make(map[string]*sync.Mutex),
 		markerRetentionMs: DefaultMarkerRetentionMs,
+		chainTTLSeed:      types.DefaultChainTTL,
 	}
 	for _, opt := range opts {
 		opt(h)

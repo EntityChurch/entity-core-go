@@ -116,6 +116,16 @@ type ExecuteOpts struct {
 	// Nil (the ordinary case) inherits the caller's depth unchanged; only a
 	// continuation advancement sets it, to caller+1. See WithChainDepth.
 	ChainDepth *uint64
+	// ReactiveTrigger marks this dispatch as a reactive delivery trigger — an
+	// advancement driven by a delivered event (an inbox route, a subscription
+	// poke) rather than a bare administrative `advance` EXECUTE. It is the O1
+	// signal for PROPOSAL-CONTINUATION-STANDING-MODEL §3: a reactive advance is
+	// gated by delivery-reachability (already enforced upstream, at the receive)
+	// and runs under the continuation's OWN dispatch_capability, so it MUST NOT
+	// also require the trigger to hold advance-cap on the continuation path.
+	// Per-dispatch and NOT inherited by sub-dispatches — it marks only the one
+	// advance the delivery mechanism initiated. See WithReactiveTrigger.
+	ReactiveTrigger bool
 }
 
 // ApplyOpts processes variadic ExecuteOptions into an ExecuteOpts struct.
@@ -176,6 +186,18 @@ func WithChainDepth(d uint64) ExecuteOption {
 	return func(o *ExecuteOpts) { o.ChainDepth = &d }
 }
 
+// WithReactiveTrigger marks a handler-initiated advance dispatch as a reactive
+// delivery trigger (PROPOSAL-CONTINUATION-STANDING-MODEL §3). The delivery
+// mechanism — the inbox route that finds a continuation at a delivered path, or
+// a subscription poke — sets this so the continuation advances under its OWN
+// dispatch_capability without the trigger needing advance-cap on the path. A
+// bare administrative `advance` EXECUTE never sets it and stays path-cap-gated.
+// In-process only; no wire field (the authority split is a local check-site
+// correction).
+func WithReactiveTrigger() ExecuteOption {
+	return func(o *ExecuteOpts) { o.ReactiveTrigger = true }
+}
+
 // HandlerContext provides the execution environment for handlers.
 type HandlerContext struct {
 	Author           crypto.PeerID
@@ -216,6 +238,15 @@ type HandlerContext struct {
 	// per-peer and not carried in bounds, so a cross-peer chain resets it at
 	// each peer boundary. Each peer bounds its own local execution depth.
 	ChainDepth       uint64
+	// ReactiveTrigger is true when this execution is a reactive delivery-driven
+	// advancement (set via WithReactiveTrigger by the inbox/subscription
+	// delivery path), false for a bare administrative `advance` EXECUTE. Read by
+	// the continuation advance handler to select the authority gate per
+	// PROPOSAL-CONTINUATION-STANDING-MODEL §3 (the O1 signal). Sourced per-
+	// dispatch from ExecuteOpts, NOT inherited from the parent context, so it
+	// marks only the advance the delivery mechanism initiated — never its
+	// onward chain dispatches.
+	ReactiveTrigger  bool
 	Included         map[hash.Hash]entity.Entity
 	// Execute dispatches a local or remote EXECUTE request from within a handler.
 	// Injected by the Dispatcher at dispatch time to avoid import cycles.

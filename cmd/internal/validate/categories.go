@@ -26,6 +26,7 @@ func AllCategories() []string {
 		catConformancePassthrough,
 		catConnectivity,
 		catContent,
+		catContinuationBounds,
 		catContinuations,
 		catConvergence,
 		catConvergentMirror,
