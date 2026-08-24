@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"go.entitychurch.org/entity-core-go/core/hash"
+	"go.entitychurch.org/entity-core-go/core/store"
 	"go.entitychurch.org/entity-core-go/core/types"
 )
 
@@ -40,19 +41,29 @@ func (e *Engine) bindLostMarker(chainID, subscriptionID, reason, deliverURI stri
 	if chainID == "" {
 		chainID = "none"
 	}
+	// chain_id arrives straight from wire-supplied notification bounds and
+	// reason carries a remote handler's error code, so both name a path segment
+	// below and both must be sanitized. The path gets the sanitized form; the
+	// body keeps the originals (§3.10.6 + arch ruling 2026-07-17 §2), which is
+	// what makes collapsing to a sentinel lossless.
+	rawChainID, rawStepKey := chainID, subscriptionID
+	pathChainID := store.SanitizePathSegment(chainID, types.ChainIDUnspecified)
+	pathStepKey := store.SanitizePathSegment(subscriptionID, types.StepIndexUnspecified)
+	pathReason := store.SanitizePathSegment(reason, types.ReasonUnspecified)
 
 	// §3.10.6 timestamp-capture: origination is the moment the failure
 	// observation happens (here in the engine).
 	now := uint64(time.Now().UnixMilli())
 
 	marker, err := types.ChainErrorLostData{
-		Reason:            reason,
-		Timestamp:         now,
-		ChainID:           chainID,
-		StepIndex:         subscriptionID,
-		FailedDeliveryURI: deliverURI,
-		OriginalStatus:    originalStatus,
-		OriginalCode:      originalCode,
+		Reason:    pathReason,
+		Timestamp: now,
+		// The RAW wire values — the body is the record, the path is an index.
+		ChainID:   rawChainID,
+		StepIndex: rawStepKey,
+		TargetURI: deliverURI,
+		Status:    originalStatus,
+		Code:      originalCode,
 	}.ToEntity()
 	if err != nil {
 		e.debugf("subscription lost-marker entity build failed: %v (sub=%s reason=%s)",
@@ -67,7 +78,7 @@ func (e *Engine) bindLostMarker(chainID, subscriptionID, reason, deliverURI stri
 		return hash.Hash{}
 	}
 
-	markerPath := "system/runtime/chain-errors/lost/" + chainID + "/" + subscriptionID + "/" + reason + "/" + hex.EncodeToString(markerHash.Bytes())
+	markerPath := "system/runtime/chain-errors/lost/" + pathChainID + "/" + pathStepKey + "/" + pathReason + "/" + hex.EncodeToString(markerHash.Bytes())
 	if err := e.locationIndex.Set(markerPath, markerHash); err != nil {
 		// Per CONTINUATION §3.10.8 bind-failure visibility: surface, don't
 		// silently claim success.

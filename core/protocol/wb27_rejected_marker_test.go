@@ -191,6 +191,12 @@ func TestWB27_ChainCapDeniedBindsReceiverSideRejectedMarker(t *testing.T) {
 	if body.StepIndex != "req-wb27" {
 		t.Errorf("body.StepIndex: got %q, want %q", body.StepIndex, "req-wb27")
 	}
+	// body.StepIndex / body.ChainID carry the RAW wire values (arch ruling
+	// 2026-07-17 §2). For path-safe coordinates they equal the path segments,
+	// as here; they earn their keep when a coordinate collapses to a sentinel,
+	// which is the only reason collapsing is lossless. This site recorded
+	// neither original until entity-core-rust pointed out that our own cohort
+	// report claimed a preservation the code did not do.
 	if body.AttemptedURI != execData.URI {
 		t.Errorf("body.AttemptedURI: got %q, want %q", body.AttemptedURI, execData.URI)
 	}

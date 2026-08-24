@@ -347,6 +347,7 @@ func (d *Dispatcher) handleExecute(ctx context.Context, env entity.Envelope, con
 		HandlerPattern:   pattern,
 		RequestID:        execData.RequestID,
 		Bounds:           bounds,
+		ChainDepth:       inheritedChainDepth(bounds),
 		Included:         env.Included,
 		ConnectionState:  connState,
 	}

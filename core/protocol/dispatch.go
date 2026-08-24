@@ -42,6 +42,11 @@ type Dispatcher struct {
 	LocalIdentityHash hash.Hash
 	Logger            *log.Logger
 
+	// MaxChainDepth is the EXTENSION-CONTINUATION §3.9 ceiling on continuation
+	// advancement depth for a single local execution. Zero means
+	// DefaultMaxChainDepth (§8.4's "SHOULD default to 64").
+	MaxChainDepth uint64
+
 	// RemoteExecute handles Execute calls to remote peers. Set by Peer after
 	// construction. Nil means remote execution is not available.
 	RemoteExecute func(ctx context.Context, uri, operation string, params entity.Entity, resource *types.ResourceTarget, async ...*AsyncDelivery) (*handler.Response, error)
@@ -284,20 +289,32 @@ func (d *Dispatcher) bindRejectedChainErrorMarker(execData types.ExecuteData, co
 	if d.Store == nil || d.LocationIndex == nil {
 		return hash.Hash{}
 	}
-	chainID := execData.Bounds.ChainID
-	stepKey := execData.RequestID
-	if stepKey == "" {
-		stepKey = "0"
+	// Both coordinates come off the wire, and this marker is bound precisely
+	// BECAUSE the sender's cap check failed — so an unauthorized caller reaches
+	// here by construction. The path gets the sanitized form; the body keeps the
+	// originals (§3.10.6 + arch ruling 2026-07-17 §2), which is the only reason
+	// collapsing them to a sentinel is lossless.
+	rawChainID := execData.Bounds.ChainID
+	rawStepKey := execData.RequestID
+	if rawStepKey == "" {
+		rawStepKey = "0"
 	}
+	pathChainID := store.SanitizePathSegment(rawChainID, types.ChainIDUnspecified)
+	pathStepKey := store.SanitizePathSegment(rawStepKey, types.StepIndexUnspecified)
 	// §3.10.6 timestamp-capture: origination is the moment cap-check
 	// fails (i.e., right now in the dispatcher's call stack).
 	originTS := uint64(time.Now().UnixMilli())
 
 	marker, err := types.ChainErrorLostData{
+		// ChainID / StepIndex are the RAW wire values, not the path segments —
+		// if either collapsed to a sentinel above, this body is the only place
+		// the operator can still answer "what did the attacker send?". That
+		// question is the entire point of the one marker that exists to record
+		// a hostile failure.
 		Reason:           code,
 		Timestamp:        originTS,
-		ChainID:          chainID,
-		StepIndex:        stepKey,
+		ChainID:          rawChainID,
+		StepIndex:        rawStepKey,
 		RequestingPeerID: requestingPeerID,
 		AttemptedURI:     attemptedURI,
 	}.ToEntity()
@@ -310,7 +327,7 @@ func (d *Dispatcher) bindRejectedChainErrorMarker(execData types.ExecuteData, co
 	}
 	// v1.20 path: terminal {marker_hash} segment using V7 §3.5
 	// invariant-pointer hex form.
-	markerPath := "system/runtime/chain-errors/rejected/" + chainID + "/" + stepKey + "/" + code + "/" + hex.EncodeToString(markerHash.Bytes())
+	markerPath := "system/runtime/chain-errors/rejected/" + pathChainID + "/" + pathStepKey + "/" + code + "/" + hex.EncodeToString(markerHash.Bytes())
 	if err := d.LocationIndex.Set(markerPath, markerHash); err != nil {
 		// Per §3.10.8 bind-failure visibility (F11 generalization):
 		// surface the failure rather than silently claim success.
@@ -321,6 +338,26 @@ func (d *Dispatcher) bindRejectedChainErrorMarker(execData types.ExecuteData, co
 	d.debugf("bound rejected chain-error marker at %s (code=%q attempted_uri=%q requesting_peer=%q)",
 		markerPath, code, attemptedURI, requestingPeerID)
 	return markerHash
+}
+
+// DefaultMaxChainDepth is the EXTENSION-CONTINUATION §8.4 implementation-
+// defined maximum continuation chain depth ("SHOULD default to 64").
+//
+// This is NOT the capability-chain depth of core/capability (V7 §4.10(b),
+// ErrChainTooDeep → 400 chain_depth_exceeded). Two different counters that
+// share a name: that one bounds how far a delegation chain walks, this one
+// bounds how many continuation advancements deep a local execution runs. The
+// collision is very likely why the §3.9 counter went unimplemented on all
+// three seats at once — every seat had "chain depth" in the tree already, and
+// it was the wrong one.
+const DefaultMaxChainDepth uint64 = 64
+
+// maxChainDepth returns the configured §3.9 ceiling, or the §8.4 default.
+func (d *Dispatcher) maxChainDepth() uint64 {
+	if d.MaxChainDepth != 0 {
+		return d.MaxChainDepth
+	}
+	return DefaultMaxChainDepth
 }
 
 func decrementBounds(b *types.BoundsData) (*types.BoundsData, error) {
@@ -336,6 +373,46 @@ func decrementBounds(b *types.BoundsData) (*types.BoundsData, error) {
 		child.TTL = &newTTL
 	}
 	return &child, nil
+}
+
+// stampChainDepth writes the causal chain depth into the bounds that will ride
+// the wire and seed the child context (PROPOSAL-CONTINUATION-BOUNDS-PROPAGATION
+// §4). depth 0 means "not within a chain" — the top-level / fresh-external-
+// trigger / operator-resume root (§5, §7). At the root we carry no chain_depth
+// (and strip any stale one), so ordinary dispatch is unchanged on the wire and
+// a fresh trigger inherits 0 on the far side. A non-zero depth is stamped,
+// materializing bounds if the dispatch had none.
+func stampChainDepth(b *types.BoundsData, depth uint64) *types.BoundsData {
+	if depth == 0 {
+		if b == nil || b.ChainDepth == nil {
+			return b
+		}
+		out := *b
+		out.ChainDepth = nil
+		return &out
+	}
+	var out types.BoundsData
+	if b != nil {
+		out = *b
+	}
+	d := depth
+	out.ChainDepth = &d
+	return &out
+}
+
+// inheritedChainDepth reads the causal chain depth an incoming EXECUTE carries
+// in its bounds, seeding the receiver's local counter so the value tested at the
+// ceiling is the GLOBAL chain length, not per-peer (PROPOSAL-CONTINUATION-
+// BOUNDS-PROPAGATION §4 — the cascade_depth inheritance precedent, §3.11). A
+// wire EXECUTE with no chain_depth in bounds — a fresh external trigger firing a
+// standing continuation (timer tick, status write, inbound message), or an
+// ordinary request — seeds 0 and roots fresh (§5). This is Go's concrete O1
+// signal: inherited-bounds-chain-depth vs. a fresh handler entry.
+func inheritedChainDepth(b *types.BoundsData) uint64 {
+	if b != nil && b.ChainDepth != nil {
+		return *b.ChainDepth
+	}
+	return 0
 }
 
 // processAsyncDelivery handles an EXECUTE with a deliver_to field asynchronously.

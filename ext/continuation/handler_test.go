@@ -356,17 +356,22 @@ func TestAdvanceOnErrorDispatchFailureBindsLostMarker(t *testing.T) {
 	if err := ecf.Decode(mEnt.Data, &md); err != nil {
 		t.Fatalf("decode marker: %v", err)
 	}
-	if md.OriginalStatus != 500 {
-		t.Errorf("OriginalStatus: got %d, want 500", md.OriginalStatus)
+	if md.Status != 500 {
+		t.Errorf("Status: got %d, want 500", md.Status)
 	}
-	if md.OriginalCode != "boom_code" {
-		t.Errorf("OriginalCode: got %q, want %q", md.OriginalCode, "boom_code")
+	if md.Code != "boom_code" {
+		t.Errorf("Code: got %q, want %q", md.Code, "boom_code")
 	}
-	if md.FailedDeliveryURI != "system/tree/error-log" {
-		t.Errorf("FailedDeliveryURI: got %q", md.FailedDeliveryURI)
+	if md.TargetURI != "system/tree/error-log" {
+		t.Errorf("TargetURI: got %q", md.TargetURI)
 	}
-	if md.OriginalRequestID != "req-42" {
-		t.Errorf("OriginalRequestID: got %q, want req-42", md.OriginalRequestID)
+	// The raw request id now lives in StepIndex — the body field IS the
+	// original (arch ruling 2026-07-17 §2), which retires the separate
+	// original_request_id slot. Go's `original_request_id`, Python's
+	// `step_index_original` and Rust's nothing were three answers to a schema
+	// that had never been pinned.
+	if md.StepIndex != "req-42" {
+		t.Errorf("StepIndex: got %q, want req-42 (the body carries the ORIGINAL request id)", md.StepIndex)
 	}
 	if md.Timestamp == 0 {
 		t.Error("Timestamp must be set")
@@ -580,11 +585,11 @@ func TestForwardDispatchHandlerNon2xxIsCompleted(t *testing.T) {
 			if md.Reason != "handler_said_no" {
 				t.Fatalf("handler %d: marker reason=%q, want %q (v1.19 §3.10.5 — reason IS result.data.code)", hstatus, md.Reason, "handler_said_no")
 			}
-			if md.OriginalStatus != hstatus {
-				t.Fatalf("handler %d: marker original_status=%d, want %d", hstatus, md.OriginalStatus, hstatus)
+			if md.Status != hstatus {
+				t.Fatalf("handler %d: marker original_status=%d, want %d", hstatus, md.Status, hstatus)
 			}
-			if md.FailedDeliveryURI != "system/tree" {
-				t.Fatalf("handler %d: marker failed_delivery_uri=%q, want system/tree", hstatus, md.FailedDeliveryURI)
+			if md.TargetURI != "system/tree" {
+				t.Fatalf("handler %d: marker failed_delivery_uri=%q, want system/tree", hstatus, md.TargetURI)
 			}
 		})
 	}
@@ -1007,6 +1012,61 @@ func TestResumeDispatch(t *testing.T) {
 
 	if hctx.LocationIndex.Has("system/continuation/suspended/abc") {
 		t.Fatal("suspended entity should have been deleted")
+	}
+}
+
+// PROPOSAL-CONTINUATION-BOUNDS-PROPAGATION anchor 4 / §7: resume is an
+// operator-authorized fresh dispatch, often caused by a chain_depth_exceeded
+// suspension. It MUST root chain_depth at 0, or the resumed chain re-suspends
+// at the same ceiling immediately. The reset holds even when the resuming
+// context itself carries a non-zero depth.
+func TestResumeRootsChainDepthAtZero(t *testing.T) {
+	h := NewHandler()
+	hctx := newTestContext()
+	hctx.ChainDepth = 63 // resuming context is deep; resume must still root at 0
+
+	var dispatchedDepth *uint64
+	hctx.Execute = func(ctx context.Context, uri, op string, params entity.Entity, opts ...handler.ExecuteOption) (*handler.Response, error) {
+		dispatchedDepth = handler.ApplyOpts(opts).ChainDepth
+		resultRaw, _ := ecf.Encode(map[string]interface{}{"resumed": true})
+		resultEntity, _ := entity.NewEntity("primitive/any", cbor.RawMessage(resultRaw))
+		return &handler.Response{Status: 200, Result: resultEntity}, nil
+	}
+
+	paramsRaw, _ := ecf.Encode(map[string]interface{}{"key": "value"})
+	storeSuspended(t, hctx, "system/continuation/suspended/deep", types.ContinuationSuspendedData{
+		Target:         "system/tree",
+		Operation:      "put",
+		Params:         cbor.RawMessage(paramsRaw),
+		Reason:         "chain_depth_exceeded",
+		ChainID:        "chain-1",
+		OriginalAuthor: hash.Hash{Algorithm: hash.AlgorithmSHA256},
+		SuspendedAt:    1709500000000,
+	})
+
+	resumeReq := types.ContinuationResumeRequestData{}
+	params, err := resumeReq.ToEntity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hctx.Resource = &types.ResourceTarget{Targets: []string{"system/continuation/suspended/deep"}}
+	resp, err := h.Handle(context.Background(), &handler.Request{
+		Path:      "system/continuation/suspended/deep",
+		Operation: "resume",
+		Params:    params,
+		Context:   hctx,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != 200 {
+		t.Fatalf("resume status %d, want 200", resp.Status)
+	}
+	if dispatchedDepth == nil {
+		t.Fatal("resume dispatched no chain_depth override — a resumed chain at the ceiling would re-suspend (§7)")
+	}
+	if *dispatchedDepth != 0 {
+		t.Errorf("resume dispatched chain_depth %d, want 0 (operator resume roots fresh — §7)", *dispatchedDepth)
 	}
 }
 

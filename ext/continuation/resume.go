@@ -88,6 +88,12 @@ func (h *Handler) handleResume(ctx context.Context, req *handler.Request) (*hand
 	if resumeReq.Bounds != nil {
 		opts = append(opts, handler.WithBounds(resumeReq.Bounds))
 	}
+	// Resume is an operator-authorized fresh dispatch — often caused by a
+	// chain_depth_exceeded suspension. It MUST root chain_depth at 0, or a
+	// resumed chain re-suspends immediately (PROPOSAL-CONTINUATION-BOUNDS-
+	// PROPAGATION §7). Fresh operator intent = fresh root, as a fresh external
+	// trigger is. This also strips any stale chain_depth in resumeReq.Bounds.
+	opts = append(opts, handler.WithChainDepth(0))
 	if resumeReq.DeliverTo != nil {
 		opts = append(opts, handler.WithDeliverTo(resumeReq.DeliverTo))
 	}

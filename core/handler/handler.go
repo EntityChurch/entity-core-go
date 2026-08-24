@@ -112,6 +112,10 @@ type ExecuteOpts struct {
 	// (EXTENSION-CONTINUATION §4.3 / §8.1). Nil for ordinary dispatch —
 	// behavior is then unchanged.
 	IncludedChain []entity.Entity
+	// ChainDepth overrides the dispatched EXECUTE's §3.9 chain-depth counter.
+	// Nil (the ordinary case) inherits the caller's depth unchanged; only a
+	// continuation advancement sets it, to caller+1. See WithChainDepth.
+	ChainDepth *uint64
 }
 
 // ApplyOpts processes variadic ExecuteOptions into an ExecuteOpts struct.
@@ -153,6 +157,25 @@ func WithBounds(b *types.BoundsData) ExecuteOption {
 	return func(o *ExecuteOpts) { o.Bounds = b }
 }
 
+// WithChainDepth sets the dispatched EXECUTE's EXTENSION-CONTINUATION §3.9
+// chain-depth counter. Only a continuation advancement dispatch uses it, at
+// caller+1; every other dispatch inherits the caller's depth unchanged.
+//
+// The counter is the structural brake on a self-referential continuation
+// loop — NOT ttl. §3.9 is explicit that "continuation advancement dispatches
+// with fresh TTL/budget but inherits the chain depth counter", so a chain
+// that dispatches back into its own trigger refills ttl every hop and is
+// bounded only by this. That is why §3.9 lands before step 6's fresh bounds
+// (arch ruling 15) rather than after.
+//
+// Deliberately NOT a bounds field: §3.9 pins it as a per-peer execution
+// context counter that is not carried in system/bounds on the wire, so
+// cross-peer chains reset it at each peer boundary. Each peer bounds its own
+// local execution depth; global chain length is bounded by ttl on the wire.
+func WithChainDepth(d uint64) ExecuteOption {
+	return func(o *ExecuteOpts) { o.ChainDepth = &d }
+}
+
 // HandlerContext provides the execution environment for handlers.
 type HandlerContext struct {
 	Author           crypto.PeerID
@@ -184,6 +207,15 @@ type HandlerContext struct {
 	HandlerPattern   string
 	RequestID        string
 	Bounds           *types.BoundsData
+	// ChainDepth is the EXTENSION-CONTINUATION §3.9 chain-depth counter for
+	// this execution context: how many continuation advancements deep this
+	// dispatch sits. Incremented only by a continuation advancement dispatch
+	// (see WithChainDepth); inherited unchanged by every other sub-dispatch.
+	//
+	// Zero at wire entry BY DESIGN, not by omission — §3.9 pins the counter as
+	// per-peer and not carried in bounds, so a cross-peer chain resets it at
+	// each peer boundary. Each peer bounds its own local execution depth.
+	ChainDepth       uint64
 	Included         map[hash.Hash]entity.Entity
 	// Execute dispatches a local or remote EXECUTE request from within a handler.
 	// Injected by the Dispatcher at dispatch time to avoid import cycles.

@@ -57,6 +57,7 @@ func runSecurity(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("resource_scope_denied", "V7 §5.4")
 	r.Declare("expired_capability_denied", "V7 §5.2")
 	r.Declare("not_before_denied", "V7 §5.2")
+	r.Declare("marker_path_injection_contained", "EXTENSION-CONTINUATION §3.10.3 + arch ruling 13: wire-supplied marker coordinates MUST NOT be trusted as path components")
 
 	// --- Phase 1: Authentication Enforcement Checks ---
 
@@ -131,6 +132,10 @@ func runSecurity(ctx context.Context, client *PeerClient) []CheckResult {
 
 	r.Run("not_before_denied", func() CheckOutcome {
 		return toOutcome(checkNotBeforeDenied(ctx, client))
+	})
+
+	r.Run("marker_path_injection_contained", func() CheckOutcome {
+		return checkMarkerPathInjection(ctx, client)
 	})
 
 	results := r.Results()

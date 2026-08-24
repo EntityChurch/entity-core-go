@@ -61,6 +61,23 @@ func (d ContinuationTransformOpData) ToEntity() (entity.Entity, error) {
 // system/continuation/advancement-result).
 const TypeChainErrorLost = "system/runtime/chain-error-lost"
 
+// Sentinels for a marker coordinate whose wire-supplied value fails
+// path-safety. A coordinate segment collapses to one fixed sentinel and the
+// original is preserved in the marker body (arch rulings 2026-07-17 §1/§3).
+// One sentinel per coordinate, so a quarantined marker still says WHICH
+// coordinate was hostile without the value being on the path.
+const (
+	// ReasonUnspecified is landed spec — EXTENSION-CONTINUATION §3.10.5
+	// prescribes it by name for a non-path-safe `code`.
+	ReasonUnspecified = "unspecified_error"
+	// ChainIDUnspecified / StepIndexUnspecified are Go's proposed spellings.
+	// Arch left the exact strings to the cohort to converge and pinned only
+	// the shape ("one fixed sentinel in the same spirit"); these follow
+	// §3.10.5's landed `unspecified_error` pattern. Reported for pinning.
+	ChainIDUnspecified   = "unspecified_chain_id"
+	StepIndexUnspecified = "unspecified_step_index"
+)
+
 // ChainErrorLostData captures a chain-dispatch failure that would
 // otherwise be silently lost. Both `lost` and `rejected` kinds share this
 // body shape; the kind distinction lives in the path per EXTENSION-
@@ -84,14 +101,31 @@ const TypeChainErrorLost = "system/runtime/chain-error-lost"
 // (genuine tree:put no-op) IFF Timestamp is captured at failure-
 // origination time per §3.10.6, NOT regenerated at bind site.
 type ChainErrorLostData struct {
-	OriginalCode      string `cbor:"original_code,omitempty"`
-	OriginalStatus    uint   `cbor:"original_status"`
-	FailedDeliveryURI string `cbor:"failed_delivery_uri"`
-	OriginalRequestID string `cbor:"original_request_id,omitempty"`
-	Timestamp         uint64 `cbor:"timestamp"`
-	Reason            string `cbor:"reason,omitempty"`
-	// ChainID and StepIndex are denormalized into the body for in-body
-	// inspection without path parsing per §3.10.6 reserved body fields.
+	// Code is the RAW `result.data.code`, preserved verbatim even when the
+	// path's {reason} collapsed to ReasonUnspecified (§3.10.5). Equals Reason
+	// whenever the code is path-safe, which is the ordinary case.
+	Code string `cbor:"code,omitempty"`
+	// Status is the downstream status code (§3.10.6, reserved on `lost`).
+	Status uint `cbor:"status,omitempty"`
+	// TargetURI is the URI the dispatch was aimed at (§3.10.6, `lost`).
+	TargetURI string `cbor:"target_uri,omitempty"`
+	Timestamp uint64 `cbor:"timestamp"`
+	// Reason mirrors this marker's {reason} path segment — the SANITIZED
+	// value (§3.10.6: "matching this marker's path segment"). The raw code
+	// lives in Code.
+	Reason string `cbor:"reason,omitempty"`
+	// ChainID and StepIndex carry the ORIGINAL wire-supplied values, NOT the
+	// sanitized path segments (arch ruling 2026-07-17 §2: "plain names, each
+	// meaning the original value; the body is the record, the path is an
+	// index"). They agree with the path whenever the value was path-safe,
+	// which is every conformant dispatch; they diverge exactly when a
+	// coordinate collapsed to a sentinel, which is the case the body exists to
+	// keep recoverable.
+	//
+	// This is deliberately narrower than §3.10.6's "for in-body inspection
+	// without path parsing" gloss, which reads as a path mirror. The registry
+	// predates coordinate sanitization; a mirror would make the sentinel a
+	// one-way loss. See the spec-issue routed 2026-07-17.
 	ChainID   string `cbor:"chain_id,omitempty"`
 	StepIndex string `cbor:"step_index,omitempty"`
 

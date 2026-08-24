@@ -144,6 +144,59 @@ func ValidatePathChars(p string) error {
 	return nil
 }
 
+// IsSafePathSegment reports whether s can be used verbatim as ONE segment of a
+// tree path: non-empty, slash-free, neither reserved dot token, and free of
+// control characters (V7 §1.4).
+//
+// The slash and dot-token checks are the load-bearing ones. A value carrying
+// either is not one segment: a slash forks the path into extra levels, and an
+// interior ".." is resolved — not rejected — by CleanPath's path.Clean, so it
+// walks the built path back OUT of the subtree it was supposed to name.
+// CleanPath only rejects LEADING "./" / "../", which a value interpolated into
+// the middle of a path never is.
+func IsSafePathSegment(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	if strings.Contains(s, "/") {
+		return false
+	}
+	return ValidatePathChars(s) == nil
+}
+
+// SanitizePathSegment returns s when it is safe to interpolate as one path
+// segment, and collapses to the caller's fixed sentinel otherwise.
+//
+// For values that arrive from the wire (request_id, bounds.chain_id, a remote
+// handler's error code) this is the boundary between "a caller names its own
+// coordinate" and "a caller chooses where our entity lands". Callers MUST run
+// every untrusted value through this before concatenating it into a path, and
+// MUST preserve the original in the record's body — collapsing is only
+// lossless because the body recovers it.
+//
+// Collapse, not hash (arch rulings 2026-07-17 §1, amending 2026-07-16 §13;
+// the shape EXTENSION-CONTINUATION §3.10.5 already lands for `{reason}`).
+// This package first hashed unsafe values to keep distinct values on distinct
+// coordinates. That was wrong three ways, and the reasons generalize past
+// markers:
+//
+//   - Distinctness was already carried elsewhere. §3.10.1's terminal
+//     {marker_hash} segment puts every occurrence at its own path regardless
+//     of what the intermediate segments do, so collapsing loses no occurrence.
+//   - Hashing is a ONE-WAY loss wherever the body does not carry the original
+//     — which was exactly `chain_id`, the one coordinate a remote fully
+//     controls. An operator reading the marker that exists to observe a
+//     hostile failure could not answer what the attacker sent.
+//   - It re-opened the vector the sanitizing closed, one layer up: each
+//     distinct hostile value hashed to a distinct node, so an attacker could
+//     mint unbounded path nodes. A sentinel bounds it to one quarantine node.
+func SanitizePathSegment(s, sentinel string) string {
+	if IsSafePathSegment(s) {
+		return s
+	}
+	return sentinel
+}
+
 // CleanPath normalizes a path by collapsing redundant slashes, preserving a
 // leading "/" (absolute marker), and stripping trailing "/". Paths starting
 // with "./" or "../" are rejected (reserved for future directory-relative

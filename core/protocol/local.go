@@ -168,8 +168,53 @@ func (d *Dispatcher) makeLocalExecute(parentCtx context.Context, callerCtx *hand
 	return func(ctx context.Context, uri, operation string, params entity.Entity, opts ...handler.ExecuteOption) (*handler.Response, error) {
 		execOpts := handler.ApplyOpts(opts)
 
-		// Determine if this is a local or remote URI.
 		handlerPath := entity.ExtractHandlerPath(uri)
+
+		// chain_depth + bounds are resolved once, ahead of the local/remote
+		// split. PROPOSAL-CONTINUATION-BOUNDS-PROPAGATION §3/§4 makes chain_depth
+		// a system/bounds field that MUST ride a cross-peer EXECUTE and be
+		// inherited across the boundary, exactly as cascade_depth is — the same
+		// value that seeds the child context on a local dispatch. Before this,
+		// the remote branch dropped bounds and the counter reset every hop, so
+		// nothing globally bounded a cross-peer chain.
+		//
+		// §3.9 chain depth: a continuation advancement passes caller+1 (the sole
+		// incrementing site is ext/continuation advanceForward); every other
+		// dispatch inherits unchanged. The ceiling is enforced here in the
+		// dispatch layer because §3.9 puts it there — a continuation that refills
+		// ttl each hop has no other structural brake, and a handler cannot be
+		// trusted to bound its own recursion. Response is 429 bounds_exceeded,
+		// matching how ttl/budget exhaustion already surfaces (§3.9 groups the
+		// three as one class; its distinct-reason suspension handler is a MAY Go
+		// does not register). Deliberately NOT the 400 chain_depth_exceeded of
+		// V7 §4.10(b): that is the capability-chain counter sharing a name.
+		childDepth := callerCtx.ChainDepth
+		if execOpts.ChainDepth != nil {
+			childDepth = *execOpts.ChainDepth
+		}
+		if childDepth > d.maxChainDepth() {
+			resp, _ := handler.NewErrorResponse(429, "bounds_exceeded",
+				fmt.Sprintf("continuation chain depth %d exceeds maximum %d (EXTENSION-CONTINUATION §3.9)",
+					childDepth, d.maxChainDepth()))
+			return resp, nil
+		}
+
+		// Determine bounds: explicit override from opts, or decrement parent
+		// bounds; then stamp the depth in so it is inherited across the wire (§4).
+		var childBounds *types.BoundsData
+		if execOpts.Bounds != nil {
+			childBounds = execOpts.Bounds
+		} else {
+			var err error
+			childBounds, err = decrementBounds(callerCtx.Bounds)
+			if err != nil {
+				resp, _ := handler.NewErrorResponse(429, "bounds_exceeded", err.Error())
+				return resp, nil
+			}
+		}
+		childBounds = stampChainDepth(childBounds, childDepth)
+
+		// Determine if this is a local or remote URI.
 		if isRemoteURI(uri, d.LocalPeerID) {
 			if d.RemoteExecute == nil {
 				return nil, fmt.Errorf("remote execute not available")
@@ -210,6 +255,18 @@ func (d *Dispatcher) makeLocalExecute(parentCtx context.Context, callerCtx *hand
 						ad.Extras[e.ContentHash] = e
 					}
 				}
+			}
+			// Rung 1 (PROPOSAL §3): bounds MUST ride the cross-peer EXECUTE —
+			// chain_id / chain_depth / ttl / budget. This branch previously
+			// dropped them, so the counter reset at the boundary and nothing
+			// globally bounded a cross-peer chain. stampChainDepth left bounds
+			// nil for a non-chain dispatch, so ordinary remote dispatch is
+			// unchanged (no bounds invented).
+			if childBounds != nil {
+				if ad == nil {
+					ad = &AsyncDelivery{}
+				}
+				ad.Bounds = childBounds
 			}
 			var async []*AsyncDelivery
 			if ad != nil {
@@ -264,19 +321,6 @@ func (d *Dispatcher) makeLocalExecute(parentCtx context.Context, callerCtx *hand
 			return resp, nil
 		}
 
-		// Determine bounds: explicit override from opts, or decrement parent bounds.
-		var childBounds *types.BoundsData
-		if execOpts.Bounds != nil {
-			childBounds = execOpts.Bounds
-		} else {
-			var err error
-			childBounds, err = decrementBounds(callerCtx.Bounds)
-			if err != nil {
-				resp, _ := handler.NewErrorResponse(429, "bounds_exceeded", err.Error())
-				return resp, nil
-			}
-		}
-
 		// Resolve and validate the child handler's grant — same V7 §6.2 / §6.8
 		// validation as wire-entry dispatch. A handler-internal sub-dispatch
 		// cannot use a foreign grant for the child handler.
@@ -320,6 +364,7 @@ func (d *Dispatcher) makeLocalExecute(parentCtx context.Context, callerCtx *hand
 			HandlerPattern:   pattern,
 			RequestID:        callerCtx.RequestID,
 			Bounds:           childBounds,
+			ChainDepth:       childDepth,
 			Included:         callerCtx.Included,
 		}
 		childCtx.Execute = d.makeLocalExecute(ctx, childCtx)

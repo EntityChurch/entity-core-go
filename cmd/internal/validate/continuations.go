@@ -1390,7 +1390,7 @@ func runContinuations(ctx context.Context, client *PeerClient) []CheckResult {
 		if marker.Reason == "" {
 			return FailCheck(fmt.Sprintf("marker at %s has empty reason (v1.19 §3.10.5 requires {reason}=result.data.code verbatim)", markerPath))
 		}
-		return PassCheck(fmt.Sprintf("v1.13/v1.19 marker bound at %s (reason=%s status=%d)", markerPath, marker.Reason, marker.OriginalStatus))
+		return PassCheck(fmt.Sprintf("v1.13/v1.19 marker bound at %s (reason=%s status=%d)", markerPath, marker.Reason, marker.Status))
 	})
 
 	// --- Step 10: result_transform ---

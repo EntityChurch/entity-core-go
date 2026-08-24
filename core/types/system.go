@@ -55,6 +55,7 @@ type BoundsData struct {
 	TTL           *uint64  `cbor:"ttl,omitempty"`
 	Budget        *uint64  `cbor:"budget,omitempty"`
 	CascadeDepth  *uint64  `cbor:"cascade_depth,omitempty"` // Current cascade depth in emit pathway (G-3, V7 §3.11)
+	ChainDepth    *uint64  `cbor:"chain_depth,omitempty"`   // Continuation causal-chain depth; wire-carried and inherited across the peer boundary exactly as cascade_depth (§3.11; PROPOSAL-CONTINUATION-BOUNDS-PROPAGATION §4). Non-reset by ttl/budget refill.
 	ChainID       string   `cbor:"chain_id,omitempty"`
 	ParentChainID string   `cbor:"parent_chain_id,omitempty"` // Parent chain's chain_id; set when continuation dispatches sub-chain (G-7, V7 §3.11)
 	Visited       []string `cbor:"visited,omitempty"`

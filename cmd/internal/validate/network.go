@@ -10,6 +10,7 @@ import (
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/ecf"
+	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/peer"
 	"go.entitychurch.org/entity-core-go/core/types"
@@ -239,8 +240,11 @@ func runNetwork(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs int
 	// address taken over by a socket that counts connects. Nothing about the
 	// target's internals is assumed — every impl's retry ends in a dial.
 	r.Run("network_retry_survives_outage", func() CheckOutcome {
+		// Harness fail-closed (arch ruling 2026-07-17 §4): VERIFY the envelope
+		// against the target's observed pings — never take the flag's word and
+		// then blame the peer for a window it was never configured to meet.
 		if keepaliveEnvelopeMs <= 0 {
-			return SkipCheck("pass -keepalive-envelope-ms matching the target's §2.3 envelope so the disconnect is observable in seconds — opt-in like the reconnect anchor")
+			return SkipCheck("harness: pass -keepalive-envelope-ms matching the target's §2.3 envelope so the disconnect is observable in seconds — start the target with --keepalive 2000,1000,2")
 		}
 		cp, err := startNetworkCounterpart()
 		if err != nil {
@@ -255,6 +259,16 @@ func runNetwork(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs int
 		if _, out := networkMaintainWithBackoff(ctx, client, cp,
 			&types.BackoffConfigData{MinMs: &minMs, MaxMs: &maxMs}); !out.pass {
 			return out.outcome
+		}
+
+		// Harness fail-closed (arch ruling 2026-07-17 §4). MUST sit here, after
+		// maintain: the target pings peers it MAINTAINS, so before the
+		// relationship exists there is nothing to measure. Everything below
+		// asserts the target notices a dead counterpart inside the envelope —
+		// a claim that is only the PEER's to answer if the target was actually
+		// started with that envelope. Verify it; never infer it from the flag.
+		if out := RequireKeepaliveEnvelope(cp, keepaliveEnvelopeMs); out != nil {
+			return *out
 		}
 		if _, lastState, found := pollPeerStatus(ctx, client, cp.hexID, 15*time.Second, func(d types.PeerStatusData) bool {
 			return d.Status == types.PeerStatusConnected
@@ -300,10 +314,10 @@ func runNetwork(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs int
 		if out, ok := r.Require("network_maintain_installs_graph"); !ok {
 			return out
 		}
+		// Harness fail-closed (arch ruling 2026-07-17 §4) — see above.
 		if keepaliveEnvelopeMs <= 0 {
-			return SkipCheck("pass -keepalive-envelope-ms matching the target's §2.3 envelope (interval_ms × max_missed + timeout_ms) so the disconnect is observable in seconds — the reconnect anchor is opt-in like the §5.4 floor probe. Go target: start entity-peer with a short --keepalive (peer-manager --keepalive 2000,1000,2). Siblings need the keepalive-CLI cohort item before this runs fast against them.")
+			return SkipCheck("harness: pass -keepalive-envelope-ms matching the target's §2.3 envelope so the disconnect is observable in seconds — start the target with --keepalive 2000,1000,2")
 		}
-
 		cp, err := startNetworkCounterpart()
 		if err != nil {
 			return FailCheck("start reconnect-anchor counterpart: " + err.Error())
@@ -313,6 +327,12 @@ func runNetwork(ctx context.Context, client *PeerClient, keepaliveEnvelopeMs int
 		// 1. Maintain toward the fresh counterpart, then confirm connected.
 		if _, out := networkMaintain(ctx, client, cp); !out.pass {
 			return out.outcome
+		}
+
+		// Harness fail-closed (arch ruling 2026-07-17 §4) — verified after
+		// maintain, for the reason given at the retry probe.
+		if out := RequireKeepaliveEnvelope(cp, keepaliveEnvelopeMs); out != nil {
+			return *out
 		}
 		if _, lastState, found := pollPeerStatus(ctx, client, cp.hexID, 15*time.Second, func(d types.PeerStatusData) bool {
 			return d.Status == types.PeerStatusConnected
@@ -634,6 +654,10 @@ type networkCounterpart struct {
 	addr   string // fixed listen addr, reused across restarts
 	peerID string // Base58
 	hexID  string // lowercase hex identity hash (66-char, format byte included)
+	// pings counts the target's inbound §5.4 keepalive pings, fed by the
+	// dispatch hook in start(). Survives restarts (the hook re-registers
+	// against this same struct).
+	pings pingObservation
 }
 
 func startNetworkCounterpart() (*networkCounterpart, error) {
@@ -663,6 +687,34 @@ func (cp *networkCounterpart) start() error {
 		peer.WithIdentity(cp.kp),
 		peer.WithListenAddr(cp.addr),
 		peer.WithConnectionGrants(peer.OpenAccessGrants()),
+		// Count the TARGET's inbound §5.4 keepalive pings. The counterpart —
+		// not the validator's client — is the peer the target MAINTAINS, so
+		// this is the only place the target's real keepalive cadence is
+		// observable. It is what lets the probe VERIFY -keepalive-envelope-ms
+		// instead of trusting it (arch ruling 2026-07-17 §4).
+		//
+		// A WIRE hook, not a dispatch hook: `ping` rides the connect fast path
+		// (core/protocol/execute.go's connectPath branch → dispatchToHandler),
+		// which never reaches the fireDispatchHooks in handleExecute. So the
+		// whole system/protocol/connect surface is invisible to dispatch hooks
+		// — see the note routed with this change. The wire hook sees the frame
+		// regardless of which dispatch path claims it.
+		peer.WithWireHook("keepalive-precondition", func(evt peer.WireEvent) {
+			if evt.Direction != peer.WireInbound || evt.RootType != types.TypeExecute {
+				return
+			}
+			var env entity.Envelope
+			if ecf.Decode(evt.FrameBytes, &env) != nil {
+				return
+			}
+			var ed types.ExecuteData
+			if ecf.Decode(env.Root.Data, &ed) != nil {
+				return
+			}
+			if ed.Operation == "ping" {
+				cp.pings.note()
+			}
+		}),
 		// A real inbox so the target's §6.2 establish / any delivery lands 200.
 		peer.WithHandler("system/inbox", inbox.NewHandler()),
 	)

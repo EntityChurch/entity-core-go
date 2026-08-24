@@ -13,6 +13,7 @@ import (
 	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/handler"
 	"go.entitychurch.org/entity-core-go/core/hash"
+	"go.entitychurch.org/entity-core-go/core/store"
 	"go.entitychurch.org/entity-core-go/core/types"
 
 	"github.com/fxamacker/cbor/v2"
@@ -262,6 +263,29 @@ func (h *Handler) bindLostErrorMarker(hctx *handler.HandlerContext, chainID, fai
 		stepKey = "0"
 	}
 
+	// chainID, stepKey and reason are all wire-reachable — an inbound EXECUTE
+	// chooses request_id and bounds.chain_id, and `reason` is the target
+	// handler's own error code. Each is interpolated into the marker path
+	// below, so each must be exactly one segment.
+	//
+	// The RAW values are kept: the path gets the sanitized form, the body gets
+	// the original (§3.10.6 registry + arch ruling 2026-07-17 §2). Collapsing a
+	// coordinate is only lossless because the body recovers it, so these two
+	// lines are a pair — never sanitize in place here again.
+	rawChainID, rawStepKey := chainID, stepKey
+	pathChainID := store.SanitizePathSegment(chainID, types.ChainIDUnspecified)
+	pathStepKey := store.SanitizePathSegment(stepKey, types.StepIndexUnspecified)
+	pathReason := store.SanitizePathSegment(reason, types.ReasonUnspecified)
+
+	// Self-collection (§3.4 A.1 retention), BEFORE the bind, not after: reap
+	// the expired, then record the new. Sweeping afterwards would let a marker
+	// whose ORIGINATION timestamp is already older than the window (a
+	// redelivery of an old failure — legitimate under §3.10.6) be deleted by
+	// the very bind that wrote it, which reads as the write silently failing.
+	// Throttled, so the dispatch path does not carry a scan; best-effort, like
+	// everything else on this tree.
+	h.maybeCollectMarkers(hctx.Store, hctx.LocationIndex)
+
 	origCode := ""
 	if len(origResult) > 0 {
 		var ed types.ErrorData
@@ -271,14 +295,13 @@ func (h *Handler) bindLostErrorMarker(hctx *handler.HandlerContext, chainID, fai
 	}
 
 	marker, err := types.ChainErrorLostData{
-		OriginalCode:       origCode,
-		OriginalStatus:     origStatus,
-		FailedDeliveryURI:  failedURI,
-		OriginalRequestID:  hctx.RequestID,
+		Code:               origCode,
+		Status:             origStatus,
+		TargetURI:          failedURI,
 		Timestamp:          originTimestampMs,
-		Reason:             reason,
-		ChainID:            chainID,
-		StepIndex:          stepKey,
+		Reason:             pathReason,
+		ChainID:            rawChainID,
+		StepIndex:          rawStepKey,
 		RejectedMarkerHash: mirrorReceiverMarker,
 	}.ToEntity()
 	if err != nil {
@@ -292,7 +315,7 @@ func (h *Handler) bindLostErrorMarker(hctx *handler.HandlerContext, chainID, fai
 	// invariant-pointer hex form (lowercase, format-code-included, 66
 	// chars). Same encoding used by core/capability/storage_path.go for
 	// multi-sig-root paths.
-	markerPath := "system/runtime/chain-errors/lost/" + chainID + "/" + stepKey + "/" + reason + "/" + hex.EncodeToString(markerHash.Bytes())
+	markerPath := "system/runtime/chain-errors/lost/" + pathChainID + "/" + pathStepKey + "/" + pathReason + "/" + hex.EncodeToString(markerHash.Bytes())
 	// Best-effort bind; an error here must not affect advancement.
 	// Per F11 (workbench Round 6 Stage 3 cap-delegation negative-case
 	// observation): when the bind itself fails (typically because the
@@ -471,6 +494,11 @@ func (h *Handler) executeDispatch(ctx context.Context, hctx *handler.HandlerCont
 		return handler.NewErrorResponse(429, "bounds_exceeded", boundsErr.Error())
 	}
 	opts = append(opts, handler.WithBounds(childBounds))
+
+	// §3.9: "The counter is incremented on each continuation advancement
+	// dispatch." THIS is that dispatch — the only site in the tree that
+	// increments. The dispatch layer enforces the ceiling; we only count.
+	opts = append(opts, handler.WithChainDepth(hctx.ChainDepth+1))
 
 	if resource != nil {
 		opts = append(opts, handler.WithResource(resource))
