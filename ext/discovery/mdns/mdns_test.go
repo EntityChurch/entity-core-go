@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/types"
 	"go.entitychurch.org/entity-core-go/ext/discovery"
 
@@ -263,3 +264,111 @@ func TestEndpointHintRoundTrip(t *testing.T) {
 // Silence the unused-import for cbor.RawMessage (only used in fixtures
 // above through the candidate path).
 var _ cbor.RawMessage
+
+// -----------------------------------------------------------------------
+// Persistent watcher (§3.0) — lifecycle. These are unit-level (no
+// multicast traffic), matching the package's altitude: they prove the
+// watcher STARTS on observe-wiring, STOPS cleanly on Close (no goroutine
+// leak — Close waits on the done channel), and is idempotent on
+// re-registration and double-Close. End-to-end arrival streaming rides
+// the same Browse plumbing Scan already exercises.
+// -----------------------------------------------------------------------
+
+func watcherState(b *Backend) (started bool, done chan struct{}) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.watcherStarted, b.watcherDone
+}
+
+func TestSetObserveCallbackStartsWatcher(t *testing.T) {
+	b := New("peer-local", nil)
+	if started, _ := watcherState(b); started {
+		t.Fatal("watcher started before SetObserveCallback")
+	}
+	b.SetObserveCallback(func(types.CandidateData) {}, func(h hash.Hash) {})
+	started, done := watcherState(b)
+	if !started || done == nil {
+		t.Fatalf("watcher did not start on non-nil observe wiring (started=%v done=%v)", started, done != nil)
+	}
+	b.Close()
+}
+
+func TestNilObserveDoesNotStartWatcher(t *testing.T) {
+	b := New("peer-local", nil)
+	b.SetObserveCallback(nil, nil)
+	if started, _ := watcherState(b); started {
+		t.Fatal("watcher started on a nil observe hook — nil means no streaming sink")
+	}
+}
+
+func TestCloseStopsWatcherNoLeak(t *testing.T) {
+	b := New("peer-local", nil)
+	b.SetObserveCallback(func(types.CandidateData) {}, func(h hash.Hash) {})
+	_, done := watcherState(b)
+	if done == nil {
+		t.Fatal("no watcher to stop")
+	}
+	b.Close() // blocks until the goroutine exits
+	select {
+	case <-done:
+		// closed => goroutine returned
+	default:
+		t.Fatal("Close returned but watcher done channel is still open — goroutine leak")
+	}
+	if started, _ := watcherState(b); started {
+		t.Fatal("watcherStarted not reset after Close")
+	}
+	b.Close() // idempotent — must not panic or block
+}
+
+func TestReRegistrationDoesNotStartSecondWatcher(t *testing.T) {
+	b := New("peer-local", nil)
+	b.SetObserveCallback(func(types.CandidateData) {}, func(h hash.Hash) {})
+	_, done1 := watcherState(b)
+	b.SetObserveCallback(func(types.CandidateData) {}, func(h hash.Hash) {})
+	_, done2 := watcherState(b)
+	if done1 != done2 {
+		t.Fatal("re-registration started a second watcher (done channel changed)")
+	}
+	b.Close()
+}
+
+func TestWithWatchIntervalHonored(t *testing.T) {
+	b := New("peer-local", nil, WithWatchInterval(250*time.Millisecond))
+	if b.watchInterval != 250*time.Millisecond {
+		t.Fatalf("watchInterval = %v, want 250ms", b.watchInterval)
+	}
+	// Non-positive is ignored (keeps the default).
+	b2 := New("peer-local", nil, WithWatchInterval(0))
+	if b2.watchInterval != 30*time.Second {
+		t.Fatalf("watchInterval = %v, want default 30s (non-positive ignored)", b2.watchInterval)
+	}
+}
+
+// TestWatcherReBrowsesAndClosesCleanly exercises the periodic re-browse loop
+// (ticker → browseCycle → cancel) over several ticks with short timeouts,
+// then asserts Close joins the goroutine with no leak. No mDNS responders are
+// needed: each cycle is a bounded empty browse (same as TestScan…), the point
+// is the cadence + shutdown mechanics, not observation.
+func TestWatcherReBrowsesAndClosesCleanly(t *testing.T) {
+	b := New("peer-local", nil,
+		WithScanTimeout(15*time.Millisecond),
+		WithWatchInterval(20*time.Millisecond))
+	b.SetObserveCallback(func(types.CandidateData) {}, func(h hash.Hash) {})
+	_, done := watcherState(b)
+	if done == nil {
+		t.Fatal("watcher did not start")
+	}
+	time.Sleep(120 * time.Millisecond) // ~5 cycles
+	select {
+	case <-done:
+		t.Fatal("watcher exited on its own before Close")
+	default:
+	}
+	b.Close()
+	select {
+	case <-done:
+	default:
+		t.Fatal("Close returned but watcher goroutine still running — leak")
+	}
+}

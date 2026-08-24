@@ -97,14 +97,53 @@ type Backend struct {
 	// (§3.0). Backends can block this long on a one-shot Browse.
 	scanTimeout time.Duration
 
-	// Observed candidates — populated by Browse during Scan AND streamed
-	// from the persistent watcher (started on first observe-callback
-	// wiring). Map key = candidate.content_hash.
+	// Observed candidates — populated by Browse during Scan AND by the
+	// persistent watcher (§3.0 reactive-default streaming). Map key =
+	// candidate.content_hash. NOTE: currently used only by Scan's snapshot
+	// path; the watcher pipes straight through observeCb (the substrate
+	// binder is the authoritative live surface), so this map is not the
+	// watcher's state.
 	observed map[hash.Hash]types.CandidateData
 
 	// Observe / reap callbacks wired by the substrate.
 	observeCb func(types.CandidateData)
 	reapCb    func(hash.Hash)
+
+	// Persistent watcher (§3.0). Started on first SetObserveCallback with a
+	// non-nil observe hook; re-browses on a fixed cadence (watchInterval),
+	// re-observing every still-present peer each cycle and piping it through
+	// observeCb. watcherCancel stops it; watcherDone closes when the
+	// goroutine has fully exited (Close waits on it). started guards against
+	// a double-start on a re-registration.
+	//
+	// WHY RE-BROWSE, not one long-lived Browse: grandcat/zeroconf dedups
+	// within a single Browse (client.go: `if _, ok := sentEntries[k]; ok {
+	// continue }`) — a present-and-not-departing peer is emitted exactly
+	// ONCE and never again for that Browse's lifetime. A single long-lived
+	// browse therefore provides no liveness refresh, which breaks any
+	// age-based reap on the consumer side: `CandidateData.ObservedAt` is in
+	// the candidate's content hash, so a consumer that reaps stale
+	// candidates by ObservedAt age depends on periodic RE-observation to
+	// keep a live peer's timestamp fresh. Re-browsing each watchInterval
+	// supplies that heartbeat (and surfaces new arrivals within one cycle).
+	//
+	// CONSUMER CONSTRAINT: watchInterval MUST be shorter than the consumer's
+	// candidate-max-age, or a live peer's ObservedAt ages past the cutoff
+	// between refreshes and is false-reaped. Set WithWatchInterval to fit
+	// your reap policy before relying on the watcher to replace a manual
+	// re-scan loop.
+	//
+	// REAP LIMITATION (unchanged): active DEPARTURE reaping is still not
+	// provided. grandcat drops TTL==0 goodbye records (client.go: `if
+	// e.TTL == 0 { delete; continue }`) and never forwards them, so there is
+	// no prompt departure signal to drive reapCb — departure removal remains
+	// the consumer's age-based reap (the heartbeat above is what makes that
+	// reap correct). Prompt goodbye tracking needs a different library hook
+	// or a raw-mDNS listener and is a separate work item.
+	watchInterval  time.Duration
+	watcherStarted bool
+	watcherCancel  context.CancelFunc
+	watcherDone    chan struct{}
 }
 
 // Option configures a Backend at construction.
@@ -120,14 +159,29 @@ func WithScanTimeout(d time.Duration) Option {
 	return func(b *Backend) { b.scanTimeout = d }
 }
 
+// WithWatchInterval sets the persistent watcher's re-browse cadence (default
+// 30s) — how often every still-present peer is re-observed to refresh its
+// ObservedAt. It MUST be shorter than the consumer's candidate-max-age or a
+// live peer is false-reaped between refreshes; it also bounds new-arrival
+// latency (a new peer surfaces within one interval). A non-positive value is
+// ignored.
+func WithWatchInterval(d time.Duration) Option {
+	return func(b *Backend) {
+		if d > 0 {
+			b.watchInterval = d
+		}
+	}
+}
+
 // New constructs an mDNS backend bound to a peer-id + profile resolver.
 func New(localPeerID string, resolver ProfileResolver, opts ...Option) *Backend {
 	b := &Backend{
-		localPeerID: localPeerID,
-		resolver:    resolver,
-		announced:   make(map[string]*zeroconf.Server),
-		observed:    make(map[hash.Hash]types.CandidateData),
-		scanTimeout: 1 * time.Second,
+		localPeerID:   localPeerID,
+		resolver:      resolver,
+		announced:     make(map[string]*zeroconf.Server),
+		observed:      make(map[hash.Hash]types.CandidateData),
+		scanTimeout:   1 * time.Second,
+		watchInterval: 30 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(b)
@@ -139,13 +193,127 @@ func New(localPeerID string, resolver ProfileResolver, opts ...Option) *Backend 
 func (b *Backend) Kind() string { return BackendKind }
 
 // SetObserveCallback implements discovery.Backend. Called once at
-// backend registration by the substrate; subsequent Scan calls + the
-// persistent watcher push through these.
+// backend registration by the substrate. Wiring a non-nil observe hook
+// starts the persistent watcher (§3.0): from this point the backend
+// re-browses every watchInterval, piping each still-present peer through
+// observeCb, so a consumer of the watchable prefix sees new peers — and
+// keeps live peers' ObservedAt fresh for age-based reap — without
+// re-invoking :scan. Idempotent — a re-registration re-points the
+// callbacks but does not start a second watcher. Stop it with Close().
 func (b *Backend) SetObserveCallback(observe func(types.CandidateData), reap func(hash.Hash)) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.observeCb = observe
 	b.reapCb = reap
+	if observe != nil && !b.watcherStarted {
+		b.startWatcherLocked()
+	}
+}
+
+// startWatcherLocked launches the persistent browse goroutine. Caller MUST
+// hold b.mu. Idempotent via watcherStarted.
+func (b *Backend) startWatcherLocked() {
+	ctx, cancel := context.WithCancel(context.Background())
+	b.watcherStarted = true
+	b.watcherCancel = cancel
+	b.watcherDone = make(chan struct{})
+	go b.runWatcher(ctx, b.watcherDone)
+}
+
+// runWatcher re-browses on the watchInterval cadence, re-observing every
+// still-present peer each cycle (fresh resolver → grandcat's per-Browse
+// dedup resets → live peers are re-emitted, refreshing their ObservedAt).
+// One cycle failing (transient resolver/socket error) is skipped, not
+// fatal — the next tick retries. Exits only when ctx is cancelled (Close),
+// closing done on the way out.
+func (b *Backend) runWatcher(ctx context.Context, done chan struct{}) {
+	defer close(done)
+
+	b.mu.Lock()
+	interval := b.watchInterval
+	b.mu.Unlock()
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	b.browseCycle(ctx) // observe immediately; don't wait a full interval first
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b.browseCycle(ctx)
+		}
+	}
+}
+
+// browseCycle runs one bounded Browse (same shape as Scan: fresh resolver,
+// scanTimeout-bounded) and pipes every observed entry through observeCb.
+// Because the resolver is fresh each cycle, grandcat's sentEntries dedup
+// starts empty, so still-present peers are re-emitted — that re-observation
+// is the liveness heartbeat the consumer's age-based reap depends on.
+func (b *Backend) browseCycle(parent context.Context) {
+	b.mu.Lock()
+	observeCb := b.observeCb
+	timeout := b.scanTimeout
+	b.mu.Unlock()
+	if observeCb == nil {
+		return
+	}
+
+	var resolverOpts []zeroconf.ClientOption
+	if ifs := announceInterfaces(); ifs != nil {
+		resolverOpts = append(resolverOpts, zeroconf.SelectIfaces(ifs))
+	}
+	resolver, err := zeroconf.NewResolver(resolverOpts...)
+	if err != nil {
+		return // skip this cycle; next tick retries
+	}
+
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	entriesCh := make(chan *zeroconf.ServiceEntry, 32)
+	if err := resolver.Browse(ctx, ServiceTypeLabel, ServiceDomain, entriesCh); err != nil {
+		return
+	}
+	for {
+		select {
+		case e, ok := <-entriesCh:
+			if !ok {
+				return
+			}
+			if e == nil {
+				continue
+			}
+			observeCb(candidateFromServiceEntry(e))
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// Close stops the persistent watcher and waits for its goroutine to exit.
+// Idempotent and safe on a backend whose watcher never started. Announce
+// sessions are left untouched — call AnnounceStop for those.
+func (b *Backend) Close() {
+	b.mu.Lock()
+	cancel := b.watcherCancel
+	done := b.watcherDone
+	b.watcherCancel = nil
+	b.watcherDone = nil
+	b.watcherStarted = false
+	b.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
 }
 
 // Announce implements discovery.Backend. Registers the local peer at
@@ -245,9 +413,12 @@ func (b *Backend) AnnounceStop(ctx context.Context, profileRef string) error {
 // MAY ignore per §3.3); a future iteration can layer TXT-key predicate
 // filtering once the cohort agrees on a shape.
 //
-// Per §3.0, the substrate calls this for the immediate snapshot return;
-// the substrate's observe-callback pipes async arrivals into the
-// watchable prefix without each consumer needing to re-invoke `:scan`.
+// Per §3.0, the substrate calls this for the immediate snapshot return.
+// Arrivals seen DURING this Browse are also piped through observeCb.
+// Arrivals BETWEEN :scan calls are handled by the persistent watcher
+// (started at SetObserveCallback), so live updates no longer require a
+// consumer-side :scan loop. Departures are still not reaped (grandcat
+// drops TTL==0 goodbyes — see the watcher note on the Backend struct).
 func (b *Backend) Scan(ctx context.Context, filter map[string]cbor.RawMessage) ([]types.CandidateData, error) {
 	b.mu.Lock()
 	timeout := b.scanTimeout
