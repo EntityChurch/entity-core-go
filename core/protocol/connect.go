@@ -7,15 +7,16 @@ import (
 	"encoding/hex"
 	"fmt"
 	"reflect"
-	"strings"
 	"time"
 
+	"go.entitychurch.org/entity-core-go/core/capability"
 	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
 	ecerrors "go.entitychurch.org/entity-core-go/core/errors"
 	"go.entitychurch.org/entity-core-go/core/handler"
 	"go.entitychurch.org/entity-core-go/core/hash"
+	"go.entitychurch.org/entity-core-go/core/store"
 	"go.entitychurch.org/entity-core-go/core/types"
 
 	"github.com/fxamacker/cbor/v2"
@@ -94,6 +95,16 @@ type GrantResolver func(remotePeerID crypto.PeerID, remoteIdentityHash hash.Hash
 // grants that reference unregistered handlers at connection time.
 type HandlerRegisteredFn func(pattern string) bool
 
+// AdvertisedScopeFn returns what this peer advertises it SERVES, as grant
+// entries — the parent side of the §3 advertisement-discipline subset check
+// (`EXTENSION-SIGNALING.md` §6.5 (b) Contents; arch 977667f).
+//
+// It is a function rather than a stored slice because handlers register
+// throughout the builder and extensions register after the connect handler
+// itself; evaluating at authenticate-time is what makes a late registration
+// visible, exactly as the HandlerRegisteredFn closure did.
+type AdvertisedScopeFn func() []types.GrantEntry
+
 // ConnectHandler handles the system/protocol/connect path.
 type ConnectHandler struct {
 	localKeypair       crypto.Keypair
@@ -103,6 +114,7 @@ type ConnectHandler struct {
 	connectionGrants   []types.GrantEntry // nil means use DefaultConnectionGrants()
 	grantResolver      GrantResolver      // nil means skip dynamic resolution
 	handlerRegistered  HandlerRegisteredFn // nil means skip discipline check
+	advertisedScope    AdvertisedScopeFn   // nil means skip the §3 subset filter
 	debugLog           func(format string, args ...any) // nil → silent; v7.65 §5 wire-acceptance debug
 
 	// V7.69 §4.5 — what this peer advertises in hello negotiation.
@@ -264,6 +276,13 @@ func (h *ConnectHandler) SetGrantResolver(r GrantResolver) {
 // The peer builder wires this with the dispatcher's registry.
 func (h *ConnectHandler) SetHandlerRegisteredFn(fn HandlerRegisteredFn) {
 	h.handlerRegistered = fn
+}
+
+// SetAdvertisedScopeFn supplies the served-scope the §3 advertisement filter
+// checks assembled grants against. Wired by the peer builder from the handler
+// registry; nil leaves the filter off.
+func (h *ConnectHandler) SetAdvertisedScopeFn(fn AdvertisedScopeFn) {
+	h.advertisedScope = fn
 }
 
 // Manifest returns the handler's self-description for the system tree.
@@ -542,44 +561,12 @@ func (h *ConnectHandler) handleAuthenticate(ctx context.Context, req *handler.Re
 	// entity hash — what role / identity / quorum extensions key tree
 	// state by (e.g., agent-cert lookups by `attested = remoteIdentityHash`
 	// for the role extension's recognize-on-attestation policy mode).
-	var grants []types.GrantEntry
-	if h.grantResolver != nil {
-		grants = h.grantResolver(claimedPeerID, remoteIdentityContentHash)
+	var policyStore store.ContentStore
+	var policyIndex store.LocationIndex
+	if req.Context != nil {
+		policyStore, policyIndex = req.Context.Store, req.Context.LocationIndex
 	}
-	if grants == nil && h.connectionGrants != nil {
-		grants = h.connectionGrants
-	}
-	if grants == nil {
-		grants = DefaultConnectionGrants()
-	}
-	// V7 v7.62 §8: policy-table consultation at authenticate-response.
-	// Initial grant scope delivered to A is the UNION of the §4.4 SHOULD
-	// floor (whatever was resolved above) and any matching policy entry
-	// at system/capability/policy/{caller_hex} (or `default` fallback).
-	//
-	// "No-op when capability handler is not installed" is satisfied by
-	// construction: if the cap handler isn't installed, no policy entries
-	// exist in the tree, so the lookup returns nothing and the union
-	// reduces to the floor.
-	//
-	// Topology asymmetry (§8): handshake is UNION (initial grant builds
-	// UP from nothing); runtime request is subset-validation (request
-	// narrows DOWN from existing cap). Both consult the same policy
-	// table — single source of truth, opposite assembly direction.
-	if req.Context != nil && req.Context.LocationIndex != nil && req.Context.Store != nil {
-		if policyGrants := readHandshakePolicyGrants(req.Context, remoteIdentityContentHash, claimedPeerID); len(policyGrants) > 0 {
-			grants = append(append([]types.GrantEntry(nil), grants...), policyGrants...)
-		}
-	}
-	// V7 v7.62 §3 advertisement discipline: drop any grant entry whose
-	// `handlers.include` references a handler not registered on this peer.
-	// Advertising an unbacked grant is non-conformant — the cross-peer
-	// behavior is `404 handler_not_found` at the dispatch boundary, which
-	// breaks the contract the grant implies. The peer builder wires
-	// handlerRegistered with the dispatcher's registry.
-	if h.handlerRegistered != nil {
-		grants = filterAdvertisedGrants(grants, h.handlerRegistered)
-	}
+	grants := h.AssembleInboundGrants(policyStore, policyIndex, claimedPeerID, remoteIdentityContentHash)
 	// R3a idempotency, §9.1 R6-a form: read minted_capability from the
 	// per-peer session entity at /{local}/system/peer/session/{remote}.
 	// If the cached cap's resolved grants still match (ECF byte equality
@@ -942,20 +929,117 @@ func CreateAuthenticateExecuteFormat(kp crypto.Keypair, theirNonce []byte, activ
 	}), nil
 }
 
-// filterAdvertisedGrants drops grant entries whose handlers.include list
-// references at least one handler not registered on this peer (V7 v7.62 §3).
-// A grant whose handlers.include is empty (rare but legal) is passed through
-// unmodified — it advertises no handler authority and so cannot mislead.
-// All handler patterns in a grant's include list must resolve; if any one
-// is unbacked, the entry is dropped (advertising a partial promise has the
-// same "404 at dispatch" failure mode as advertising a fully bogus one).
-func filterAdvertisedGrants(grants []types.GrantEntry, registered HandlerRegisteredFn) []types.GrantEntry {
+// AssembleInboundGrants returns the grant set this peer issues a remote peer
+// that dials IN: the §4.4 SHOULD floor (dynamic resolver → static override →
+// DefaultConnectionGrants), UNIONed with that peer's policy-table entry, then
+// advertisement-filtered. It is the one grant assembly this peer performs, and
+// it has exactly two callers:
+//
+//   - handleAuthenticate — the §6.6 handshake mint, acceptor → dialer;
+//   - the §6.5 (b) reciprocal mint, dialer → acceptor, on a symmetric
+//     rendezvous establishment.
+//
+// The second caller is why this is a method and not inline handshake code
+// (arch f8f736a, Q2 contents ruling 2026-08-05). §6.5 (b) says the reciprocal
+// grant is "the mirror of what an inbound dialer receives," and that names the
+// grant an inbound dialer ACTUALLY receives — this assembled set — not the flat
+// §4.4 floor. Minting the bare floor while an inbound dialer gets the assembled
+// set gives the establishment whose whole justification is symmetry asymmetric
+// authority: the reciprocal direction 403s on anything out-of-floor. Both Go
+// and Rust shipped the flat floor; this is the fix.
+//
+// The mirror is symmetric CONSTRUCTION, not identical grant sets. Each peer
+// runs its own assembly against the counterpart, so A→B and B→A differ exactly
+// as A's and B's policy tables differ — correct, because authority is
+// target-owned.
+//
+// store and index may be nil (in-process contexts with no tree): the policy
+// union is then skipped and the result reduces to the floor, which is also what
+// happens when the capability handler simply isn't installed — no policy
+// entries exist, so the lookup misses.
+func (h *ConnectHandler) AssembleInboundGrants(
+	store store.ContentStore,
+	index store.LocationIndex,
+	remotePeerID crypto.PeerID,
+	remoteIdentityHash hash.Hash,
+) []types.GrantEntry {
+	var grants []types.GrantEntry
+	if h.grantResolver != nil {
+		grants = h.grantResolver(remotePeerID, remoteIdentityHash)
+	}
+	if grants == nil && h.connectionGrants != nil {
+		grants = h.connectionGrants
+	}
+	if grants == nil {
+		grants = DefaultConnectionGrants()
+	}
+	// V7 v7.62 §8: policy-table consultation at authenticate-response.
+	// Initial grant scope delivered to the remote is the UNION of the §4.4
+	// SHOULD floor (whatever was resolved above) and any matching policy
+	// entry at system/capability/policy/{caller_hex} (or `default`
+	// fallback).
+	//
+	// Topology asymmetry (§8): handshake is UNION (initial grant builds
+	// UP from nothing); runtime request is subset-validation (request
+	// narrows DOWN from existing cap). Both consult the same policy
+	// table — single source of truth, opposite assembly direction. The
+	// reciprocal mint reuses this ONE union direction: there is no third,
+	// reciprocal-only narrowing pass (Q2(b) — "MAY narrow by policy" was
+	// dropped from §6.5 (b)). An operator wanting the reciprocal direction
+	// narrower writes it as that peer's policy entry, in the one table.
+	if store != nil && index != nil {
+		if policyGrants := readHandshakePolicyGrants(store, index, remoteIdentityHash, remotePeerID); len(policyGrants) > 0 {
+			grants = append(append([]types.GrantEntry(nil), grants...), policyGrants...)
+		}
+	}
+	// V7 v7.62 §3 advertisement discipline: drop any grant entry whose
+	// `handlers.include` references a handler not registered on this peer.
+	// Advertising an unbacked grant is non-conformant — the cross-peer
+	// behavior is `404 handler_not_found` at the dispatch boundary, which
+	// breaks the contract the grant implies. The peer builder wires
+	// handlerRegistered with the dispatcher's registry. Q2(a) makes this
+	// binding on the reciprocal mint too: it is inherent in "the grant an
+	// inbound dialer would receive," and both impls were skipping it there.
+	if h.advertisedScope != nil {
+		grants = filterAdvertisedGrants(grants, h.advertisedScope(), h.localPeerID)
+	}
+	return grants
+}
+
+// filterAdvertisedGrants applies the §3 advertisement discipline to an assembled
+// grant set: an entry is retained iff this peer's advertised served-scope COVERS
+// it, and an uncovered entry is DROPPED, not narrowed.
+//
+// The matching rule is pinned (`EXTENSION-SIGNALING.md` §6.5 (b) Contents, arch
+// 977667f): coverage is the **same four-axis `scope_subset` relation the chain
+// already uses for attenuation** — handlers ∧ operations ∧ resources ∧ peers,
+// entry ⊆ advertised — reached here through the very same `capability.IsAttenuated`
+// the delegation walk calls. That identity is the whole point of the ruling and
+// the reason this does not roll its own comparison: any second relation is a
+// place where two impls can silently disagree.
+//
+// What this replaces was exactly such a second relation. Go used to check the
+// HANDLERS axis only, by stripping a trailing `/*` and asking the registry
+// whether the base pattern resolved. The ruling names that shape non-conformant:
+// namespace-prefix-match and exact-op-match both split across the seam (one impl
+// drops `system/tree:put` on `foo/bar` against an advertised `foo/*`, another
+// keeps it), which is the latent interop bug the MUST forecloses. Operations and
+// resources were not consulted at all, so a grant naming an operation this peer
+// does not serve survived and produced its 404 at the dispatch boundary — the
+// failure the discipline exists to prevent.
+//
+// An empty `advertised` means the peer published no served-scope. That is
+// treated as "advertises nothing," so everything drops — deliberately, and
+// deliberately fail-closed: the alternative (pass everything through when the
+// scope is unknown) reinstates the unfiltered behavior precisely when we know
+// least, and the peer builder always supplies a scope.
+func filterAdvertisedGrants(grants []types.GrantEntry, advertised []types.GrantEntry, localPeerID crypto.PeerID) []types.GrantEntry {
 	if len(grants) == 0 {
 		return grants
 	}
 	out := make([]types.GrantEntry, 0, len(grants))
 	for _, g := range grants {
-		if !grantHandlersAllRegistered(g, registered) {
+		if !advertisedCovers(advertised, g, localPeerID) {
 			continue
 		}
 		out = append(out, g)
@@ -963,29 +1047,124 @@ func filterAdvertisedGrants(grants []types.GrantEntry, registered HandlerRegiste
 	return out
 }
 
-func grantHandlersAllRegistered(g types.GrantEntry, registered HandlerRegisteredFn) bool {
-	for _, pattern := range g.Handlers.Include {
-		// Bare "*" is the universal — "any handler" — and is always backed
-		// by construction. Used by OpenAccessGrants and operator
-		// configurations that intentionally span the whole handler space.
-		if pattern == "*" {
-			continue
+// advertisedCovers reports whether some advertised entry covers `g` under the
+// chain's attenuation relation.
+//
+// Both sides canonicalize against the LOCAL peer-id: the advertised scope and
+// the grant being minted are both authored by this peer, about its own
+// namespace, so there is one granter here and not two (unlike a delegation
+// walk, where parent and child have different granters — PR-8).
+//
+// The comparison is wrapped in a one-entry-each CapabilityTokenData so it runs
+// through `capability.IsAttenuated` itself rather than a lookalike: `child ⊆
+// parent` is exactly `entry ⊆ advertised`.
+func advertisedCovers(advertised []types.GrantEntry, g types.GrantEntry, localPeerID crypto.PeerID) bool {
+	// UNIVERSAL-GRANT CARVE-OUT — preserved deliberately, and routed.
+	//
+	// A peer's advertised served-scope is a finite set of registered handlers,
+	// so NO union of advertised entries can cover a `handlers: ["*"]` claim.
+	// Under the ruling's "uncovered entries drop, not narrow", a universal grant
+	// is therefore deleted outright, and every open-access peer would hand its
+	// counterparts exactly nothing.
+	//
+	// That is a consequence the ruling does not address — its worked example is
+	// about a NARROWER mismatch (`system/tree:put` on `foo/bar` against an
+	// advertised `foo/*`), which is the divergence the four-axis relation
+	// genuinely closes. Applying "drop" to the universal case does not close a
+	// divergence; it removes authority the peer demonstrably can serve, since a
+	// `*` grant dispatched at a REGISTERED handler works and only 404s at an
+	// unregistered one — the same outcome an absent grant produces, one layer
+	// later.
+	//
+	// So the pre-existing carve-out stands until arch rules: bare `*` is backed
+	// by construction, retained iff this peer serves anything at all. Every
+	// non-universal entry goes through the ruled relation below. Filed at
+	// docs/validation/spec-issues/ and routed — Rust has not hit this because
+	// they discharge the discipline by construction rather than by filtering.
+	if isUniversalHandlerClaim(g) {
+		return len(advertised) > 0
+	}
+	for _, adv := range advertised {
+		if coversFourAxes(adv, g, localPeerID) {
+			return true
 		}
-		// Other patterns may be exact (`system/tree`) or subtree wildcards
-		// (`system/handler/*`). The advertisement discipline only requires
-		// SOME registered handler matches the pattern at connect time — not
-		// that every theoretically-matching path is backed. Resolve via the
-		// registry's longest-prefix logic by stripping a trailing `/*` for
-		// subtree patterns.
-		base := pattern
-		if strings.HasSuffix(base, "/*") {
-			base = base[:len(base)-2]
-		}
-		if !registered(base) {
+	}
+	return false
+}
+
+// coversFourAxes is the ruled relation, and it is exactly FOUR axes: handlers ∧
+// operations ∧ resources ∧ peers, `entry ⊆ advertised`. Pattern semantics on
+// each axis are the chain's own (`capability.MatchesPattern`, resources
+// canonicalized via `capability.Canonicalize`) — that identity is what closes
+// the prefix-vs-pattern divergence the ruling names.
+//
+// It deliberately does NOT run the full `capability.IsAttenuated`, though the
+// ruling's phrase "the same scope_subset relation the chain uses" invites it.
+// IsAttenuated additionally enforces exclude-inheritance, constraint and
+// allowance attenuation, and expiry — the rest of a *delegation* check. Those
+// have no meaning against an advertisement: an advertised scope is a statement
+// about what this peer serves, not a parent capability, so it carries no
+// constraints and no allowances. Running the full relation therefore fails any
+// grant that HAS an allowance, since a child "adding an allowance key the parent
+// does not have" is an attenuation violation — and it cost us the entire `query`
+// category, whose v7.14 grant entries carry `constraints`/`allowances` by
+// requirement. Four axes means four.
+func coversFourAxes(advertised, g types.GrantEntry, localPeerID crypto.PeerID) bool {
+	if !scopeCovered(g.Handlers.Include, advertised.Handlers.Include, nil) {
+		return false
+	}
+	if !scopeCovered(g.Operations.Include, advertised.Operations.Include, nil) {
+		return false
+	}
+	canon := func(s string) string { return capability.Canonicalize(s, localPeerID) }
+	if !scopeCovered(g.Resources.Include, advertised.Resources.Include, canon) {
+		return false
+	}
+	// The peers axis is optional on both sides. An advertisement that names no
+	// peer scope constrains none, so anything the entry says is covered; an
+	// entry that names none claims none.
+	if g.Peers != nil && advertised.Peers != nil {
+		if !scopeCovered(g.Peers.Include, advertised.Peers.Include, nil) {
 			return false
 		}
 	}
 	return true
+}
+
+// scopeCovered reports whether every pattern the entry claims is matched by some
+// pattern the advertisement offers. canon, when non-nil, canonicalizes both
+// sides before matching (resources are paths; handlers and operations are not).
+func scopeCovered(entry, advertised []string, canon func(string) string) bool {
+	for _, claimed := range entry {
+		if canon != nil {
+			claimed = canon(claimed)
+		}
+		matched := false
+		for _, offered := range advertised {
+			if canon != nil {
+				offered = canon(offered)
+			}
+			if capability.MatchesPattern(claimed, offered) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+// isUniversalHandlerClaim reports whether a grant entry claims the whole handler
+// space — the one shape no finite advertised scope can cover.
+func isUniversalHandlerClaim(g types.GrantEntry) bool {
+	for _, pattern := range g.Handlers.Include {
+		if pattern == "*" {
+			return true
+		}
+	}
+	return false
 }
 
 // handshakePolicyPathPrefix is the tree prefix the connect handler reads when
@@ -1013,29 +1192,32 @@ const handshakePolicyFallbackSegment = "default"
 // handler's lookupPolicy performs canonicalization on its own subsequent
 // matches (in the request-time path); the handshake-time read at this site
 // is satisfied by the resolution-only fallback.
-func readHandshakePolicyGrants(hctx *handler.HandlerContext, callerIdentityHash hash.Hash, callerPeerID crypto.PeerID) []types.GrantEntry {
+// Takes the store and index directly rather than a *handler.HandlerContext:
+// the §6.5 (b) reciprocal mint runs the same assembly on the DIALER side, where
+// there is no inbound request and so no handler context to carry them.
+func readHandshakePolicyGrants(store store.ContentStore, index store.LocationIndex, callerIdentityHash hash.Hash, callerPeerID crypto.PeerID) []types.GrantEntry {
 	callerHex := hex.EncodeToString(callerIdentityHash.Bytes())
-	if entry, ok := readHandshakePolicyEntry(hctx, callerHex); ok {
+	if entry, ok := readHandshakePolicyEntry(store, index, callerHex); ok {
 		return entry.Grants
 	}
 	if len(callerPeerID) > 0 {
-		if entry, ok := readHandshakePolicyEntry(hctx, string(callerPeerID)); ok {
+		if entry, ok := readHandshakePolicyEntry(store, index, string(callerPeerID)); ok {
 			return entry.Grants
 		}
 	}
-	if entry, ok := readHandshakePolicyEntry(hctx, handshakePolicyFallbackSegment); ok {
+	if entry, ok := readHandshakePolicyEntry(store, index, handshakePolicyFallbackSegment); ok {
 		return entry.Grants
 	}
 	return nil
 }
 
-func readHandshakePolicyEntry(hctx *handler.HandlerContext, pattern string) (types.CapabilityPolicyEntryData, bool) {
+func readHandshakePolicyEntry(store store.ContentStore, index store.LocationIndex, pattern string) (types.CapabilityPolicyEntryData, bool) {
 	path := handshakePolicyPathPrefix + "/" + pattern
-	h, ok := hctx.LocationIndex.Get(path)
+	h, ok := index.Get(path)
 	if !ok {
 		return types.CapabilityPolicyEntryData{}, false
 	}
-	ent, ok := hctx.Store.Get(h)
+	ent, ok := store.Get(h)
 	if !ok {
 		return types.CapabilityPolicyEntryData{}, false
 	}

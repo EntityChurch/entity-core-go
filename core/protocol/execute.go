@@ -92,6 +92,14 @@ func (d *Dispatcher) handleExecute(ctx context.Context, env entity.Envelope, con
 		return d.makeErrorResponse(execData.RequestID, 403, "connection_required", "connection not established")
 	}
 
+	// EXTENSION-SIGNALING §6.5 (b) "Wielding", receive half. If the EXECUTE
+	// names a capability it did NOT inline, and that hash is one we authored
+	// as a reciprocal grant, supply the triple from our own side before
+	// verification. Every downstream check — grantee resolution,
+	// grantee == author, the §5.5 chain walk — then runs unchanged on the
+	// augmented set, so this widens what RESOLVES, never what PASSES.
+	env = d.resolveAuthoredGrant(env, execData)
+
 	// Verify request integrity.
 	//
 	// V7 v7.71 §A4-AUTHZ status+code discrimination (the AUTHZ-* matrix

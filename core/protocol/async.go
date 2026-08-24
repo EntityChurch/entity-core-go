@@ -10,7 +10,6 @@ import (
 	"go.entitychurch.org/entity-core-go/core/types"
 )
 
-
 func (d *Dispatcher) processAsyncDelivery(ctx context.Context, invoke func(context.Context) (*handler.Response, error), execData types.ExecuteData, deliverTokenEntity entity.Entity, originalIncluded map[hash.Hash]entity.Entity) {
 	resp, err := invoke(ctx)
 	if err != nil {
@@ -85,7 +84,41 @@ func (d *Dispatcher) deliverToInbox(ctx context.Context, execData types.ExecuteD
 			return fmt.Errorf("remote execute not available for inbox delivery to %s", execData.DeliverTo.URI)
 		}
 		d.debugf("delivery: remote inbox delivery to %s", execData.DeliverTo.URI)
-		resp, err := d.RemoteExecute(ctx, execData.DeliverTo.URI, op, deliveryEntity, resource)
+		// Back-direction authority, taxonomy row 2 (scoped reentry
+		// delivery): the delivery EXECUTE is authorized by the
+		// **deliver_token** — the cap the requester granted us for exactly
+		// this delivery — never by whatever broad authority the connection
+		// happens to carry. Before this, the fully-authorized `env` built
+		// above was silently discarded on the remote branch and the
+		// delivery rode the connection's session capability instead. On a
+		// dialed connection that cap is the one the far side granted us
+		// (works by accident); on the V7 §6.11 reentry path — the
+		// profile-less peer we reach only by reusing the connection IT
+		// opened — it is the cap WE minted for THEM, so `grantee != author`
+		// at the far side and the delivery dies `401 unresolvable_grantee`.
+		// Resolution is not authority: reusing an inbound connection
+		// resolves the peer, it does not authorize the dispatch.
+		//
+		// Guarded on the token naming US as grantee, because the far side's
+		// verify_request compares `grantee == author` and we are the author.
+		// The local-async entry point (local.go) synthesizes a deliver_token
+		// from the caller's own HandlerGrant, which is locally rooted and
+		// grants us nothing at the remote — that case keeps the pre-existing
+		// path rather than presenting a cap that cannot verify.
+		var async []*AsyncDelivery
+		if tokenGranteeIs(deliverTokenEntity, identityEntity.ContentHash) {
+			tokenCap := deliverTokenEntity
+			async = append(async, &AsyncDelivery{
+				CapabilityOverride: &tokenCap,
+				// The token's own signature + granter identity ride the
+				// original request's included set; without them the far
+				// side cannot walk the chain it just authorized.
+				Extras: originalIncluded,
+			})
+		} else {
+			d.debugf("delivery: deliver_token does not name us as grantee; remote delivery falls back to connection authority")
+		}
+		resp, err := d.RemoteExecute(ctx, execData.DeliverTo.URI, op, deliveryEntity, resource, async...)
 		if err != nil {
 			return fmt.Errorf("remote inbox delivery: %w", err)
 		}
@@ -98,6 +131,22 @@ func (d *Dispatcher) deliverToInbox(ctx context.Context, execData types.ExecuteD
 	// Local dispatch.
 	_, err = d.DispatchEnvelope(ctx, env, nil)
 	return err
+}
+
+// tokenGranteeIs reports whether tok is a capability token whose grantee is
+// exactly grantee. Used to decide whether a deliver_token can authorize an
+// outbound delivery we author: V7 §5.2 requires `grantee == author` at the
+// far side, so a token granted to somebody else (or an undecodable one)
+// cannot carry our dispatch.
+func tokenGranteeIs(tok entity.Entity, grantee hash.Hash) bool {
+	if tok.Type == "" || tok.ContentHash.IsZero() || grantee.IsZero() {
+		return false
+	}
+	data, err := types.CapabilityTokenDataFromEntity(tok)
+	if err != nil {
+		return false
+	}
+	return data.Grantee == grantee
 }
 
 // make202Response creates a 202 Accepted acknowledgement for async callbacks.

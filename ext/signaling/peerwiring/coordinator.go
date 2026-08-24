@@ -167,6 +167,16 @@ func (c *Coordinator) Establish(ctx context.Context, peerID crypto.PeerID) (*pee
 	}
 
 	conn := c.peer.ConnectVia(raw)
+	// PROPOSAL/EXTENSION-SIGNALING §6.5 (b) §4.4: classify the establishment
+	// BEFORE the handshake, because the dialer mints the reciprocal grant at
+	// the handshake's tail and reads this flag to decide whether to. We
+	// reached this peer by meeting at a §3 rendezvous key — c.keyFor produced
+	// it and party.Initiate drove the crossing off it — so the answer is yes,
+	// and it stays yes even though §10 profile resolution is what sent us down
+	// the §10.3 seam in the first place. Those are not exclusive, which is
+	// precisely why the rev-2 "rendezvous-driven vs profile-driven" test
+	// misfired here.
+	conn.MarkEstablishedViaRendezvousKey()
 	if err := conn.PerformConnect(ctx); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("punch: handshake over punched path to %s: %w", peerID, err)
@@ -194,7 +204,11 @@ func (c *Coordinator) Respond(ctx context.Context, key []byte) (crypto.PeerID, e
 	if err != nil {
 		return "", err
 	}
-	c.peer.ServeConn(raw)
+	// §4.4 (rev 3), responder seat: we camped on `key` and answered whoever
+	// met us there. §3.4's rendezvous-hash routing means they arrive only if
+	// they brought the same key, so the joint bringing is established and both
+	// seats classify identically — by construction, with nothing on the wire.
+	c.peer.ServeConn(raw).MarkEstablishedViaRendezvousKey()
 	return crypto.PeerID(initiator), nil
 }
 

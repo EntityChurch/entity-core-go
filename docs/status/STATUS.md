@@ -1,6 +1,6 @@
 # entity-core-go — status
 
-_Updated: 2026-08-04 · public: v0.8.0 (master)_
+_Updated: 2026-08-05 · public: v0.8.0 (master)_
 
 ## Where it is
 
@@ -45,24 +45,186 @@ both ways: Go `38·0F` verified by rust, rust `36·0F` verified by us. Every
 correction this repo routed is in the normative text — the derived-and-compared
 peer-id, the two hash axes, and the four-disposition anti-downgrade rule.
 
-**The flag day is nearly closed.** Both implementations now read AND seal, on
-both loops. §6.1: Go at `d56a690`, rust shortly after; rust then ran a live
-cross-impl sealed punch (both seats over the CLI/JSON contract, Go's binary
-built from `6a3f1b6`) and raised their `PUNCH_TRUST` to `Require` on the
-strength of it. Our collector is proven to enforce from our own seat too —
-`cmd/signaling-punch --trust require` completes Go↔Go over a live node, and a
-bare depositor built from our pre-flip commit is refused by name, not by
-timeout.
-
-**The flag day is CLOSED.** `peerwiring.DefaultTrust` is now `VerifyRequire`:
-an unsealed §6.1 coordination message is refused, which is what §6.3's MUST
-asks for. Verified after the flip with no `--trust` flag passed at all —
-default posture, `verified:true` both seats over a live node, `signaling` 7/7.
+**The flag day is CLOSED.** Both implementations read, seal, and now refuse.
+§6.1 sealing landed Go-side at `d56a690` and rust-side shortly after; rust ran
+a live cross-impl sealed punch and raised their `PUNCH_TRUST` to `Require` on
+the strength of it; our collector was then proven to enforce from our own seat
+(Go↔Go completes under require, and a bare depositor built from our pre-flip
+commit is refused by name, not by timeout). `peerwiring.DefaultTrust` is now
+`VerifyRequire` — verified after the flip with no `--trust` flag passed at all,
+so it is the default posture that was measured: `verified:true` on both seats
+over a live node, `signaling` 7/7.
 
 `entity-core-py` is unaffected: it has the §4 signaling client but does not
 punch and has no signed-blob support, so it never enters the path this
 governs. When Python builds the punch it seals from the start — there is no
 tolerant window left to arrive into.
+
+**The live arc is now the symmetric-reentry proposal**
+(`PROPOSAL-SYMMETRIC-REENTRY-MUTUAL-MINTING.md`, arch DRAFT rev 2), reviewed
+here against Go's code and routed back at
+`ROUTING-2026-08-05-symmetric-reentry-reviewed-and-our-row-2-was-bare.md`. Its
+§7 "no fourth row" ruling holds in Go: one resolution funnel
+(`getRemoteConnection`), every dispatch site mapping to a row-1 dial, a row-2
+trigger, or verbatim relay pass-through. Enumerating that found a defect of our
+own — `deliverToInbox` built a fully-authorized envelope from the
+`deliver_token` and then discarded it on the remote branch, so INBOX async
+delivery rode the connection's session capability instead. Invisible on a
+dialed connection, `401 unresolvable_grantee` on the §6.11 reentry path.
+Fixed with two regression tests. A second site with the same shape —
+`DispatchLocalEnvelope` dropping the envelope's capability, which is how
+cross-peer subscription notify authorizes — is routed, not fixed: it needs a
+taxonomy answer first, and the gate that covers notify publishes a dialable
+profile as its setup step, so it cannot observe the profile-less case.
+Arch answered at rev 3 (`5f62374`), folding both of our findings as validated
+behavior: the §4.4 discriminator moved **onto the key** (*was a §3 rendezvous
+key mutually brought?* — a co-occurring profile resolution does not demote it),
+and §9 Q2 gained the precedence pin (connection-scoped originating authority is
+a **distinct slot** from the durable `held_capability`, consulted in addition to
+it). **Both are ACKed and built here** — `MarkEstablishedViaRendezvousKey` on
+all three symmetric establishment paths, and a connection-scoped authority slot
+with one shared selector for `Execute` / `ExecuteWithIncluded`; three tests,
+`signaling` 7/7 with the classification on the live punch path. **Go still
+mints nothing** — the mechanism (mint, §7a.2a carriage, acceptance check,
+bounded wait) waits for FOLDED, which now gates on core-rust's ack, not ours.
+Routed at `ROUTING-2026-08-05-b-ack-rev3-discriminator-and-precedence-both-built.md`.
+(Arch's fold answered the ordering question in the normative text — the
+connection-scoped grant wins, "a durable cap can predate the live
+establishment and MUST NOT shadow it." Our implementation matched.)
+
+**§6.5 (b) is FOLDED (arch `c8c7bc8`) and Go's mint is built.** The loop runs
+end to end: mint at the handshake's tail gated on the local classification,
+acceptance checking only the legs the frame carries, installation into the
+connection-scoped slot, and a bounded wait so an acceptor that never receives a
+grant fails closed instead of blocking. Proven **cross-process over a real
+punched connection through a live signaling node** (both seats `verified:true`
+under `trust:require`), plus three regression tests including the §8.2
+asymmetric non-regression vector. `signaling` 7/7 with the mint in path.
+
+**One spec issue, and it is load-bearing for py and browser-rust:** the folded
+**Carriage** sentence (§7a.2a in-band params, no intercept lane) **has no
+construction** — a proactive establishment-time grant has no authorized carrier,
+because §4.4's `default_connection_grants` reach no deposit handler, and the
+sentence names no URI or operation at all. Both shipped impls independently
+built a self-verifying connect-phase frame instead. Filed at
+`docs/validation/spec-issues/2026-08-05-reciprocal-grant-carriage-is-unimplementable-as-folded.md`,
+routed with a proposed replacement at
+`ROUTING-2026-08-05-c-the-mint-is-built-and-the-carriage-has-no-construction.md`.
+Go matched core-rust's shipped wire shape deliberately so the cross-impl vector
+is runnable.
+
+**Building the §8.1 vector then found a gap that was ours, not the spec's.** The
+acceptor's origination timed out — Go's client-side reader treated every inbound
+frame as a response to something we sent, so an inbound EXECUTE on an *outbound*
+connection (the counterpart originating to us) was dropped as an orphan. That is
+V7 §6.11(b) dialer-side reentry, and Go had none; our server side has always
+served both directions. Fixed at `8f6da60`, and the §8.1 vector now passes —
+the acceptor dispatches under the grant and the dialer's `verify_request`
+accepts it. **Authority without a serving path is not reach-back**, and a peer
+can pass every grant-shaped test without noticing.
+
+**All four rulings landed (arch `f8f736a`) and Go has folded them.** The packet
+we held V3 on — `ROUTING-2026-08-06-decision-packet-four-rulings-before-the-cross-impl-run.md`
+— came back ruled and folded in place, with a new MUST attached: **reach-back
+serving**, generalized from Go's dialer-reentry gap and tagged
+single-impl-invisible so py builds both halves from the start.
+
+- **Q2 (the load-bearing one) — the reciprocal grant is the ASSEMBLED
+  inbound-dialer grant**, not the flat §4.4 floor: floor ∪ policy,
+  advertisement-filtered. Go's mint now runs the *same* assembly the §6.6
+  handshake runs, extracted as `ConnectHandler.AssembleInboundGrants` and called
+  from both sites — one assembly, not a second copy that drifts. Advertisement
+  discipline (Q2a) binds the mint too; the "MAY narrow by policy" third
+  direction (Q2b) is gone.
+- **Q3 — a floor, not a value.** Our 2s stays implementation-local; the
+  conformance-vector floor is named separately as
+  `peer.ReciprocalGrantVectorFloor`, with the distinction spelled out at both
+  constants so a future edit can't quietly merge them.
+- **Q1 / Q4** need no Go code change: the carriage shape stands, and the
+  reciprocal `capability:request` widening is the same §4.4 op (in v1, separate
+  vector, not gating S5).
+
+The pin test flipped rather than being deleted, and it no longer hardcodes a
+grant list: it dials the same peer the ordinary way and asserts the reciprocal
+grant is **byte-identical to what that peer hands an inbound dialer** — the
+ruling itself, measured on both directions.
+
+**V3 is CLOSED on the crossing — `8·0F`, four per direction.**
+`docs/validation/reports/2026-08-05-v3-reciprocal-grant-crossing-rust.md`.
+The first run was partial (direction A 4/4, direction B 0/4). Rust bisected
+direction B to their own punch driver — the initiator handed the socket to a
+bare `perform_connect` with the rendezvous flag and the dispatch context both
+dropped, so the mint's guards were never reached — fixed it, and folded Q2 in
+the same commit. Re-run against `6bf8f19`: **both directions mint and accept,
+4/4 each.** Their `reciprocal_grant_sent` and our new
+`reciprocal_grant_received` now appear on the same crossing, which is what makes
+"their minter declined" and "our acceptor dropped it" separable from the JSON
+alone.
+
+**Oracle-pinned: `8·0F @ e968ed1`.** Rust pushed, so `origin/dev` now carries
+the §6.5 (b) work and the provisional caveat that rode both earlier runs is
+discharged. Re-run from a read-only extraction of the published commit: no
+outcome changed, which is the only interesting thing a re-pin could find.
+
+**REACH is the open edge now, and we built our half of it.** The first run's
+stated limit was that V3 proved installation, not reach — a cap that verifies
+and authorizes nothing is exactly the failure the mechanism exists to prevent.
+`cmd/signaling-punch`'s responder now originates one dispatch back under the
+installed grant and reports `reciprocal_grant_received` /
+`reciprocal_reach_status`. **Go↔Go control: 200.** Against a Rust dialer the
+grant installs and the dispatch does not land — *not* an authority failure (no
+401, no 403) but a **lifetime** one: their initiator tears the connection down
+**~1.4 ms after its pong**, leaving no window to reach back. Checked both ways
+before routing it: our processing of their grant frame took 0.2 ms, and the same
+code path returns 200 Go↔Go.
+
+That is the precise **mirror** of the defect Go fixed on 2026-08-01, when our
+responder returned on first observation and dropped the socket under an
+initiator still waiting on its pong. The fix then was `lingerAfterVerify`; the
+ask now is the same linger on their initiator. A symmetric establishment needs a
+symmetric linger — and the reach leg in direction A is theirs to build, since
+there they are the acceptor.
+
+Re-checked at `e968ed1`: the linger is not in their driver yet (our routing and
+their status note crossed), so direction-B reach is a **held** measurement, not
+a failure — `reciprocal_grant_received:true` 4/4, never a 401 or 403. It becomes
+measurable the moment that linger exists. **Their note that Go still owes the
+reach leg is stale** — it landed in `26fd7b7`; what direction B waits on is the
+counterpart linger, not our leg.
+
+**Arch closed both owed items (`977667f`), and two Go deltas fell out — not one.**
+
+**The advertisement-filter matching rule is built.** Go's filter was the
+namespace-prefix-match the ruling names non-conformant (strip a trailing `/*`,
+ask the registry, handlers axis only); it now compares the four named axes with
+the chain's own pattern semantics, and the ruling's own `foo/*`-vs-`foo/bar`
+example drops and is pinned. Two decisions came with it, both routed rather than
+buried (`docs/validation/spec-issues/2026-08-05-drop-not-narrow-deletes-wildcard-grants.md`):
+"drop, not narrow" deletes every wildcard grant — including `OpenAccessGrants()`,
+i.e. every test peer and driver we have — so the pre-ruling universal carve-out
+stands until arch rules; and "the same relation the chain uses" is a trap we fell
+into for one build, because `IsAttenuated` is more than four axes and its
+allowance-attenuation rule took out the **entire `query` category, 6 FAIL**
+(v7.14 requires allowances on query grants). Four axes means four.
+
+**The carriage closure is a wire change to Go and Rust, not just a shape for py.**
+The ruling is a better answer than either option we offered — delivery is the
+cap's content hash, wielding is the §7a.2a triple as references the dialer
+resolves because it authored them, so nothing in the delivery frame conveys
+authority and nothing needs to authorize it. But both shipped impls send the full
+cap entity plus chain at delivery and re-inline the chain on every origination;
+both halves are now wrong on the wire. **V3 is `8·0F` under the old shape, and the
+first impl to flip alone turns it red.** We are not flipping unilaterally — that
+is a call, not a deferral. Proposed: both impls accept both shapes (additive,
+independently landable), then flip senders in one window and re-pin; py builds
+only the new shape. Routed at
+`ROUTING-2026-08-05-g-the-filter-is-built-and-the-carriage-is-a-flag-day.md`.
+
+One ordering lesson worth carrying to the py driver: the reach must be triggered
+by **the grant landing**, not by the establishment poll. Sequenced after
+`verified` it sits behind the initiator's own round trip, and we first saw it
+fail as `no transport profile` — the §6.11 registration already torn down — which
+reads like a resolution bug and is a lifetime bug.
 
 **Where this is NOT.** Coordination-green is not transport-works. §11.5.1's S5
 gate — two real browser peers establishing a real data channel over a real

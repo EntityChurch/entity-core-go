@@ -86,7 +86,8 @@ func runSignalingPunch(ctx context.Context, r *CheckRunner, sigA, sigB *signalin
 				bCh <- respResult{err: err}
 				return
 			}
-			peerB.ServeConn(raw)
+			// §4.4 (rev 3): responder camped on the §3 key — symmetric.
+			peerB.ServeConn(raw).MarkEstablishedViaRendezvousKey()
 			bCh <- respResult{initiator: initiator}
 		}()
 
@@ -96,6 +97,9 @@ func runSignalingPunch(ctx context.Context, r *CheckRunner, sigA, sigB *signalin
 			return FailCheck("initiator punch through live node: " + err.Error())
 		}
 		conn := peerA.ConnectVia(raw)
+		// §6.5 (b) §4.4: initiator drove the crossing off the §3 key —
+		// symmetric. Set before the handshake; the mint fires at its tail.
+		conn.MarkEstablishedViaRendezvousKey()
 		if err := conn.PerformConnect(pctx); err != nil {
 			conn.Close()
 			return FailCheck("handshake over punched path: " + err.Error())

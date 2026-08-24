@@ -447,6 +447,31 @@ func (p *Peer) AddRemoteConnection(peerID crypto.PeerID, conn *Connection) (*Con
 	return conn, nil
 }
 
+// reciprocalGrantWait bounds how long an acceptor waits for the §6.5 (b)
+// reciprocal grant before originating anyway (and failing closed). Sized to
+// cover the ≈1-round-trip delivery window on a real link with slack, and
+// deliberately short: the cost of waiting too long is a stalled dispatch, the
+// cost of not waiting is a spurious 401 on an establishment that was about to
+// work.
+//
+// This value is IMPLEMENTATION-LOCAL and stays that way (§11.4). The spec pins
+// no bound; what it pins is a conformance-vector FLOOR — see
+// ReciprocalGrantVectorFloor.
+const reciprocalGrantWait = 2 * time.Second
+
+// ReciprocalGrantVectorFloor is the minimum a §6.5 (b) conformance vector must
+// allow the peer under test before declaring the reciprocal grant absent
+// (arch f8f736a, Q3 ruling 2026-08-05).
+//
+// The distinction matters and is easy to collapse. Go's own 2s above is a
+// production timeout, free to change. The floor is a property of the VECTOR:
+// a vector that waits only as long as the fast implementation that wrote it
+// fails a slower-but-correct peer, and reports it as a conformance failure of
+// the peer rather than of the harness. So the floor is what a vector waits, and
+// a vector MUST NOT tighten it to its author's own bound. Two seconds happens
+// to be both here; they are not the same number and must not be merged.
+const ReciprocalGrantVectorFloor = 2 * time.Second
+
 // registerInboundForReentry caches a server-side connection in a
 // secondary map keyed by remote peer-id so a handler invoked over it
 // can originate outbound EXECUTEs to the remote peer reusing the SAME
@@ -689,6 +714,24 @@ func (p *Peer) getRemoteConnection(ctx context.Context, peerID crypto.PeerID) (r
 		// verifies).
 		if inbound := p.inboundForReentry(peerID); inbound != nil {
 			p.debugf("remote: §6.11 reentry to %s reuses inbound connection (no published transport profile)", peerID)
+			// EXTENSION-SIGNALING §6.5 (b) "Delivery + timing": on a symmetric
+			// rendezvous establishment our originating authority is the
+			// reciprocal grant, and it lands ≈1 round trip after the channel
+			// opens. Originating in that window would dispatch under the cap
+			// we minted for THEM — `grantee != author`, a guaranteed 401. So
+			// gate on grant-received, bounded: on expiry we fall through and
+			// let the dispatch fail closed rather than block. A counterpart
+			// that never adopts the grant therefore degrades to
+			// one-directional, not to a hang.
+			//
+			// Only on a rendezvous establishment: an ordinary dial-by-address
+			// acceptor is asymmetric, expects no grant, and must not pay the
+			// wait.
+			if inbound.EstablishedViaRendezvousKey() {
+				if !inbound.AwaitOriginatingCapability(ctx, reciprocalGrantWait) {
+					p.debugf("remote: §6.5 (b) reciprocal grant from %s not in hand within %s — originating fails closed", peerID, reciprocalGrantWait)
+				}
+			}
 			return inbound, nil
 		}
 		return nil, err
@@ -851,9 +894,9 @@ func (p *Peer) closeRemoteConnections() {
 // Per D-1 of PROPOSAL-TRANSPORT-FAMILY-CHUNK-C-AMENDMENTS the
 // selection rule is a deterministic ordered candidate list:
 //
-//	1. the reserved profile-id "primary" first (if present);
-//	2. then the remaining profiles sorted lexicographically by profile-id;
-//	3. each attempted in order until one returns a usable target.
+//  1. the reserved profile-id "primary" first (if present);
+//  2. then the remaining profiles sorted lexicographically by profile-id;
+//  3. each attempted in order until one returns a usable target.
 //
 // advertised_at is NOT a selection key (D-3 informational only).
 // Lexicographic profile-id is stable across every location-index

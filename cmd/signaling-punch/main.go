@@ -47,6 +47,19 @@
 //
 //     A harness MUST gate on the initiator and MUST NOT require the two to agree.
 //
+//   - reciprocal_grant_received / reciprocal_reach_status (responder only) — the
+//     §6.5 (b) REACH leg. The responder is the acceptor, so if the dialer minted
+//     it a reciprocal grant it originates one dispatch back over the connection
+//     the dialer opened and reports the status. This is the difference between
+//     proving the grant ARRIVED and proving it AUTHORIZES something: a cap that
+//     verifies and reaches no handler is the failure the mechanism exists to
+//     prevent, and it is invisible to any vector that stops at installation.
+//     Pairs with Rust's initiator-side reciprocal_grant_sent — together the two
+//     separate "their minter declined" from "our acceptor dropped it" without
+//     either side reading the other's logs. Neither field gates ok: a counterpart
+//     that has not adopted §6.5 (b) degrades to one-directional, which is not a
+//     failed punch.
+//
 // The roles keep signaling-meet's asymmetric exit contract: each exits 0 only on
 // its own verified. The proof of a punch is the INITIATOR's verified plus
 // dialed_outbound on both sides (the §7.1-step-4 dual hole); the responder's
@@ -77,6 +90,7 @@ import (
 	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/peer"
 	"go.entitychurch.org/entity-core-go/core/store"
+	"go.entitychurch.org/entity-core-go/core/tree"
 	"go.entitychurch.org/entity-core-go/core/types"
 	"go.entitychurch.org/entity-core-go/ext/signaling"
 )
@@ -191,6 +205,11 @@ func runInitiator(ctx context.Context, p *peer.Peer, party *signaling.PunchParty
 		return map[string]any{"ok": false, "dialed_outbound": dialed.Load(), "error": "punch initiate: " + err.Error()}
 	}
 	conn := p.ConnectVia(raw)
+	// §6.5 (b) §4.4: this seat drove the crossing off a §3 rendezvous key
+	// (--mode/--input), so the establishment classifies symmetric. Set before
+	// the handshake — the reciprocal mint fires at its tail. Locally derived;
+	// nothing about it goes on the wire.
+	conn.MarkEstablishedViaRendezvousKey()
 	if err := conn.PerformConnect(ctx); err != nil {
 		conn.Close()
 		return map[string]any{"ok": false, "dialed_outbound": dialed.Load(), "error": "handshake over punched path: " + err.Error()}
@@ -245,13 +264,32 @@ func runResponder(ctx context.Context, p *peer.Peer, party *signaling.PunchParty
 	if err != nil {
 		return map[string]any{"ok": false, "dialed_outbound": dialed.Load(), "error": "punch respond: " + err.Error()}
 	}
-	p.ServeConn(raw) // server handshake, on a background goroutine
+	// §4.4 (rev 3): we camped on the key and answered whoever met us there —
+	// symmetric by construction, classified without a wire field.
+	served := p.ServeConn(raw)
+	served.MarkEstablishedViaRendezvousKey() // server handshake, on a background goroutine
 
 	// Wait for the direct-path session to establish (registered for §6.11 reentry),
 	// or the deadline. Latch on first observation: the initiator holds the
 	// connection open only briefly, so once seen established we keep verified even
 	// if it later tears the pooled connection down.
 	initiatorID := crypto.PeerID(initiator)
+
+	// The §6.5 (b) reach leg starts NOW, concurrently — not after `verified`.
+	// Its trigger is the grant landing (≈1 round trip after the handshake), which
+	// is the moment we first hold originating authority and is comfortably inside
+	// the window where the counterpart is still up. Sequencing it after the
+	// establishment poll instead puts it behind the initiator's own ping/pong, and
+	// an initiator that exits on its pong takes the connection with it — observed
+	// as `connection closed`, and before the reach ran at all as
+	// `no transport profile` once the §6.11 registration was torn down too.
+	reachDone := make(chan map[string]any, 1)
+	go func() {
+		m := map[string]any{}
+		reciprocalReachBack(ctx, p, served, initiatorID, m)
+		reachDone <- m
+	}()
+
 	verified := false
 	for !verified && time.Now().Before(deadline) {
 		if p.IsConnected(initiatorID) {
@@ -275,6 +313,20 @@ func runResponder(ctx context.Context, p *peer.Peer, party *signaling.PunchParty
 	// reentry, returned, and p.Close() dropped the socket ~20 ms later while the
 	// counterpart's ping was in flight — the counterpart saw an early EOF and
 	// reported verified:false. Go↔Go only ever hid it on timing.
+	out := map[string]any{"ok": verified, "dialed_outbound": dialed.Load(), "verified": verified, "remote_peer_id": initiator}
+
+	// Collect the reach leg launched above. Bounded by the same floor it waits on
+	// plus slack for the one dispatch, so a counterpart that never mints cannot
+	// hold the driver open past its own contract.
+	select {
+	case m := <-reachDone:
+		for k, v := range m {
+			out[k] = v
+		}
+	case <-time.After(peer.ReciprocalGrantVectorFloor + 3*time.Second):
+		out["reciprocal_reach_error"] = "reach leg did not complete"
+	}
+
 	if verified {
 		select {
 		case <-ctx.Done():
@@ -282,11 +334,65 @@ func runResponder(ctx context.Context, p *peer.Peer, party *signaling.PunchParty
 		}
 	}
 
-	out := map[string]any{"ok": verified, "dialed_outbound": dialed.Load(), "verified": verified, "remote_peer_id": initiator}
 	if !verified {
 		out["error"] = "the punched path did not establish a session before the deadline"
 	}
 	return out
+}
+
+// reciprocalReachBack is the §6.5 (b) REACH leg: this seat is the acceptor, and
+// if the dialer minted us a reciprocal grant we now originate back over the
+// connection *they* opened and report what came of it.
+//
+// It exists because a crossing that only shows the grant arriving proves
+// installation, not reach. V3 measured exactly that gap: both impls minted and
+// both accepted, and nothing anywhere demonstrated a handler being reached under
+// the cap cross-impl. The reach-back-serving MUST (§6.5 (b), single-impl-
+// invisible) is about the half that silently fails — so the vector has to be the
+// half that actually wields it.
+//
+// Two fields, never folded into `ok`:
+//
+//   - reciprocal_grant_received — did the counterpart mint to us at all? This is
+//     the mirror of Rust's `reciprocal_grant_sent`, and the pair separates
+//     "their minter declined" from "our acceptance dropped it" without either
+//     side having to read the other's logs.
+//   - reciprocal_reach_status — the status of one dispatch made under that
+//     grant. 200 is reach; 401/403 is a grant that verified and authorizes
+//     nothing, which is the failure the whole mechanism exists to prevent and is
+//     invisible to every test that stops at installation.
+//
+// Deliberately NOT gating `ok`. The punch's own contract (§3.1 per-role pin) is
+// about the punch, and a counterpart that has not adopted §6.5 (b) yet must
+// degrade to one-directional rather than fail a punch that worked — the same
+// fail-closed-not-fail-loud posture the bounded wait has.
+func reciprocalReachBack(ctx context.Context, p *peer.Peer, served *peer.Connection, remote crypto.PeerID, out map[string]any) {
+	// The floor's own scope: system/tree `get` over system/type/*. Every peer
+	// seeds its type entities, so this reaches a real entity on any conformant
+	// counterpart without assuming anything the §4.4 floor does not grant — and
+	// it stays in scope even if the counterpart mints the bare floor rather than
+	// an assembled set.
+	const floorPath = "system/type/system/peer"
+
+	if !served.AwaitOriginatingCapability(ctx, peer.ReciprocalGrantVectorFloor) {
+		out["reciprocal_grant_received"] = false
+		return
+	}
+	out["reciprocal_grant_received"] = true
+
+	params, resource, err := tree.CreateGetRequest(floorPath, "hash")
+	if err != nil {
+		out["reciprocal_reach_error"] = "build get request: " + err.Error()
+		return
+	}
+	resp, err := p.RemoteExecute(ctx, "entity://"+string(remote)+"/system/tree", "get", params, resource)
+	if err != nil {
+		// A transport failure here is not a verdict on the grant.
+		out["reciprocal_reach_error"] = "originate under reciprocal grant: " + err.Error()
+		return
+	}
+	out["reciprocal_reach_status"] = resp.Status
+	out["reciprocal_reach"] = resp.Status == 200
 }
 
 // parseTrust maps the --trust string onto the §6.3 posture.

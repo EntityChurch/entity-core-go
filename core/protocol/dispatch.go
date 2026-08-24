@@ -65,6 +65,30 @@ type Dispatcher struct {
 	// behavior (no binding check).
 	IdentityBindingChecker IdentityBindingChecker
 
+	// AuthoredGrantSupplier is the RECEIVE half of the EXTENSION-SIGNALING
+	// §6.5 (b) "Wielding" phase as ruled by arch 977667f: the counterpart's
+	// outbound EXECUTE names the §7a.2a triple **as references**, and "the
+	// dialer resolves and verifies all three from its own content store,
+	// because it authored them."
+	//
+	// Given the referenced capability hash it returns that cap plus the
+	// supporting entities the chain walk needs (granter identity + granter
+	// signature), or false if this peer did not author a reciprocal grant
+	// under that hash.
+	//
+	// Deliberately NOT a general content-store lookup. Resolving any stored
+	// cap by hash would let a counterpart WIELD a cap it never received —
+	// naming it would replace holding it, and delivery would stop being a
+	// precondition for authority. Scoping the supplier to grants this peer
+	// actually minted and handed out keeps "was granted" and "was delivered"
+	// the same event. See docs/validation/spec-issues/ for the routed
+	// question.
+	//
+	// Nil (the default) means references-wielding is not resolvable and the
+	// counterpart must inline the chain — which is exactly the shipped
+	// pre-ruling shape, so leaving this unset changes nothing.
+	AuthoredGrantSupplier func(capHash hash.Hash) (map[hash.Hash]entity.Entity, bool)
+
 	// asyncPool bounds fire-and-forget async dispatch (continuation advance
 	// + deliver_to delivery). See asyncpool.go. Lazily started; stopped via
 	// StopAsyncPool() (wired into Peer.Close()).

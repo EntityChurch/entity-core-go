@@ -82,16 +82,147 @@ type Connection struct {
 	readerOnce sync.Once
 	readerDone chan struct{}
 	closeErr   error
+
+	// Connection-scoped originating authority (PROPOSAL-SYMMETRIC-REENTRY
+	// §9 Q2 precedence pin / §11.2 "Where the grant lives"). A reciprocal
+	// grant minted by the counterpart for a rendezvous-established
+	// connection lives HERE and nowhere else: it is establishment-scoped
+	// and drop-on-disconnect, deliberately NOT written to
+	// /{local}/system/peer/session/{remote}. Not persisting is the security
+	// property — a stale grant reused on reconnect, without re-meeting at
+	// the key, would authorize outside the establishment that justified it.
+	//
+	// This is a DISTINCT SLOT from the session entity's durable
+	// `held_capability` (the reconnect-skip authority for dial-by-address),
+	// and the two MUST NOT be conflated. The origination path consults
+	// this in addition to the durable read; see Execute.
+	//
+	// Guarded by authMu because the grant arrives ≈1 round-trip after
+	// channel-open, concurrently with any Execute already in flight.
+	authMu              sync.RWMutex
+	originatingCap      *entity.Entity
+	originatingIncluded map[hash.Hash]entity.Entity
+	viaRendezvousKey    bool
+	// originatingReady closes when a grant is installed, so an origination
+	// that races the ≈1-round-trip delivery window can wait on it instead of
+	// dispatching under authority it does not yet hold.
+	originatingReady chan struct{}
 }
 
 func newConnection(p *Peer, conn net.Conn) *Connection {
 	return &Connection{
-		peer:       p,
-		conn:       conn,
-		connState:  protocol.NewConnectionState(),
-		debugLog:   p.debugLog,
-		readerDone: make(chan struct{}),
+		peer:             p,
+		conn:             conn,
+		connState:        protocol.NewConnectionState(),
+		debugLog:         p.debugLog,
+		readerDone:       make(chan struct{}),
+		originatingReady: make(chan struct{}),
 	}
+}
+
+// MarkEstablishedViaRendezvousKey records that this connection was reached by
+// meeting at a §3 rendezvous key (`pair` / `tag` / `secret` / `lobby`) — the
+// PROPOSAL-SYMMETRIC-REENTRY §4.4 discriminator, in its rev-3 form.
+//
+// The test is POSITIVE and ON THE KEY: was a §3 rendezvous key mutually
+// brought? A §3 key is one both peers brought independently, and §3.4's
+// rendezvous-hash routing (§3.2's `pair_key` for the `pair` case) means they
+// meet only if both used the same key — so the joint bringing of the key IS
+// the mutual-authorization act, regardless of why either peer showed up. A
+// co-occurring profile resolution does not demote it, and substrate is
+// irrelevant (a punch may itself be key-established).
+//
+// Locally derived, NEVER wire-carried: each peer sets its own flag from its
+// own establishment path. A field the counterpart sets would be the §7.4.1
+// one-sided-claim failure shape. It need not be — meeting proves both brought
+// the same key, so both sides classify identically by construction.
+//
+// This flag is the mint decision's only input: PerformConnect reads it at the
+// handshake's tail and, when set, mints the reciprocal grant for the acceptor.
+// It MUST therefore be set before PerformConnect runs.
+func (c *Connection) MarkEstablishedViaRendezvousKey() {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	c.viaRendezvousKey = true
+}
+
+// EstablishedViaRendezvousKey reports the §4.4 classification of this
+// connection. False means an establishment reached by dialing a resolved
+// transport endpoint (profile resolution or a direct address) — the asymmetric
+// case, where §6.6's one-directional mint stands alone.
+func (c *Connection) EstablishedViaRendezvousKey() bool {
+	c.authMu.RLock()
+	defer c.authMu.RUnlock()
+	return c.viaRendezvousKey
+}
+
+// SetOriginatingCapability installs the connection-scoped originating
+// authority for this connection: a capability the counterpart granted US,
+// under which we may originate to them over this connection. supporting
+// carries the entities the far side needs to walk the chain (the granter
+// identity and the cap signature), which our own handshake `auth_included`
+// does not contain.
+//
+// Establishment-scoped by construction: it lives on the Connection, so it dies
+// with the connection and is re-granted on reconnect. Nothing writes it to the
+// tree.
+func (c *Connection) SetOriginatingCapability(cap entity.Entity, supporting map[hash.Hash]entity.Entity) {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	first := c.originatingCap == nil
+	capCopy := cap
+	c.originatingCap = &capCopy
+	if first && c.originatingReady != nil {
+		close(c.originatingReady)
+	}
+	if len(supporting) == 0 {
+		c.originatingIncluded = nil
+		return
+	}
+	c.originatingIncluded = make(map[hash.Hash]entity.Entity, len(supporting))
+	for h, ent := range supporting {
+		c.originatingIncluded[h] = ent
+	}
+}
+
+// AwaitOriginatingCapability blocks until this connection's reciprocal grant
+// arrives, the bound elapses, the connection closes, or ctx is done. Reports
+// whether a grant is in hand.
+//
+// EXTENSION-SIGNALING §6.5 (b) "Delivery + timing": the grant lands ≈1 round
+// trip after the channel opens, so an acceptor that originates in that window
+// has no authority yet. Origination gates on grant-received — a state
+// condition, not a timer — **with a bounded wait**, and on expiry the peer
+// fails closed rather than blocking. The bound is what makes a non-adopting
+// counterpart (one that never sends a grant) degrade to one-directional
+// instead of hanging forever.
+func (c *Connection) AwaitOriginatingCapability(ctx context.Context, bound time.Duration) bool {
+	if _, _, ok := c.OriginatingCapability(); ok {
+		return true
+	}
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case <-c.originatingReady:
+		return true
+	case <-timer.C:
+		return false
+	case <-c.readerDone:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// OriginatingCapability returns the connection-scoped originating authority
+// and its supporting entities, if one has been installed.
+func (c *Connection) OriginatingCapability() (entity.Entity, map[hash.Hash]entity.Entity, bool) {
+	c.authMu.RLock()
+	defer c.authMu.RUnlock()
+	if c.originatingCap == nil {
+		return entity.Entity{}, nil, false
+	}
+	return *c.originatingCap, c.originatingIncluded, true
 }
 
 func (c *Connection) debugf(format string, args ...any) {
@@ -322,12 +453,61 @@ func (c *Connection) reader() {
 		close(c.readerDone)
 	}()
 
+	// §6.11(b) dialer-side reentry needs the same bounded concurrency the
+	// server-side serve loop uses: an inbound EXECUTE runs a handler, and a
+	// slow handler must not stall the reader that demuxes our own responses.
+	sem := make(chan struct{}, maxConcurrentHandlers)
+
 	for {
 		env, err := wire.ReadEnvelopeNoValidate(c.conn)
 		if err != nil {
 			exitErr = fmt.Errorf("connection read: %w", err)
 			return
 		}
+
+		// V7 §6.11(b) — DIALER-SIDE reentry. Not every inbound frame on an
+		// outbound connection is a response to something we sent: the
+		// counterpart may ORIGINATE to us over this same channel. That is the
+		// whole point of EXTENSION-SIGNALING §6.5 (b) — after a symmetric
+		// rendezvous establishment the acceptor holds a reciprocal grant and
+		// may dispatch to us spontaneously.
+		//
+		// Without this branch the frame fell through to the response demux,
+		// found no pending waiter, and was dropped as an "orphan response" —
+		// so the acceptor's authority was real and its dispatch still timed
+		// out. Authority without a serving path is not reach-back.
+		//
+		// Server-side connections have always served both directions (see
+		// serve()); this is the missing dialer-side half. Responses we write
+		// here share writeMu with our own outbound Executes, so they
+		// interleave safely, and request_id correlates each one.
+		if env.Root.Type == types.TypeExecute {
+			if vErr := c.validateRecv("inbound execute", env); vErr != nil {
+				c.debugf("[%s] reader: inbound EXECUTE failed validation: %v", c.conn.RemoteAddr(), vErr)
+				continue
+			}
+			select {
+			case sem <- struct{}{}:
+			default:
+				// Saturated: drop rather than grow the reader's backlog. The
+				// originator's per-request deadline surfaces it.
+				c.debugf("[%s] reader: inbound EXECUTE dropped — dispatch pool saturated", c.conn.RemoteAddr())
+				continue
+			}
+			go func(env entity.Envelope) {
+				defer func() { <-sem }()
+				respEnv, dErr := c.peer.dispatcher.DispatchEnvelope(context.Background(), env, c.connState)
+				if dErr != nil {
+					c.debugf("[%s] reader: inbound EXECUTE dispatch error: %v", c.conn.RemoteAddr(), dErr)
+					return
+				}
+				if sErr := c.SendEnvelope(respEnv); sErr != nil {
+					c.debugf("[%s] reader: inbound EXECUTE response send error: %v", c.conn.RemoteAddr(), sErr)
+				}
+			}(env)
+			continue
+		}
+
 		reqID, ok := responseRequestID(env)
 		if !ok {
 			// Frame doesn't carry a request_id — could be an unexpected
@@ -498,6 +678,26 @@ func (c *Connection) serve(ctx context.Context) {
 			continue
 		}
 
+		// EXTENSION-SIGNALING §6.5 (b): an inbound reciprocal grant carries the
+		// capability the dialer minted FOR US, which is what gives this
+		// acceptor authority to originate back over this same channel.
+		//
+		// It is intercepted here rather than dispatched because it carries no
+		// author, capability or signature of its own — it CANNOT, since it
+		// arrives before any authority relationship exists that would cover a
+		// deposit handler, and §4.4's default connection grants do not reach
+		// one. It self-verifies instead, through the granter signature
+		// enclosed in the frame. (This is a departure from the folded
+		// carriage sentence; see docs/validation/spec-issues/.)
+		//
+		// Best-effort by design: a malformed or mis-granted frame is logged
+		// and dropped, leaving us without originating authority — the
+		// pre-adoption state — and never breaks the connection.
+		if protocol.IsReentryGrant(env) {
+			c.acceptReciprocalGrant(env)
+			continue
+		}
+
 		// Post-handshake: dispatch concurrently. Acquire a slot or abort on
 		// shutdown rather than queueing more reads behind a saturated pool.
 		select {
@@ -524,6 +724,33 @@ func (c *Connection) serve(ctx context.Context) {
 			}
 		}(env)
 	}
+}
+
+// acceptReciprocalGrant validates an inbound §6.5 (b) reciprocal grant and
+// installs it as this connection's originating authority. Acceptor side only.
+//
+// The granter is checked against the peer we AUTHENTICATED on this connection,
+// not against anything the frame claims — a grant from any other granter is
+// both useless (the far side roots the chain at its own identity) and
+// dishonest to store.
+func (c *Connection) acceptReciprocalGrant(env entity.Envelope) {
+	if c.connState == nil || c.connState.RemotePeerID == "" {
+		c.debugf("[%s] §6.5 reentry-grant before authentication — dropped", c.conn.RemoteAddr())
+		return
+	}
+	remoteIdentityHash, err := protocol.ResolveRemoteIdentityHash(c.connState.RemotePeerID, nil)
+	if err != nil {
+		c.debugf("[%s] §6.5 reentry-grant: remote identity hash underivable: %v", c.conn.RemoteAddr(), err)
+		return
+	}
+	cap, supporting, err := protocol.AcceptReentryGrant(env, remoteIdentityHash)
+	if err != nil {
+		c.debugf("[%s] §6.5 reentry-grant dropped: %v", c.conn.RemoteAddr(), err)
+		return
+	}
+	c.SetOriginatingCapability(cap, supporting)
+	c.debugf("[%s] §6.5 accepted reciprocal reentry grant — we may now originate to %s",
+		c.conn.RemoteAddr(), c.connState.RemotePeerID)
 }
 
 // initServerSessionLocked initializes c.session on the server side once
@@ -798,6 +1025,28 @@ func (c *Connection) PerformConnect(ctx context.Context) error {
 
 	c.debugf("[%s] connect complete remote_peer=%s", addr, remotePeerID)
 
+	// EXTENSION-SIGNALING §6.5 (b): on a SYMMETRIC establishment — one reached
+	// by meeting at a §3 rendezvous key — the dialer mints the acceptor's
+	// mirror of the §6.6 connection cap and sends it over the connection we
+	// just opened. That single reciprocal grant is what makes the pair
+	// symmetric: the handshake already gave us authority to originate to them,
+	// and this gives them authority to originate to us.
+	//
+	// Gated on the local classification, which is the whole of the §7
+	// narrowing: a dial-by-address is asymmetric — one party requested
+	// service — and §6.6's one-directional mint stands alone there. The flag
+	// is set by whoever drove the establishment, before PerformConnect runs.
+	//
+	// Sent AFTER the handshake because the grantee we must name is the
+	// acceptor's identity-entity content hash, which we only learn from the
+	// authenticate-response. Fire-and-forget: no EXECUTE_RESPONSE is expected
+	// and none is awaited, so this cannot stall the handshake. Best-effort —
+	// a failure here leaves the counterpart without originating authority,
+	// which is the pre-adoption state and fails closed.
+	if c.EstablishedViaRendezvousKey() {
+		c.sendReciprocalGrant(addr, remotePeerID)
+	}
+
 	// Class G fix: start the multiplexed reader now that handshake is
 	// complete. From this point on, all incoming frames on this client
 	// connection are EXECUTE_RESPONSEs and the reader demuxes them by
@@ -806,6 +1055,65 @@ func (c *Connection) PerformConnect(ctx context.Context) error {
 	// above — they do not flow through the reader.
 	c.startReader()
 	return nil
+}
+
+// sendReciprocalGrant mints the §6.5 (b) reciprocal capability for the peer we
+// just authenticated and puts it on the wire. Dialer side only.
+//
+// Every failure here is a debug log, never an error: the grant is an authority
+// the counterpart does not yet have, so failing to send it leaves them exactly
+// where a non-adopting peer sits — one-directional, fail-closed. Breaking a
+// working connection over it would trade a degradation for an outage.
+func (c *Connection) sendReciprocalGrant(addr net.Addr, remotePeerID crypto.PeerID) {
+	if c.peer == nil {
+		return
+	}
+	granteeHash, err := protocol.ResolveRemoteIdentityHash(remotePeerID, nil)
+	if err != nil {
+		// SHA-256-form remote without a threaded public_key: we cannot name
+		// the grantee the way verify compares it, and naming it any other way
+		// mints a cap that fails `grantee_mismatch` at the far side.
+		c.debugf("[%s] §6.5 reciprocal grant skipped: grantee hash underivable: %v", addr, err)
+		return
+	}
+	// The contents are the grant we would issue this peer as an INBOUND
+	// dialer — the same §6.6 assembly (floor ∪ policy, advertisement-
+	// filtered), keyed on the counterpart, not the flat §4.4 floor
+	// (§6.5 (b) Contents; arch f8f736a Q2). Running the assembly rather
+	// than copying our §6.6 cap is the point: the mirror is symmetric
+	// construction, and this peer's policy table is what governs what it
+	// hands out, in both directions.
+	if c.peer.connectHandler == nil {
+		c.debugf("[%s] §6.5 reciprocal grant skipped: no connect handler to assemble grants", addr)
+		return
+	}
+	grants := c.peer.connectHandler.AssembleInboundGrants(
+		c.peer.store,
+		c.peer.locationIndex,
+		remotePeerID,
+		granteeHash,
+	)
+	grantEnv, err := protocol.BuildReentryGrantEnvelope(c.peer.keypair, granteeHash, grants, c.connState.ActiveHashFormat)
+	if err != nil {
+		c.debugf("[%s] §6.5 reciprocal grant not minted: %v", addr, err)
+		return
+	}
+	if err := c.SendEnvelope(grantEnv); err != nil {
+		c.debugf("[%s] §6.5 reciprocal grant not sent (best-effort): %v", addr, err)
+		return
+	}
+	// Recorded AFTER the send succeeds, never at mint. A grant we minted but
+	// failed to put on the wire leaves the counterpart unauthorized (the
+	// best-effort contract above), and recording it here would make it
+	// resolvable — wieldable by a counterpart that never received it. Mint and
+	// delivery stay the same event.
+	//
+	// The grant frame's included set is already exactly the triple a chain
+	// walk needs: cap, granter signature, granter identity.
+	if capEnt, ok := reciprocalCapEntity(grantEnv); ok && c.peer != nil {
+		c.peer.authoredGrants.record(capEnt.ContentHash, grantEnv.Included)
+	}
+	c.debugf("[%s] §6.5 sent reciprocal reentry grant — %s may now originate to us", addr, remotePeerID)
 }
 
 // extractHelloResponse decodes the hello response to get the remote peer's nonce and peer ID.
@@ -873,6 +1181,81 @@ type Session struct {
 	requestSeq   atomic.Int64
 }
 
+// selectOutboundCapability picks the capability that authorizes an EXECUTE we
+// originate on this connection, and returns any supporting entities that must
+// ride with it. Two distinct authority slots, consulted in this order
+// (PROPOSAL-SYMMETRIC-REENTRY §9 Q2 precedence pin, §11.2 "Where the grant
+// lives"):
+//
+//  1. **Connection-scoped originating authority** — a reciprocal grant the
+//     counterpart minted for this live establishment. Establishment-scoped and
+//     never persisted, so it is invisible to the tree read below; consulting
+//     only the durable entity would make it unreachable. It is preferred when
+//     present because it is the authority for *this* establishment, whereas a
+//     durable cap may predate it.
+//  2. **Durable `held_capability`** on the R6-a session entity at
+//     /{local}/system/peer/session/{remote} — the reconnect-skip authority for
+//     dial-by-address (V7 §9.0: "the session entity is THE answer to 'do I
+//     already hold a valid cap?'").
+//  3. The in-memory session cap — fast-path fallback when the tree read misses.
+//
+// The two slots MUST NOT be conflated: (1) is live-establishment authority,
+// (2) is durable dial authority. Nothing here writes (1) into (2).
+//
+// Note the shape of slot 3 on a SERVER-side connection: the in-memory session
+// cap there is the cap we MINTED FOR THEM (grantee = the counterpart), which
+// cannot authorize anything we author — the far side compares
+// `grantee == author`. That is why an acceptor originating over a reused
+// inbound connection fails closed today, and exactly the hole slot 1 fills.
+// wieldByReference applies the send half of EXTENSION-SIGNALING §6.5 (b)
+// "Wielding" (arch 977667f): when the authority we are dispatching under is
+// the reciprocal grant, the counterpart authored the cap, its signature, and
+// the granter identity, so we cite them instead of handing them back.
+//
+// Only the CHAIN comes out. What stays is everything the counterpart could not
+// resolve on its own: our author identity entity (it must resolve `author`,
+// and `grantee == author` compares against it) and any caller-supplied extras.
+// The EXECUTE root still names the cap in its `capability` field, which is the
+// reference — no new params, and no new frame.
+//
+// CreateAuthenticatedExecute inlines the cap unconditionally, so stripping the
+// supporting set alone would emit a PARTIAL reference frame (cap present, its
+// chain absent) that dies at the far side's §5.5 walk on `no signature found`
+// rather than resolving. Both impls hit that trap; the cap must come out too.
+func wieldByReference(env *entity.Envelope, capHash hash.Hash, supporting map[hash.Hash]entity.Entity) {
+	delete(env.Included, capHash)
+	for h := range supporting {
+		delete(env.Included, h)
+	}
+}
+
+// The third return reports that the selected cap is the connection-scoped
+// §6.5 (b) reciprocal grant — the one case where the counterpart AUTHORED
+// everything the chain needs, so we wield it by reference instead of handing
+// its own entities back to it (EXTENSION-SIGNALING §6.5 (b) "Wielding", arch
+// 977667f). Every other slot still travels fully inlined.
+func (c *Connection) selectOutboundCapability() (entity.Entity, map[hash.Hash]entity.Entity, bool) {
+	if cap, supporting, ok := c.OriginatingCapability(); ok {
+		return cap, supporting, true
+	}
+	if c.peer != nil {
+		// V7.64: derive the canonical remote identity hash for the session
+		// path lookup. Failure (SHA-256-form remote without public_key
+		// threading) falls through to the in-memory cap.
+		if remoteHash, hashErr := protocol.ResolveRemoteIdentityHash(c.session.RemotePeerID, nil); hashErr == nil {
+			if heldCap, heldOK := protocol.ReadHeldCapability(
+				c.peer.Store(),
+				c.peer.LocationIndex(),
+				string(c.peer.PeerID()),
+				remoteHash,
+			); heldOK {
+				return heldCap, nil, false
+			}
+		}
+	}
+	return *c.session.Capability, nil, false
+}
+
 // Execute sends an authenticated EXECUTE to the remote peer and returns the
 // response envelope. The connection must be established first.
 func (c *Connection) Execute(ctx context.Context, uri, operation string, params entity.Entity, resource *types.ResourceTarget, async ...*protocol.AsyncDelivery) (entity.Envelope, error) {
@@ -898,32 +1281,14 @@ func (c *Connection) Execute(ctx context.Context, uri, operation string, params 
 	// session entity's held_capability at /{local}/system/peer/session/
 	// {remote} per §9.0 ("session entity is THE answer to 'do I already
 	// hold a valid cap?'"). The in-memory c.session.Capability is the
-	// fast-path fallback when the tree read misses (legacy peers).
-	var effectiveCap entity.Entity
-	if c.peer != nil {
-		// V7.64: derive the canonical remote identity hash for the session
-		// path lookup. Failure (SHA-256-form remote without public_key
-		// threading) falls through to the in-memory cap.
-		var heldCap entity.Entity
-		var heldOK bool
-		if remoteHash, hashErr := protocol.ResolveRemoteIdentityHash(c.session.RemotePeerID, nil); hashErr == nil {
-			heldCap, heldOK = protocol.ReadHeldCapability(
-				c.peer.Store(),
-				c.peer.LocationIndex(),
-				string(c.peer.PeerID()),
-				remoteHash,
-			)
-		}
-		if heldOK {
-			effectiveCap = heldCap
-		} else {
-			effectiveCap = *c.session.Capability
-		}
-	} else {
-		effectiveCap = *c.session.Capability
-	}
+	// fast-path fallback when the tree read misses (legacy peers) — and
+	// ahead of both sits the connection-scoped originating authority, per
+	// the §9 Q2 precedence pin (see selectOutboundCapability).
+	effectiveCap, capSupporting, byReference := c.selectOutboundCapability()
 	if len(async) > 0 && async[0] != nil && async[0].CapabilityOverride != nil {
 		effectiveCap = *async[0].CapabilityOverride
+		capSupporting = nil
+		byReference = false
 	}
 	env, err := protocol.CreateAuthenticatedExecute(
 		c.peer.keypair,
@@ -944,6 +1309,18 @@ func (c *Connection) Execute(ctx context.Context, uri, operation string, params 
 	// signatures, etc.) — required for capability chain verification on the server.
 	for h, ent := range c.session.Envelope.Included {
 		env.Include(entity.Entity{Type: ent.Type, Data: ent.Data, ContentHash: h})
+	}
+	// A connection-scoped grant's granter identity and signature are NOT in
+	// our handshake auth_included — the counterpart authored them — so they
+	// ride here or the far side cannot walk the chain it just authorized.
+	// Unless we are wielding by reference, in which case the counterpart
+	// resolves its own entities and we send none of them back.
+	if byReference {
+		wieldByReference(&env, effectiveCap.ContentHash, capSupporting)
+	} else {
+		for _, ent := range capSupporting {
+			env.Include(ent)
+		}
 	}
 
 	// Multiplexed dispatch (Class G fix): register a response channel for
@@ -1019,28 +1396,11 @@ func (c *Connection) ExecuteWithIncluded(
 
 	requestID := fmt.Sprintf("req-%d", c.session.requestSeq.Add(1))
 
-	var effectiveCap entity.Entity
-	if c.peer != nil {
-		var heldCap entity.Entity
-		var heldOK bool
-		if remoteHash, hashErr := protocol.ResolveRemoteIdentityHash(c.session.RemotePeerID, nil); hashErr == nil {
-			heldCap, heldOK = protocol.ReadHeldCapability(
-				c.peer.Store(),
-				c.peer.LocationIndex(),
-				string(c.peer.PeerID()),
-				remoteHash,
-			)
-		}
-		if heldOK {
-			effectiveCap = heldCap
-		} else {
-			effectiveCap = *c.session.Capability
-		}
-	} else {
-		effectiveCap = *c.session.Capability
-	}
+	effectiveCap, capSupporting, byReference := c.selectOutboundCapability()
 	if len(async) > 0 && async[0] != nil && async[0].CapabilityOverride != nil {
 		effectiveCap = *async[0].CapabilityOverride
+		capSupporting = nil
+		byReference = false
 	}
 	env, err := protocol.CreateAuthenticatedExecute(
 		c.peer.keypair,
@@ -1062,6 +1422,16 @@ func (c *Connection) ExecuteWithIncluded(
 	}
 	for h, ent := range extras {
 		env.Include(entity.Entity{Type: ent.Type, Data: ent.Data, ContentHash: h})
+	}
+	// A connection-scoped grant's supporting chain (see Execute). Included
+	// here rather than merged into the caller's `extras` map, which we do
+	// not own. When wielding by reference we send none of it back.
+	if byReference {
+		wieldByReference(&env, effectiveCap.ContentHash, capSupporting)
+	} else {
+		for _, ent := range capSupporting {
+			env.Include(ent)
+		}
 	}
 
 	if c.IsClosed() {

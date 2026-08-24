@@ -7,6 +7,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,6 +57,12 @@ type Peer struct {
 	// construction (WithKeepaliveConfig); zero value = §2.3 spec defaults.
 	keepalive    keepaliveState
 	keepaliveCfg types.KeepaliveConfigData
+
+	// authoredGrants is the EXTENSION-SIGNALING §6.5 (b) wielding-by-reference
+	// support set: the reciprocal grants THIS peer minted and handed to a
+	// counterpart, so that a counterpart naming one by reference can have it
+	// resolved here. See authoredGrants.go.
+	authoredGrants authoredGrantSet
 
 	closeFuncs  []func()
 	mu          sync.Mutex
@@ -216,6 +224,9 @@ func New(opts ...Option) (*Peer, error) {
 		_, _, ok := reg.Resolve(pattern)
 		return ok
 	})
+	ch.SetAdvertisedScopeFn(func() []types.GrantEntry {
+		return advertisedServedScope(reg)
+	})
 	registerHandler(reg, typeReg, "system/protocol/connect", ch)
 
 	// Register tree handler.
@@ -345,6 +356,12 @@ func New(opts ...Option) (*Peer, error) {
 
 	// Wire remote execute.
 	dispatcher.RemoteExecute = p.remoteExecute
+
+	// EXTENSION-SIGNALING §6.5 (b) wielding-by-reference, receive half: let a
+	// counterpart that names a reciprocal grant we minted have it resolved
+	// here instead of re-inlining the chain. Inert until some counterpart
+	// actually sends references (see core/peer/authored_grants.go).
+	dispatcher.AuthoredGrantSupplier = p.authoredGrants.supply
 
 	// Register configured remote peers (seeds transport addresses in tree).
 	for _, r := range cfg.remotes {
@@ -807,6 +824,60 @@ func registerHandler(reg *handler.Registry, typeReg *types.TypeRegistry, pattern
 	if tp, ok := h.(handler.TypeProvider); ok {
 		tp.RegisterTypes(typeReg)
 	}
+}
+
+// advertisedServedScope builds what this peer advertises it SERVES, as grant
+// entries — the parent side of the §3 advertisement-discipline subset check
+// (`EXTENSION-SIGNALING.md` §6.5 (b) Contents; arch 977667f).
+//
+// One entry per registered handler: that handler's pattern exactly, with `*`
+// on resources and operations — "this peer serves this handler, wholly."
+//
+// **Why operations is `*` and not the manifest's declared op list.** Narrowing
+// it there is tempting, and wrong under "drop, not narrow." A grant of
+// `{test/echo, *, *}` — an entirely ordinary shape meaning "anything on
+// test/echo" — is not covered by an advertisement of `{test/echo, *, [echo]}`,
+// because the child's `*` claims operations the parent does not name. The entry
+// is then DROPPED, and the peer hands over nothing rather than the echo it
+// plainly serves. The same argument sinks every wildcard grant, one axis at a
+// time. So the operations axis narrows only when a handler has explicitly said
+// what it serves via `max_scope` below — an opt-in that makes the ops axis do
+// real filtering for handlers that want it, without deleting authority for the
+// handlers that have not spoken.
+//
+// A handler that publishes `max_scope` in its manifest HAS said what it serves,
+// so that is used verbatim — the derivation is the fallback for the (currently
+// near-universal) manifest without one, and for handlers with no manifest at
+// all.
+//
+// This is deliberately not the narrowest scope expressible. It is the narrowest
+// one that does not silently revoke working authority, which is the trade the
+// "drop, not narrow" rule forces at every axis. Routed to arch with the
+// universal-grant carve-out; see docs/validation/spec-issues/.
+func advertisedServedScope(reg *handler.Registry) []types.GrantEntry {
+	handlers := reg.Handlers()
+	out := make([]types.GrantEntry, 0, len(handlers))
+	for pattern, h := range handlers {
+		if mp, ok := h.(handler.ManifestProvider); ok {
+			if manifest := mp.Manifest(); len(manifest.MaxScope) > 0 {
+				out = append(out, manifest.MaxScope...)
+				continue
+			}
+		}
+		out = append(out, types.GrantEntry{
+			Handlers:   types.CapabilityScope{Include: []string{pattern}},
+			Resources:  types.CapabilityScope{Include: []string{"*"}},
+			Operations: types.CapabilityScope{Include: []string{"*"}},
+		})
+	}
+	// Deterministic order: this feeds a grant set that gets ECF-encoded and
+	// hashed, and Go's map iteration order is randomized per run. Without the
+	// sort a peer would mint a different cap content-hash for the same authority
+	// on every restart, breaking R3a idempotency.
+	sort.Slice(out, func(i, j int) bool {
+		return strings.Join(out[i].Handlers.Include, ",") < strings.Join(out[j].Handlers.Include, ",")
+	})
+	return out
 }
 
 // createHandlerGrants creates a self-granted capability token for each handler

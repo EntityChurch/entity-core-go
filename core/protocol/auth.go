@@ -29,6 +29,66 @@ type IdentityBindingChecker interface {
 	CheckGranteeBinding(grantee hash.Hash, env entity.Envelope) error
 }
 
+// resolveAuthoredGrant is the receive half of EXTENSION-SIGNALING §6.5 (b)
+// "Wielding" under the arch 977667f carriage ruling: the counterpart names the
+// §7a.2a triple as references and we resolve it from our own side, "because we
+// authored it."
+//
+// It supplies whatever part of the triple the frame did not carry, rather than
+// triggering only on a fully-absent cap. That distinction is not cosmetic: a
+// sender can omit the granter identity and the granter signature while still
+// inlining the cap itself (Go's own CreateAuthenticatedExecute inlines the cap
+// unconditionally), so "cap is missing" is the wrong trigger and would leave
+// the partial case failing at the §5.5 walk with `no signature found`.
+//
+// It returns env unchanged unless an AuthoredGrantSupplier is installed and
+// the EXECUTE names a capability THIS peer minted as a reciprocal grant — so
+// wiring it up is a no-op for every frame that inlines its chain the shipped
+// way, since every entity it would supply is already present.
+//
+// The merge builds a COPY of the included set. That matters: env.Included is
+// the decoded wire map, and mutating it would make a verification-time
+// resolution look, to anything downstream that re-reads the envelope, like
+// something the counterpart sent.
+//
+// This widens what RESOLVES, never what PASSES. Grantee resolution,
+// grantee == author, and the full §5.5 chain walk all run afterward against
+// the augmented set exactly as before, so a supplied cap whose grantee is not
+// the requester still fails closed.
+func (d *Dispatcher) resolveAuthoredGrant(env entity.Envelope, execData types.ExecuteData) entity.Envelope {
+	if d.AuthoredGrantSupplier == nil || execData.Capability.IsZero() {
+		return env
+	}
+	supporting, authored := d.AuthoredGrantSupplier(execData.Capability)
+	if !authored || len(supporting) == 0 {
+		return env
+	}
+
+	// Counterpart-sent entities win on collision. A hash collision can only
+	// mean identical content (entities are content-addressed), so this is a
+	// tie-break for determinism, not a trust decision.
+	var augmented map[hash.Hash]entity.Entity
+	for h, ent := range supporting {
+		if _, present := env.Included[h]; present {
+			continue
+		}
+		if augmented == nil {
+			augmented = make(map[hash.Hash]entity.Entity, len(env.Included)+len(supporting))
+			for eh, eent := range env.Included {
+				augmented[eh] = eent
+			}
+		}
+		augmented[h] = ent
+	}
+	if augmented == nil {
+		// Fully inlined — the shipped shape. Nothing to supply.
+		return env
+	}
+	d.debugf("execute: supplied %d entity(s) for locally-authored reciprocal grant %s (§6.5 (b) wielding-by-reference)",
+		len(augmented)-len(env.Included), execData.Capability)
+	return entity.Envelope{Root: env.Root, Included: augmented}
+}
+
 // VerifyRequest verifies the integrity and authenticity of an EXECUTE envelope.
 // It checks: content hashes, signature target-matching, Ed25519 signature,
 // capability chain, and grantee == author.
