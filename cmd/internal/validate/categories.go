@@ -70,6 +70,7 @@ func AllCategories() []string {
 		catSecurity,
 		catServingMode,
 		catSession,
+		catSignaling,
 		catSubscriptions,
 		catTransportFamily,
 		catTreeOps,

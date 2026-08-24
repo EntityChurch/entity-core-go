@@ -491,6 +491,11 @@ func (s *ValidationSuite) Run(ctx context.Context) (*Report, error) {
 	// memory.
 	runCat(catSession, func() []CheckResult { return runSession(ctx, client) })
 
+	// signaling — the rendezvous/NAT-introduction client (ext/signaling) vs a
+	// live node. SKIPs when the node seeds no system/signaling grant (the
+	// standalone entity-signaling-node binary currently does).
+	runCat(catSignaling, func() []CheckResult { return runSignaling(ctx, client, s.addr) })
+
 	// Category 28b: EXTENSION-NETWORK Amendment 12 §A3 liveness floor —
 	// the directional two-peer demotion harness. Spins an in-process
 	// killable counterpart, forces the target to dial it, then kills it
@@ -848,6 +853,8 @@ func (s *ValidationSuite) RunCategory(ctx context.Context, category string) (*Re
 		}))
 	case catSession:
 		report.AddAll(runSession(ctx, client))
+	case catSignaling:
+		report.AddAll(runSignaling(ctx, client, s.addr))
 	case catLiveness:
 		report.AddAll(runLiveness(ctx, client, s.keepaliveEnvelopeMs))
 	case catNetwork:
