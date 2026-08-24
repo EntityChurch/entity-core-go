@@ -932,6 +932,62 @@ func advertisedServedScope(reg *handler.Registry) []types.GrantEntry {
 	return out
 }
 
+// defaultHandlerSelfGrant is the V7 §6.9 default per-handler self-grant — the
+// authority a handler that declares NO manifest InternalScope runs under.
+//
+// The Resources spelling is load-bearing and is NOT bare "*". §6.9 describes
+// the default as "all resources", and bare "*" was the obvious encoding of that
+// sentence — but §5.5 / PR-8 canonicalization (capability.Canonicalize) resolves
+// a bare "*" in a cap RESOURCE pattern to "/{granter}/*", i.e. OWN NAMESPACE
+// ONLY. The cross-peer universal form is the absolute peer-wildcard "/*/*", as
+// Canonicalize's own doc comment says and as every deliberate cross-peer grant
+// in cmd/internal/validate already spells it.
+//
+// That distinction was inert until 49d4a03 (§5.2 Dimension 3 binds in-process
+// sub-dispatch): before it, makeLocalExecute handed the L1 check an ExecuteData
+// with a nil Resource, so CheckResourceScope never ran and NOTHING read this
+// field. Once it became the ceiling, bare "*" meant the peer's own engine could
+// no longer write the foreign-namespace subtrees its store legitimately holds
+// under V7 §1.4's universal address space (Category A — a follow mirror at
+// /{them}/app/..., a cached foreign content site): a default-scope handler
+// sub-dispatching system/tree:put at /{remote}/... got 403 capability_denied
+// while the identical binding through the bootstrap LocationIndex path
+// succeeded. entity-core-rust hit the same shape at c484fa6 and fixed it the
+// same way (default_handler_self_grant, peer-wildcard form).
+//
+// This does not blunt D1. D1's teeth are handlers that declare a NARROW
+// InternalScope (ext/network's "system/*", ext/localfiles' "local/files/*", …);
+// a handler on the DEFAULT scope was already omnipotent inside "/{local}/*",
+// and a write to /{them}/... lands in OUR tree, not theirs — the universal
+// address space is one local store keyed by peer id, not a remote reach.
+//
+// Peers is deliberately left absent, and that is NOT the same oversight. §5.2
+// Dimension 4 defaults an absent peers field to {include:[local_peer_id]} and
+// STILL checks it (acca9e8), but the peer under test is extract_peer of the
+// dispatch TARGET — which handler am I invoking — not the namespace being
+// written. For a self-grant the local peer is exactly right: this grant
+// authorizes dispatching at OUR handlers. Widening it to "*" would authorize
+// dispatch at foreign peers' handlers, which is a real escalation and is not
+// what "all resources" means. Do not "complete" the fix by touching it.
+//
+// Do not reuse this as a generic wide-grant builder: a call site that genuinely
+// wants own-namespace confinement must spell its own scope (as every ext
+// manifest does), and a call site that wants cross-peer authority must say so
+// deliberately.
+func defaultHandlerSelfGrant() []types.GrantEntry {
+	return []types.GrantEntry{
+		{
+			// Handlers/Operations are not path namespaces, so bare "*" is the
+			// correct universal there — MatchesPattern short-circuits pattern
+			// == "*" to true and no canonicalization applies.
+			Handlers:   types.CapabilityScope{Include: []string{"*"}},
+			Operations: types.CapabilityScope{Include: []string{"*"}},
+			// Resources IS a path namespace: "/*/*" = all peers, all paths.
+			Resources: types.CapabilityScope{Include: []string{"/*/*"}},
+		},
+	}
+}
+
 // createHandlerGrants creates a self-granted capability token for each handler
 // and stores it at system/capability/grants/{pattern} in the tree.
 //
@@ -959,6 +1015,11 @@ func createHandlerGrants(reg *handler.Registry, kp crypto.Keypair, identity enti
 		// timestamp) or duplicate work (with deterministic content). Persistent
 		// stores skip the mint entirely; memory stores have nothing at the
 		// path so always mint.
+		//
+		// Consequence worth saying out loud: because this is install-once, a
+		// change to defaultHandlerSelfGrant below reaches NEW peers only. A
+		// persistent store minted before the change keeps the grant it was
+		// installed with; re-shaping those is a migration, not a code fix.
 		grantPath := "system/capability/grants/" + pattern
 		if _, exists := li.Get(grantPath); exists {
 			continue
@@ -967,13 +1028,7 @@ func createHandlerGrants(reg *handler.Registry, kp crypto.Keypair, identity enti
 		// Determine internal scope from manifest, or default to full access.
 		scope := manifest.InternalScope
 		if len(scope) == 0 {
-			scope = []types.GrantEntry{
-				{
-					Handlers:   types.CapabilityScope{Include: []string{"*"}},
-					Resources:  types.CapabilityScope{Include: []string{"*"}},
-					Operations: types.CapabilityScope{Include: []string{"*"}},
-				},
-			}
+			scope = defaultHandlerSelfGrant()
 		}
 
 		// CreatedAt fixed at zero. Handler grants have no TTL — they live for
