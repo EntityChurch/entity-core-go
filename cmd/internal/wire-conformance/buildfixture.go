@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"go.entitychurch.org/entity-core-go/cmd/internal/diagcodec"
 )
 
 func runBuildFixture(args []string) error {
@@ -21,7 +23,7 @@ func runBuildFixture(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read diag: %w", err)
 	}
-	val, err := ParseDiag(string(src))
+	val, err := diagcodec.ParseDiag(string(src))
 	if err != nil {
 		return fmt.Errorf("parse diag: %w", err)
 	}
@@ -30,7 +32,7 @@ func runBuildFixture(args []string) error {
 		return fmt.Errorf("expected top-level array, got %T", val)
 	}
 
-	encoded, err := encodeCanonical(arr)
+	encoded, err := diagcodec.EncodeCanonical(arr)
 	if err != nil {
 		return fmt.Errorf("encode canonical: %w", err)
 	}

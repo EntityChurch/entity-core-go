@@ -1,4 +1,4 @@
-package main
+package diagcodec
 
 import (
 	"encoding/hex"
@@ -39,7 +39,7 @@ func TestCanonicalEncoderSpotChecks(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := encodeCanonical(c.in)
+			got, err := EncodeCanonical(c.in)
 			if err != nil {
 				t.Fatalf("encode: %v", err)
 			}
@@ -58,7 +58,7 @@ func TestMapKeyOrdering(t *testing.T) {
 		"z":  int64(1),
 		"aa": int64(2),
 	}
-	got, err := encodeCanonical(m)
+	got, err := EncodeCanonical(m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,9 +82,9 @@ func TestMapKeyOrdering(t *testing.T) {
 func TestMixedKeyMap(t *testing.T) {
 	m := map[interface{}]interface{}{
 		"text_key":              int64(1),
-		byteKey("\x6b\x65\x79"): int64(2), // h'6b6579'
+		ByteKey("\x6b\x65\x79"): int64(2), // h'6b6579'
 	}
-	got, err := encodeCanonical(m)
+	got, err := EncodeCanonical(m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestRoundTripAgainstCoreDet(t *testing.T) {
 		nil, true, false,
 	}
 	for _, c := range cases {
-		ours, err := encodeCanonical(c)
+		ours, err := EncodeCanonical(c)
 		if err != nil {
 			t.Fatalf("ours: %v", err)
 		}

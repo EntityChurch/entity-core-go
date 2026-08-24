@@ -1,4 +1,4 @@
-package main
+package diagcodec
 
 // Canonical ECF encoding for the diag value tree.
 //
@@ -10,7 +10,7 @@ package main
 //
 //   1. Map key sort by encoded-key bytes, byte-wise lexicographic (the ECF
 //      §4.2.1 rule). This is the same as CoreDet's map sort, but our key
-//      space includes byteKey (CBOR byte-string keys) which are not
+//      space includes ByteKey (CBOR byte-string keys) which are not
 //      ergonomic to express through fxamacker's tagging surface.
 //
 //   2. Mixed text-string + byte-string keys in one map (map_keys.5).
@@ -18,7 +18,7 @@ package main
 //   3. Top-level arrays of arbitrarily-typed vector entries — the corpus
 //      shape.
 //
-// Result: encodeCanonical(parsedDiag) produces the canonical ECF bytes of
+// Result: EncodeCanonical(parsedDiag) produces the canonical ECF bytes of
 // the corpus, byte-identical to what every conformant impl should produce
 // on the same value tree.
 
@@ -31,8 +31,8 @@ import (
 	"go.entitychurch.org/entity-core-go/core/ecf"
 )
 
-// encodeCanonical encodes a diag-parsed value tree to canonical ECF bytes.
-func encodeCanonical(v interface{}) ([]byte, error) {
+// EncodeCanonical encodes a diag-parsed value tree to canonical ECF bytes.
+func EncodeCanonical(v interface{}) ([]byte, error) {
 	switch t := v.(type) {
 	case nil:
 		return ecf.Encode(nil)
@@ -46,7 +46,7 @@ func encodeCanonical(v interface{}) ([]byte, error) {
 		return ecf.Encode(t)
 	case []byte:
 		return ecf.Encode(t)
-	case byteKey:
+	case ByteKey:
 		// Encountered as a value (rare). Encode as CBOR byte string.
 		return ecf.Encode([]byte(t))
 	case []interface{}:
@@ -54,13 +54,13 @@ func encodeCanonical(v interface{}) ([]byte, error) {
 	case map[interface{}]interface{}:
 		return encodeMapCanonical(t)
 	}
-	return nil, fmt.Errorf("encodeCanonical: unsupported type %T", v)
+	return nil, fmt.Errorf("EncodeCanonical: unsupported type %T", v)
 }
 
 func encodeArrayCanonical(arr []interface{}) ([]byte, error) {
 	body := bytes.NewBuffer(encodeHeader(4, uint64(len(arr))))
 	for i, item := range arr {
-		b, err := encodeCanonical(item)
+		b, err := EncodeCanonical(item)
 		if err != nil {
 			return nil, fmt.Errorf("array[%d]: %w", i, err)
 		}
@@ -79,7 +79,7 @@ func encodeMapCanonical(m map[interface{}]interface{}) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("map key %#v: %w", k, err)
 		}
-		vb, err := encodeCanonical(v)
+		vb, err := EncodeCanonical(v)
 		if err != nil {
 			return nil, fmt.Errorf("map value for key %#v: %w", k, err)
 		}
@@ -101,7 +101,7 @@ func encodeKey(k interface{}) ([]byte, error) {
 	switch t := k.(type) {
 	case string:
 		return ecf.Encode(t)
-	case byteKey:
+	case ByteKey:
 		return ecf.Encode([]byte(t))
 	case int64:
 		return ecf.Encode(t)

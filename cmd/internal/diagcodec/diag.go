@@ -1,4 +1,4 @@
-package main
+package diagcodec
 
 // CBOR diagnostic notation parser (RFC 8949 §8 subset).
 //
@@ -62,7 +62,7 @@ func StripDiagComments(src string) string {
 		trimmed := strings.TrimSpace(line)
 		switch {
 		case inSpan:
-			if strings.HasSuffix(trimmed, "/") {
+			if closesSpanComment(trimmed) {
 				inSpan = false
 			}
 			out.WriteByte('\n')
@@ -74,7 +74,7 @@ func StripDiagComments(src string) string {
 		case trimmed == "/":
 			inBlock = true
 			out.WriteByte('\n')
-		case len(trimmed) >= 2 && strings.HasPrefix(trimmed, "/") && strings.HasSuffix(trimmed, "/"):
+		case len(trimmed) >= 2 && strings.HasPrefix(trimmed, "/") && closesSpanComment(trimmed):
 			out.WriteByte('\n')
 		case strings.HasPrefix(trimmed, "/"):
 			inSpan = true
@@ -223,13 +223,20 @@ func (p *diagParser) parseMap() (interface{}, error) {
 		// since []byte itself is unhashable we have to wrap. We use a custom
 		// marker type so the build step can dispatch correctly.
 		if bs, ok := key.([]byte); ok {
-			out[byteKey(string(bs))] = val
+			out[ByteKey(string(bs))] = val
 		} else {
 			out[key] = val
 		}
 		p.skipWS()
 		if p.peek() == ',' {
 			p.pos++
+			// Trailing comma tolerated, same as in parseArray — see the note
+			// there.
+			p.skipWS()
+			if p.peek() == '}' {
+				p.pos++
+				return out, nil
+			}
 			continue
 		}
 		if p.peek() == '}' {
@@ -240,12 +247,12 @@ func (p *diagParser) parseMap() (interface{}, error) {
 	}
 }
 
-// byteKey is the marker type for byte-string map keys parsed out of the .diag.
+// ByteKey is the marker type for byte-string map keys parsed out of the .diag.
 // It is a string-backed type so it remains hashable (and thus usable as a Go
 // map key), but it carries the semantic that the underlying bytes are a CBOR
 // byte string, not a CBOR text string. The build-fixture encoder dispatches
 // on this type to emit major type 2 instead of major type 3.
-type byteKey string
+type ByteKey string
 
 func (p *diagParser) parseArray() (interface{}, error) {
 	if err := p.consume('['); err != nil {
@@ -267,6 +274,17 @@ func (p *diagParser) parseArray() (interface{}, error) {
 		p.skipWS()
 		if p.peek() == ',' {
 			p.pos++
+			// Trailing comma before the closer. RFC 8949 §8 does not permit it
+			// and the v7.67 corpus has one anyway — the last vector is followed
+			// by a lone `,` on its own line, then the build-artifact comment
+			// block, then `]`. Rejecting it would mean the source of truth
+			// cannot be read by the tool the spec says builds it, so it is
+			// tolerated on the read side only; nothing here re-emits diag.
+			p.skipWS()
+			if p.peek() == ']' {
+				p.pos++
+				return out, nil
+			}
 			continue
 		}
 		if p.peek() == ']' {
@@ -394,4 +412,39 @@ func (p *diagParser) parseNumber() (interface{}, error) {
 		return nil, p.errf("invalid integer %q: %v", lit, err)
 	}
 	return n, nil
+}
+
+// closesSpanComment reports whether a trimmed line ends a `/ … /` comment.
+//
+// A trailing "/" alone is not enough, and the difference is not pedantic. RFC
+// 8949 §8 delimits comments with bare slashes, which makes any slash inside a
+// comment ambiguous — and the v7.67 corpus comments are full of them, because
+// they cite file paths:
+//
+//	closeouts: entity-core-go/docs/validation/V767-PHASE2-BYTE-PINS-
+//	COHORT-2026-06-10.md (v2 post-fix), entity-core-rust/docs/validation/
+//	V767-PHASE2-BYTE-PINS-RUST-2026-06-10.md, entity-core-py/docs/
+//
+// The second line ends with "/" as the tail of a directory path. A suffix test
+// closes the comment there and hands "V767-PHASE2-…" to the value parser, which
+// is the `unexpected char 'V'` this rule exists to prevent — and it is why the
+// artifacts were hand-built and never regenerated: the obvious stripper cannot
+// read the corpus.
+//
+// The discriminator is the character BEFORE the slash. A delimiter is written
+// with space in front of it ("… bound by this ruling.    /"); a path separator
+// never is ("…/validation/"). Cheap, and correct for every comment in both
+// copies of the corpus — which is checked, not asserted: the encoder must
+// reproduce the pre-re-stamp artifact byte-for-byte
+// (`v767-corpus-build -verify-legacy`), and a mis-stripped comment cannot
+// survive that.
+func closesSpanComment(trimmed string) bool {
+	if !strings.HasSuffix(trimmed, "/") {
+		return false
+	}
+	if trimmed == "/" {
+		return true
+	}
+	prev := trimmed[len(trimmed)-2]
+	return prev == ' ' || prev == '\t'
 }

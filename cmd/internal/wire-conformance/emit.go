@@ -40,6 +40,8 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/mr-tron/base58"
+
+	"go.entitychurch.org/entity-core-go/cmd/internal/diagcodec"
 )
 
 const (
@@ -193,7 +195,7 @@ func emitClassA(v rawVector) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode input: %w", err)
 	}
-	return encodeCanonical(val)
+	return diagcodec.EncodeCanonical(val)
 }
 
 func emitContentHash(v rawVector) ([]byte, error) {
@@ -229,7 +231,7 @@ func emitContentHash(v rawVector) ([]byte, error) {
 		"type": typ,
 		"data": data,
 	}
-	encoded, err := encodeCanonical(hashInput)
+	encoded, err := diagcodec.EncodeCanonical(hashInput)
 	if err != nil {
 		return nil, fmt.Errorf("encode hash input: %w", err)
 	}
@@ -266,7 +268,7 @@ func emitPeerID(v rawVector) ([]byte, error) {
 	raw := append(prefix, digest...)
 	enc := base58.Encode(raw)
 	// Canonical = ECF text-string encoding of the base58 string.
-	return encodeCanonical(enc)
+	return diagcodec.EncodeCanonical(enc)
 }
 
 func emitSignature(v rawVector) ([]byte, error) {
@@ -289,7 +291,7 @@ func emitSignature(v rawVector) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("signature input missing 'entity'")
 	}
-	entityBytes, err := encodeCanonical(entityVal)
+	entityBytes, err := diagcodec.EncodeCanonical(entityVal)
 	if err != nil {
 		return nil, fmt.Errorf("encode entity: %w", err)
 	}
@@ -303,13 +305,13 @@ func emitEnvelope(v rawVector) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode input: %w", err)
 	}
-	return encodeCanonical(val)
+	return diagcodec.EncodeCanonical(val)
 }
 
 // decodeInputToValueTree round-trips a corpus input field (raw CBOR bytes
-// produced by build-fixture) into the same value-tree shape encodeCanonical
+// produced by build-fixture) into the same value-tree shape diagcodec.EncodeCanonical
 // expects (string / int64 / float64 / []byte / bool / nil; map keys as
-// string for tstr or byteKey for bstr).
+// string for tstr or diagcodec.ByteKey for bstr).
 func decodeInputToValueTree(raw cbor.RawMessage) (interface{}, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("empty input")
@@ -344,7 +346,7 @@ func normalizeDecoded(v interface{}) interface{} {
 		return t
 	case cbor.ByteString:
 		// Byte-string in value position (not common; mainly map keys come back
-		// here). Coerce to []byte so encodeCanonical emits bstr.
+		// here). Coerce to []byte so diagcodec.EncodeCanonical emits bstr.
 		return []byte(t)
 	case []interface{}:
 		out := make([]interface{}, len(t))
@@ -358,7 +360,7 @@ func normalizeDecoded(v interface{}) interface{} {
 			var nk interface{}
 			switch tk := k.(type) {
 			case cbor.ByteString:
-				nk = byteKey(string(tk))
+				nk = diagcodec.ByteKey(string(tk))
 			case string:
 				nk = tk
 			case uint64:

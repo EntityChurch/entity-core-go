@@ -255,6 +255,40 @@ go run ./cmd/validate-peer \
 RC1=$?
 set -e
 
+# PASS 1b — the SAME target, scored under --profile core (V7 v7.72 §9.0).
+#
+# WHY THIS EXISTS (G-2a, closed 2026-08-12). The core profile was invoked by
+# NOTHING. No script ran it, so the core-tier gate existed only as a flag
+# someone could type — and "a conformance tool nothing runs is
+# indistinguishable from one that does not exist" is the doctrine this repo
+# earned the expensive way (it is how the §2.4a register negative half sat in
+# a profile nothing invoked, scoring zero peers for weeks).
+#
+# It reuses pass 1's target rather than starting a fifth peer: --profile core
+# changes which checks are SCORED, not which surfaces the peer needs, and the
+# pass-1 target already has every surface armed. The core profile's carve-out
+# rows (handler_scope_denied_core_1 and friends) are exactly the ones that
+# only run here.
+#
+# NOT a subset of pass 1, which is the point: the core profile scores the §9.0
+# core-tier rows on their own terms, and some of them SKIP under full profile
+# where the extension-targeted variant runs instead.
+echo
+echo "==> PASS 1b — the same target under --profile core (V7 v7.72 §9.0 core tier)"
+set +e
+go run ./cmd/validate-peer \
+    -addr "$TARGET_ADDR" \
+    -reference-peer "$REF_ADDR" \
+    -poll-url "http://127.0.0.1:${POLL_PORT}" \
+    "${PI_ARGS_VALIDATE[@]}" \
+    "${HASH_ARGS_VALIDATE[@]}" \
+    -keepalive-envelope-ms 6000 \
+    -profile core \
+    -exclude "$T4_UNSATISFIABLE,$PASS3_ONLY" \
+    ${EXTRA:-}
+RC1B=$?
+set -e
+
 # PASS 2 — serving_mode ONLY, against a namespace-scoped peer.
 #
 # serving_mode's Amendment 5 §6.5.6 T4 checks require something to be OUT of
@@ -326,8 +360,14 @@ if [ "${KEEP:-0}" != "1" ]; then
 fi
 
 echo
-echo "PASS 1 exit $RC1 (all surfaces, closure scope) · PASS 2 exit $RC2 (serving_mode, namespace scope) · PASS 3 exit $RC3 (registry_issuer, registry posture)"
-echo "Zero failures AND zero skips in ALL THREE is the bar — read each COVERAGE block for"
-echo "anything that did not run, and close it rather than allowlisting it."
-[ "$RC1" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 0 ] || exit 1
+echo "PASS 1 exit $RC1 (all surfaces, closure scope) · PASS 1b exit $RC1B (core profile, same target) · PASS 2 exit $RC2 (serving_mode, namespace scope) · PASS 3 exit $RC3 (registry_issuer, registry posture)"
+echo "Zero failures AND zero skips is the bar for passes 1, 2 and 3 — read each COVERAGE"
+echo "block for anything that did not run, and close it rather than allowlisting it."
+echo
+echo "PASS 1b is the one pass that legitimately reports skips (~100), and the distinction"
+echo "matters: they are PROFILE-KEYED skips — the extension surface that sits outside the"
+echo "v7.72 §9.0 core tier by definition, exempted in HasFailures via isProfileKeyedSkip,"
+echo "NOT by an -allow-skip allowlist. A skip there that is not profile-keyed still fails"
+echo "the pass. Read 1b's exit code, not its skip count."
+[ "$RC1" -eq 0 ] && [ "$RC1B" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 0 ] || exit 1
 exit 0
