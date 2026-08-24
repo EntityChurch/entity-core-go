@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +44,7 @@ func cmdStart(args []string) {
 	publishRoot := fs.Bool("publish-root", false, "PROPOSAL-PEER-MANIFEST §4: mint signed system/peer/published-root on every tree-root change + serve via http-poll. Pair with --http-poll-addr to expose the manifest on the wire. Honored by all three impls.")
 	serveClosureRoot := fs.Bool("serve-closure-root", false, "EXTENSION-NETWORK §6.5.6 Amendment 10: scope served set to the transitive trie-node closure reachable from system/peer/published-root. Pair with --publish-root so a consumer's signed-root hash-chain walk does not 404 on a CHAMP interior node. Mutually exclusive with --serve-namespace / --serve-scope-whole-store. Honored by Go + Python (Rust impl pending).")
 	publishDescriptors := fs.Bool("publish-descriptors", false, "DOMAIN-LOCAL-FILES v1.3 §10.5 V3: configure the --files root with publish_descriptors=true so file reads write `system/content/descriptor/{hash}` entities into the tree. Arms local_files.v3_descriptor_publish_exercised. Honored by Go; Rust + Python impl pending.")
+	keepalive := fs.String("keepalive", "", "EXTENSION-NETWORK §2.3 keepalive override as interval_ms,timeout_ms,max_missed (e.g. 1500,800,2) so the §5.4 escalation is observable in seconds — pair with validate-peer -keepalive-envelope-ms for the liveness harness. Go-only (forwarded as --keepalive-*-ms/--keepalive-max-missed); Rust + Python CLIs have no equivalent yet, so it warns and is dropped there.")
 	fs.Parse(args)
 
 	if *name == "" {
@@ -106,9 +108,21 @@ func cmdStart(args []string) {
 		registryPeerIDs = strings.Join(ids, ",")
 	}
 
+	// Parse --keepalive up front so a malformed triple fails before any
+	// process is spawned. Only Go's entity-peer has the CLI surface today.
+	kaFlags, err := keepaliveArgs(*keepalive)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: --keepalive: %v\n", err)
+		os.Exit(1)
+	}
+	if len(kaFlags) > 0 && *peerType != "go" {
+		fmt.Fprintf(os.Stderr, "Note: --keepalive has no %s CLI equivalent yet; ignored for peer %q\n", *peerType, *name)
+		kaFlags = nil
+	}
+
 	switch *peerType {
 	case "go":
-		entry = startGoPeer(*name, *addr, *debug, *openAccess, *files, *history, *storage, *httpAddr, *httpPath, *wsAddr, *wsPath, *keyType, *hashType, registryPeerIDs, pollFlags, logFile, lf)
+		entry = startGoPeer(*name, *addr, *debug, *openAccess, *files, *history, *storage, *httpAddr, *httpPath, *wsAddr, *wsPath, *keyType, *hashType, registryPeerIDs, kaFlags, pollFlags, logFile, lf)
 	case "rust":
 		// Rust 474bb11 (Chunk D), 58d9188 (Chunk E flags), 0616727 (v7.70 home-format).
 		// Rust ships --ws-listen for NETWORK §6.5.2b; cohort flag string is
@@ -170,9 +184,35 @@ func (f chunkEFlags) enabled() bool {
 	return f.pollAddr != "" || f.mountOnLive
 }
 
+// keepaliveArgs translates the --keepalive triple (interval_ms,timeout_ms,
+// max_missed; a field may be empty to keep its spec default) into the Go
+// entity-peer flags. Empty input → nil.
+func keepaliveArgs(spec string) ([]string, error) {
+	if spec == "" {
+		return nil, nil
+	}
+	parts := strings.Split(spec, ",")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("want interval_ms,timeout_ms,max_missed (got %q)", spec)
+	}
+	flagNames := []string{"-keepalive-interval-ms", "-keepalive-timeout-ms", "-keepalive-max-missed"}
+	var out []string
+	for i, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, err := strconv.ParseUint(p, 10, 64); err != nil {
+			return nil, fmt.Errorf("%s: %q is not a non-negative integer", flagNames[i], p)
+		}
+		out = append(out, flagNames[i], p)
+	}
+	return out, nil
+}
+
 // --- Go peer ---
 
-func startGoPeer(name, addr string, debug, openAccess bool, files, history, storage, httpAddr, httpPath, wsAddr, wsPath, keyType, hashType, inboxRelayRegistry string, poll chunkEFlags, logFile string, lf *os.File) *PeerEntry {
+func startGoPeer(name, addr string, debug, openAccess bool, files, history, storage, httpAddr, httpPath, wsAddr, wsPath, keyType, hashType, inboxRelayRegistry string, keepaliveFlags []string, poll chunkEFlags, logFile string, lf *os.File) *PeerEntry {
 	readyFile := filepath.Join(os.TempDir(), fmt.Sprintf("entity-peer-%s-%d.ready", name, time.Now().UnixNano()))
 
 	// Pass -name so the Go peer loads (or creates) its keypair at
@@ -250,6 +290,7 @@ func startGoPeer(name, addr string, debug, openAccess bool, files, history, stor
 	if inboxRelayRegistry != "" {
 		cmdArgs = append(cmdArgs, "-inbox-relay-registry", inboxRelayRegistry)
 	}
+	cmdArgs = append(cmdArgs, keepaliveFlags...)
 
 	peerBin := findGoBinary()
 

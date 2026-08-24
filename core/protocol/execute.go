@@ -53,6 +53,19 @@ func (d *Dispatcher) handleExecute(ctx context.Context, env entity.Envelope, con
 
 	// Connect path: no auth required, but only before connection is established.
 	if handlerPath == connectPath || (len(handlerPath) > len(connectPath) && handlerPath[:len(connectPath)+1] == connectPath+"/") {
+		// §5.1 keepalive ping: the one connect-handler op gated the INVERSE
+		// way — it rides only an ESTABLISHED connection (ValidateConnection-
+		// Sequence enforces Completed). Like hello/authenticate it skips the
+		// capability verification below: the ping proves protocol-level
+		// liveness of the session itself and carries no authority.
+		if execData.Operation == "ping" {
+			if connState != nil {
+				if err := ValidateConnectionSequence(connState, execData.Operation); err != nil {
+					return d.makeErrorResponse(execData.RequestID, 403, "connection_required", err.Error())
+				}
+			}
+			return d.dispatchToHandler(ctx, handlerPath, execData, env, connState)
+		}
 		if connState != nil && connState.Completed {
 			return d.makeErrorResponse(execData.RequestID, 409, "connection_already_established", "connection already established")
 		}

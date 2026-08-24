@@ -40,7 +40,10 @@ var expectedHandlers = []struct {
 	coreOps     []string // scored under --profile core; nil = fall back to operations
 	coreProfile bool     // false = extension handler; skip the whole entry under --profile core
 }{
-	{"connect", "system/protocol/connect", []string{"hello", "authenticate"}, nil, true},
+	// connect: "ping" is the §5.1 keepalive exchange — EXTENSION-NETWORK
+	// §12.1 MUST at full profile (Amendment 12 rung 2); the V7 §9.0 core
+	// profile scores only the handshake pair.
+	{"connect", "system/protocol/connect", []string{"hello", "authenticate", "ping"}, []string{"hello", "authenticate"}, true},
 	{"tree", "system/tree", []string{"get", "put", "snapshot", "diff", "merge", "extract"}, []string{"get", "put"}, true},
 	{"capability", "system/capability", []string{"request", "delegate", "revoke"}, nil, true},
 	{"inbox", "system/inbox", []string{"receive"}, nil, false},

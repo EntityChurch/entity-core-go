@@ -42,6 +42,7 @@ func main() {
 	profile := flag.String("profile", "full", "V7 v7.72 §9.0 conformance profile: `core` (14 core-profile categories, 53-type floor, six CORE-TREE-* vectors, extension-targeted check carve-outs) or `full` (every category — historical behavior). The keystone unblock gate: a core peer should report a clean PASS under --profile core.")
 	declaredMaxPayload := flag.Int("declared-max-payload", 0, "peer-declared max payload size in bytes for the resource_bounds category (V7 §4.10(a), v7.75 RESERVED). 0 = use recommended default (16 MiB). Set this when the peer advertises a tighter or wider envelope cap so the probe sends a frame just over the declared value.")
 	declaredMaxChainDepth := flag.Int("declared-max-chain-depth", 0, "peer-declared max capability-chain depth for the resource_bounds category (V7 §4.10(b), v7.75 RESERVED). 0 = use recommended default (64).")
+	keepaliveEnvelopeMs := flag.Int("keepalive-envelope-ms", 0, "target's §2.3 keepalive envelope (interval_ms × max_missed + timeout_ms) for the liveness category's §5.4 escalation probe (EXTENSION-NETWORK Amendment 12 rung 2). 0 = the probe SKIPs (spec defaults put the envelope near 100 s; start the target with a short envelope — Go: entity-peer --keepalive-interval-ms/--keepalive-timeout-ms/--keepalive-max-missed — and pass the matching value here).")
 	flag.Parse()
 
 	if *listCategories {
@@ -195,6 +196,7 @@ func main() {
 		suite.SetProfile(*profile)
 		suite.SetDeclaredMaxPayload(*declaredMaxPayload)
 		suite.SetDeclaredMaxChainDepth(*declaredMaxChainDepth)
+		suite.SetKeepaliveEnvelopeMs(*keepaliveEnvelopeMs)
 		if *category != "" {
 			report, err = suite.RunCategory(ctx, *category)
 		} else {

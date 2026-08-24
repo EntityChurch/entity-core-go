@@ -51,5 +51,9 @@ func runConnectivity(ctx context.Context, client *PeerClient) ([]CheckResult, bo
 	// request_id (§6.11(b)/§3.3:742). Runs on the established connection.
 	results = append(results, runRequestIDEchoProbe(ctx, client)...)
 
+	// EXTENSION-NETWORK §5.1/§12.1 keepalive ping/pong (Amendment 12
+	// rung 2). Full profile only; runs on the established connection.
+	results = append(results, runKeepalivePingProbe(ctx, client)...)
+
 	return results, client.Connected()
 }

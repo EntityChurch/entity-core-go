@@ -235,6 +235,386 @@ func WebSocketProfileDataFromEntity(e entity.Entity) (WebSocketProfileData, erro
 	return d, nil
 }
 
+// Keepalive / reconnect types — EXTENSION-NETWORK §2.2, §2.3, §5.2, §5.3
+// (Amendment 12 rung 2: the suspect → disconnected escalation the §A3
+// liveness floor requires; §12.1 makes the ping/pong exchange MUST).
+
+const (
+	// TypeNetworkKeepaliveConfig is the §2.3 keepalive parameter block.
+	TypeNetworkKeepaliveConfig = "system/network/keepalive-config"
+	// TypeNetworkBackoffConfig is the §2.2 reconnection backoff parameter
+	// block. Consumed by the rung-3 maintain-peer reconnect lifecycle;
+	// landed with rung 2 because the type shape is spec-pinned and cheap.
+	TypeNetworkBackoffConfig = "system/network/backoff-config"
+	// TypeNetworkPing is the §5.2 keepalive ping payload, sent as
+	// EXECUTE system/protocol/connect operation "ping" (§5.1).
+	TypeNetworkPing = "system/network/ping"
+	// TypeNetworkPong is the §5.3 keepalive pong payload, returned in the
+	// EXECUTE_RESPONSE to a ping.
+	TypeNetworkPong = "system/network/pong"
+)
+
+// Keepalive defaults per §2.3 / §5.4 (exact values impl-defined per §12.4;
+// Go ships the spec's documented defaults). The §B consumer latency envelope
+// is interval_ms × max_missed + timeout_ms ≈ 100 s at these values.
+const (
+	DefaultKeepaliveIntervalMs uint64 = 30000
+	DefaultKeepaliveTimeoutMs  uint64 = 10000
+	DefaultKeepaliveMaxMissed  uint64 = 3
+)
+
+// Backoff defaults per §2.2.
+const (
+	DefaultBackoffMinMs    uint64 = 1000
+	DefaultBackoffMaxMs    uint64 = 60000
+	DefaultBackoffStrategy        = "exponential"
+)
+
+// KeepaliveConfigData is the system/network/keepalive-config payload (§2.3).
+// All fields optional — pointer-typed so an absent field (nil, omitted on
+// wire) is distinguishable from an explicit value; defaults apply at use
+// time via the Effective* helpers.
+type KeepaliveConfigData struct {
+	// IntervalMs is the ping interval (default 30000).
+	IntervalMs *uint64 `cbor:"interval_ms,omitempty"`
+	// TimeoutMs is the pong timeout (default 10000).
+	TimeoutMs *uint64 `cbor:"timeout_ms,omitempty"`
+	// MaxMissed is the missed-pong count before failure (default 3).
+	MaxMissed *uint64 `cbor:"max_missed,omitempty"`
+}
+
+// EffectiveIntervalMs returns interval_ms with the §2.3 default applied.
+func (d KeepaliveConfigData) EffectiveIntervalMs() uint64 {
+	if d.IntervalMs != nil {
+		return *d.IntervalMs
+	}
+	return DefaultKeepaliveIntervalMs
+}
+
+// EffectiveTimeoutMs returns timeout_ms with the §2.3 default applied.
+func (d KeepaliveConfigData) EffectiveTimeoutMs() uint64 {
+	if d.TimeoutMs != nil {
+		return *d.TimeoutMs
+	}
+	return DefaultKeepaliveTimeoutMs
+}
+
+// EffectiveMaxMissed returns max_missed with the §2.3 default applied.
+func (d KeepaliveConfigData) EffectiveMaxMissed() uint64 {
+	if d.MaxMissed != nil {
+		return *d.MaxMissed
+	}
+	return DefaultKeepaliveMaxMissed
+}
+
+// ToEntity creates a system/network/keepalive-config entity.
+func (d KeepaliveConfigData) ToEntity() (entity.Entity, error) {
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(TypeNetworkKeepaliveConfig, cbor.RawMessage(raw))
+}
+
+// BackoffConfigData is the system/network/backoff-config payload (§2.2).
+type BackoffConfigData struct {
+	// MinMs is the minimum delay between reconnection attempts (default 1000).
+	MinMs *uint64 `cbor:"min_ms,omitempty"`
+	// MaxMs is the maximum delay (default 60000).
+	MaxMs *uint64 `cbor:"max_ms,omitempty"`
+	// Strategy is "exponential" (default), "linear", or "constant".
+	Strategy string `cbor:"strategy,omitempty"`
+}
+
+// EffectiveMinMs returns min_ms with the §2.2 default applied.
+func (d BackoffConfigData) EffectiveMinMs() uint64 {
+	if d.MinMs != nil {
+		return *d.MinMs
+	}
+	return DefaultBackoffMinMs
+}
+
+// EffectiveMaxMs returns max_ms with the §2.2 default applied.
+func (d BackoffConfigData) EffectiveMaxMs() uint64 {
+	if d.MaxMs != nil {
+		return *d.MaxMs
+	}
+	return DefaultBackoffMaxMs
+}
+
+// EffectiveStrategy returns strategy with the §2.2 default applied.
+func (d BackoffConfigData) EffectiveStrategy() string {
+	if d.Strategy != "" {
+		return d.Strategy
+	}
+	return DefaultBackoffStrategy
+}
+
+// ToEntity creates a system/network/backoff-config entity.
+func (d BackoffConfigData) ToEntity() (entity.Entity, error) {
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(TypeNetworkBackoffConfig, cbor.RawMessage(raw))
+}
+
+// PingData is the system/network/ping payload (§5.2) — the params entity of
+// the §5.1 keepalive EXECUTE (system/protocol/connect, operation "ping").
+type PingData struct {
+	// Timestamp is the sender's clock, ms since epoch.
+	Timestamp uint64 `cbor:"timestamp"`
+	// Sequence is the sender's monotonic ping sequence number.
+	Sequence uint64 `cbor:"sequence"`
+}
+
+// ToEntity creates a system/network/ping entity.
+func (d PingData) ToEntity() (entity.Entity, error) {
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(TypeNetworkPing, cbor.RawMessage(raw))
+}
+
+// PongData is the system/network/pong payload (§5.3) — the result entity of
+// a keepalive ping. Timestamp and Sequence echo the ping; ServerTime is the
+// responder's clock.
+type PongData struct {
+	Timestamp  uint64 `cbor:"timestamp"`
+	Sequence   uint64 `cbor:"sequence"`
+	ServerTime uint64 `cbor:"server_time"`
+}
+
+// ToEntity creates a system/network/pong entity.
+func (d PongData) ToEntity() (entity.Entity, error) {
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(TypeNetworkPong, cbor.RawMessage(raw))
+}
+
+// PongDataFromEntity decodes a system/network/pong entity's data.
+func PongDataFromEntity(e entity.Entity) (PongData, error) {
+	var d PongData
+	if err := ecf.Decode(e.Data, &d); err != nil {
+		return PongData{}, err
+	}
+	return d, nil
+}
+
+// Network handler operation types — EXTENSION-NETWORK §2.1, §2.4–§2.9
+// (Amendment 12 rung 3: the maintain-peer / release-peer / status / close
+// surface the §4 operations exchange; §13 Types Installed).
+
+const (
+	// TypeNetworkMaintainRequest is the §2.1 maintain-peer input.
+	TypeNetworkMaintainRequest = "system/network/maintain-request"
+	// TypeNetworkMaintainResult is the §2.4 maintain-peer output.
+	TypeNetworkMaintainResult = "system/network/maintain-result"
+	// TypeNetworkReleaseRequest is the §2.5 release-peer input.
+	TypeNetworkReleaseRequest = "system/network/release-request"
+	// TypeNetworkReleaseResult is the §2.6 release-peer output.
+	TypeNetworkReleaseResult = "system/network/release-result"
+	// TypeNetworkStatus is the §2.7 status-operation output.
+	TypeNetworkStatus = "system/network/status"
+	// TypeNetworkPeerSummary is the §2.8 per-peer row inside §2.7 status.
+	TypeNetworkPeerSummary = "system/network/peer-summary"
+	// TypeNetworkCloseRequest is the §2.9 close input.
+	TypeNetworkCloseRequest = "system/network/close-request"
+)
+
+// MaintainRequestData is the system/network/maintain-request payload (§2.1).
+// reconnect and resubscribe are pointer-typed so an absent field (default
+// true per spec) is distinguishable from an explicit false.
+type MaintainRequestData struct {
+	// PeerID is the remote peer to maintain a relationship with (Base58).
+	PeerID string `cbor:"peer_id"`
+	// Address is the optional initial dial address (e.g. "host:port").
+	Address string `cbor:"address,omitempty"`
+	// Reconnect enables auto-reconnect on disconnect (default true).
+	Reconnect *bool `cbor:"reconnect,omitempty"`
+	// Resubscribe enables subscription restoration on reconnect (default true).
+	Resubscribe *bool `cbor:"resubscribe,omitempty"`
+	// Keepalive overrides the §2.3 keepalive defaults.
+	Keepalive *KeepaliveConfigData `cbor:"keepalive,omitempty"`
+	// Backoff overrides the §2.2 reconnection backoff defaults.
+	Backoff *BackoffConfigData `cbor:"backoff,omitempty"`
+}
+
+// ReconnectEnabled returns reconnect with the §2.1 default (true) applied.
+func (d MaintainRequestData) ReconnectEnabled() bool {
+	return d.Reconnect == nil || *d.Reconnect
+}
+
+// ResubscribeEnabled returns resubscribe with the §2.1 default (true) applied.
+func (d MaintainRequestData) ResubscribeEnabled() bool {
+	return d.Resubscribe == nil || *d.Resubscribe
+}
+
+// EffectiveBackoff returns the backoff config with §2.2 defaults for an
+// absent block.
+func (d MaintainRequestData) EffectiveBackoff() BackoffConfigData {
+	if d.Backoff != nil {
+		return *d.Backoff
+	}
+	return BackoffConfigData{}
+}
+
+// ToEntity creates a system/network/maintain-request entity.
+func (d MaintainRequestData) ToEntity() (entity.Entity, error) {
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(TypeNetworkMaintainRequest, cbor.RawMessage(raw))
+}
+
+// MaintainRequestDataFromEntity decodes a maintain-request entity's data.
+func MaintainRequestDataFromEntity(e entity.Entity) (MaintainRequestData, error) {
+	var d MaintainRequestData
+	if err := ecf.Decode(e.Data, &d); err != nil {
+		return MaintainRequestData{}, err
+	}
+	return d, nil
+}
+
+// MaintainResultData is the system/network/maintain-result payload (§2.4).
+type MaintainResultData struct {
+	PeerID string `cbor:"peer_id"`
+	// SessionID identifies the maintenance session.
+	SessionID string `cbor:"session_id"`
+	// Subscriptions are the lifecycle-monitoring subscription IDs created.
+	Subscriptions []string `cbor:"subscriptions,omitempty"`
+	// ChainID is the process chain_id for the lifecycle continuation graph.
+	ChainID string `cbor:"chain_id"`
+}
+
+// ToEntity creates a system/network/maintain-result entity.
+func (d MaintainResultData) ToEntity() (entity.Entity, error) {
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(TypeNetworkMaintainResult, cbor.RawMessage(raw))
+}
+
+// MaintainResultDataFromEntity decodes a maintain-result entity's data.
+func MaintainResultDataFromEntity(e entity.Entity) (MaintainResultData, error) {
+	var d MaintainResultData
+	if err := ecf.Decode(e.Data, &d); err != nil {
+		return MaintainResultData{}, err
+	}
+	return d, nil
+}
+
+// ReleaseRequestData is the system/network/release-request payload (§2.5).
+type ReleaseRequestData struct {
+	PeerID string `cbor:"peer_id"`
+	// Reason is "shutdown" (default), "idle", or "migration".
+	Reason string `cbor:"reason,omitempty"`
+}
+
+// EffectiveReason returns reason with the §2.5 default applied.
+func (d ReleaseRequestData) EffectiveReason() string {
+	if d.Reason != "" {
+		return d.Reason
+	}
+	return "shutdown"
+}
+
+// ToEntity creates a system/network/release-request entity.
+func (d ReleaseRequestData) ToEntity() (entity.Entity, error) {
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(TypeNetworkReleaseRequest, cbor.RawMessage(raw))
+}
+
+// ReleaseResultData is the system/network/release-result payload (§2.6).
+type ReleaseResultData struct {
+	PeerID string `cbor:"peer_id"`
+	// CleanedUp lists the tree paths removed during cleanup.
+	CleanedUp []string `cbor:"cleaned_up"`
+}
+
+// ToEntity creates a system/network/release-result entity.
+func (d ReleaseResultData) ToEntity() (entity.Entity, error) {
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(TypeNetworkReleaseResult, cbor.RawMessage(raw))
+}
+
+// ReleaseResultDataFromEntity decodes a release-result entity's data.
+func ReleaseResultDataFromEntity(e entity.Entity) (ReleaseResultData, error) {
+	var d ReleaseResultData
+	if err := ecf.Decode(e.Data, &d); err != nil {
+		return ReleaseResultData{}, err
+	}
+	return d, nil
+}
+
+// NetworkPeerSummaryData is the system/network/peer-summary payload (§2.8).
+type NetworkPeerSummaryData struct {
+	PeerID    string `cbor:"peer_id"`
+	SessionID string `cbor:"session_id"`
+	// Status is "connected", "disconnected", "reconnecting" (§2.8; Go also
+	// surfaces the §3.13 "suspect" transition state the floor writes).
+	Status string `cbor:"status"`
+	// PendingCount is the queued outbound message count for this peer.
+	// Go ships no §8 outbox — bare zero is the conformant value
+	// (Amendment 11).
+	PendingCount uint64 `cbor:"pending_count"`
+	// Subscriptions is the active subscription count on this peer.
+	Subscriptions uint64 `cbor:"subscriptions"`
+}
+
+// NetworkStatusData is the system/network/status payload (§2.7).
+type NetworkStatusData struct {
+	MaintainedPeers []NetworkPeerSummaryData `cbor:"maintained_peers"`
+	// PendingCount is the total queued outbound message count (zero — no
+	// §8 outbox, Amendment 11).
+	PendingCount uint64 `cbor:"pending_count"`
+}
+
+// ToEntity creates a system/network/status entity.
+func (d NetworkStatusData) ToEntity() (entity.Entity, error) {
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(TypeNetworkStatus, cbor.RawMessage(raw))
+}
+
+// NetworkStatusDataFromEntity decodes a network status entity's data.
+func NetworkStatusDataFromEntity(e entity.Entity) (NetworkStatusData, error) {
+	var d NetworkStatusData
+	if err := ecf.Decode(e.Data, &d); err != nil {
+		return NetworkStatusData{}, err
+	}
+	return d, nil
+}
+
+// CloseRequestData is the system/network/close-request payload (§2.9).
+type CloseRequestData struct {
+	PeerID string `cbor:"peer_id"`
+	// Reason is "shutdown", "idle", "error", or "migration" (§9.1).
+	Reason string `cbor:"reason"`
+}
+
+// ToEntity creates a system/network/close-request entity.
+func (d CloseRequestData) ToEntity() (entity.Entity, error) {
+	raw, err := ecf.Encode(d)
+	if err != nil {
+		return entity.Entity{}, err
+	}
+	return entity.NewEntity(TypeNetworkCloseRequest, cbor.RawMessage(raw))
+}
+
 // TCPProfileDataFromEntity decodes a system/peer/transport/tcp entity.
 // Per D-5 in PROPOSAL-TRANSPORT-FAMILY-CHUNK-C-AMENDMENTS the
 // data.transport_type MUST match the entity-type suffix; decoders MUST

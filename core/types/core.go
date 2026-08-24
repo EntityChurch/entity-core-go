@@ -158,6 +158,17 @@ func RegisterCoreTypes(r *TypeRegistry) {
 	r.ReflectType(TypeDurabilityAdvertisement, reflect.TypeOf(DurabilityAdvertisementData{}))
 	r.ReflectType("system/peer", reflect.TypeOf(PeerData{}))
 	r.ReflectType(TypePeerSession, reflect.TypeOf(SessionData{}))
+	// system/peer/status — §3.13 operational liveness entity (EXTENSION-NETWORK
+	// Amendment 12 §A3 liveness slice; reason/last_error are the §A2 additive
+	// optional fields). The sanctioned liveness home the session entity dropped
+	// its status field to defer to (session.go §9.1 R6-c).
+	r.ReflectType(TypePeerStatus, reflect.TypeOf(PeerStatusData{}))
+	// §3.13 semantic field types — peer_id is the V7 §1.5 Base58 form
+	// (Ruling-1 pattern) and connection is a tree-path ref. Rust + Python
+	// already bind both; Go was the outlier reflecting bare strings
+	// (caught by compare-types at the rung-2 convergence pass).
+	r.OverrideField(TypePeerStatus, "peer_id", FieldSpec{TypeRef: "system/peer-id"})
+	r.OverrideField(TypePeerStatus, "connection", FieldSpec{TypeRef: "system/tree/path", Optional: true})
 	r.ReflectType("system/signature", reflect.TypeOf(SignatureData{}))
 	// PROPOSAL-PEER-MANIFEST-STATIC-HANDSHAKE §4 — standalone signed-root
 	// pointer (NORMATIVE-LOCKED). Layer above system/peer; signature
@@ -483,6 +494,37 @@ func RegisterCoreTypes(r *TypeRegistry) {
 	r.ReflectType(TypePeerTransportTCP, reflect.TypeOf(TCPProfileData{}))
 	r.ReflectType(TypePeerTransportHTTP, reflect.TypeOf(HTTPProfileData{}))
 	r.ReflectType(TypePeerTransportWebSocket, reflect.TypeOf(WebSocketProfileData{}))
+	// EXTENSION-NETWORK §2.2 / §2.3 / §5.2 / §5.3 — keepalive + backoff
+	// (Amendment 12 rung 2; §13 Types Installed).
+	r.ReflectType(TypeNetworkKeepaliveConfig, reflect.TypeOf(KeepaliveConfigData{}))
+	r.ReflectType(TypeNetworkBackoffConfig, reflect.TypeOf(BackoffConfigData{}))
+	r.ReflectType(TypeNetworkPing, reflect.TypeOf(PingData{}))
+	r.ReflectType(TypeNetworkPong, reflect.TypeOf(PongData{}))
+	// EXTENSION-NETWORK §2.1 / §2.4–§2.9 — the system/network handler's
+	// operation types (Amendment 12 rung 3; §13 Types Installed). The two
+	// config blocks they embed (keepalive-config, backoff-config) are
+	// registered just above, so the nested-struct reflection resolves.
+	r.ReflectType(TypeNetworkMaintainRequest, reflect.TypeOf(MaintainRequestData{}))
+	r.OverrideField(TypeNetworkMaintainRequest, "peer_id", FieldSpec{TypeRef: "system/peer-id"})
+	r.ReflectType(TypeNetworkMaintainResult, reflect.TypeOf(MaintainResultData{}))
+	r.OverrideField(TypeNetworkMaintainResult, "peer_id", FieldSpec{TypeRef: "system/peer-id"})
+	r.ReflectType(TypeNetworkReleaseRequest, reflect.TypeOf(ReleaseRequestData{}))
+	r.OverrideField(TypeNetworkReleaseRequest, "peer_id", FieldSpec{TypeRef: "system/peer-id"})
+	r.ReflectType(TypeNetworkReleaseResult, reflect.TypeOf(ReleaseResultData{}))
+	r.OverrideField(TypeNetworkReleaseResult, "peer_id", FieldSpec{TypeRef: "system/peer-id"})
+	// §2.6 cleaned_up is array_of system/tree/path, not bare strings.
+	r.OverrideField(TypeNetworkReleaseResult, "cleaned_up",
+		FieldSpec{ArrayOf: &FieldSpec{TypeRef: "system/tree/path"}})
+	r.ReflectType(TypeNetworkPeerSummary, reflect.TypeOf(NetworkPeerSummaryData{}))
+	r.OverrideField(TypeNetworkPeerSummary, "peer_id", FieldSpec{TypeRef: "system/peer-id"})
+	r.ReflectType(TypeNetworkStatus, reflect.TypeOf(NetworkStatusData{}))
+	r.ReflectType(TypeNetworkCloseRequest, reflect.TypeOf(CloseRequestData{}))
+	r.OverrideField(TypeNetworkCloseRequest, "peer_id", FieldSpec{TypeRef: "system/peer-id"})
+	// §3.13 system/connection — connection-state complement of
+	// system/peer/status (ruling C: MUST at full NETWORK conformance,
+	// write-on-transition; not in the liveness floor).
+	r.ReflectType(TypeConnection, reflect.TypeOf(ConnectionData{}))
+	r.OverrideField(TypeConnection, "peer_id", FieldSpec{TypeRef: "system/peer-id"})
 	r.ReflectType(TypeSubstituteSnapshotManifest, reflect.TypeOf(SubstituteSnapshotManifestData{}))
 	r.ReflectType(TypeSubstituteSource, reflect.TypeOf(SubstituteSourceData{}))
 	// try-request entity carries an inlined entity.Entity in `entry`.

@@ -258,6 +258,7 @@ func (h *ConnectHandler) Manifest() types.HandlerManifestData {
 		Operations: map[string]types.HandlerOperationSpec{
 			"hello":        {InputType: types.TypeHello, OutputType: types.TypeHello},
 			"authenticate": {InputType: types.TypeAuthenticate, OutputType: types.TypeCapGrant},
+			"ping":         {InputType: types.TypeNetworkPing, OutputType: types.TypeNetworkPong},
 		},
 	}
 }
@@ -272,16 +273,43 @@ func (h *ConnectHandler) RegisterTypes(r *types.TypeRegistry) {
 	r.OverrideField(types.TypeAuthenticate, "peer_id", types.FieldSpec{TypeRef: "system/peer-id"})
 }
 
-// Handle processes connect operations (hello, authenticate).
+// Handle processes connect operations (hello, authenticate, ping).
 func (h *ConnectHandler) Handle(ctx context.Context, req *handler.Request) (*handler.Response, error) {
 	switch req.Operation {
 	case "hello":
 		return h.handleHello(ctx, req)
 	case "authenticate":
 		return h.handleAuthenticate(ctx, req)
+	case "ping":
+		return h.handlePing(req)
 	default:
 		return handler.NewErrorResponse(400, "unknown_operation", "unknown connect operation: "+req.Operation)
 	}
+}
+
+// handlePing is the responder side of the §5 application-level keepalive
+// (EXTENSION-NETWORK §5.1): EXECUTE system/protocol/connect op "ping" with a
+// system/network/ping params entity returns a system/network/pong echoing
+// timestamp + sequence and stamping the responder's clock. Reaching this
+// code at all is the liveness proof — the handler loop is dispatching, so
+// the peer is protocol-responsive, not just TCP-alive (the distinction §5.1
+// pins against transport-level WS pings). Sequencing (established
+// connections only — the inverse gate of hello/authenticate) is enforced at
+// the dispatch boundary via ValidateConnectionSequence.
+func (h *ConnectHandler) handlePing(req *handler.Request) (*handler.Response, error) {
+	if req.Params.Type != types.TypeNetworkPing {
+		return handler.NewErrorResponse(400, "invalid_params",
+			"ping params must be "+types.TypeNetworkPing+", got "+req.Params.Type)
+	}
+	var ping types.PingData
+	if err := ecf.Decode(req.Params.Data, &ping); err != nil {
+		return handler.NewErrorResponse(400, "invalid_params", "decode ping: "+err.Error())
+	}
+	return handler.NewResponse(200, types.TypeNetworkPong, types.PongData{
+		Timestamp:  ping.Timestamp,
+		Sequence:   ping.Sequence,
+		ServerTime: uint64(time.Now().UnixMilli()),
+	})
 }
 
 func (h *ConnectHandler) handleHello(ctx context.Context, req *handler.Request) (*handler.Response, error) {
@@ -662,6 +690,23 @@ func (h *ConnectHandler) handleAuthenticate(ctx context.Context, req *handler.Re
 					now,
 					expiresAt,
 				)
+				// Amendment 12 §A1/§A3: responder-side connected liveness write,
+				// symmetric with the dialer's write at connection.go. Both ends
+				// of a completed handshake (§6.2) publish a status entity for
+				// the peer, so either end's subscriber sees a baseline before a
+				// transport-error/keepalive-miss demotes it. Soft-fail
+				// (observability-only, must not fail the handshake).
+				_, _ = WritePeerStatus(
+					req.Context.Store,
+					req.Context.LocationIndex,
+					string(h.localPeerID),
+					remoteIdentityContentHash,
+					types.PeerStatusData{
+						PeerID:      string(claimedPeerID),
+						Status:      types.PeerStatusConnected,
+						ConnectedAt: now,
+					},
+				)
 			}
 		}
 	}
@@ -1020,6 +1065,15 @@ func ValidateConnectionSequence(state *ConnectionState, operation string) error 
 		}
 		if state.Phase != "awaiting_authenticate" {
 			return fmt.Errorf("%w: expected hello first", ecerrors.ErrConnectionRequired)
+		}
+		return nil
+	case "ping":
+		// §5.1 keepalive is gated the INVERSE way from the handshake ops:
+		// it probes an ESTABLISHED connection's protocol-level liveness, so
+		// pre-handshake pings are rejected rather than riding the no-auth
+		// connect window.
+		if !state.Completed {
+			return fmt.Errorf("%w: keepalive ping requires an established connection", ecerrors.ErrConnectionRequired)
 		}
 		return nil
 	default:

@@ -48,6 +48,7 @@ import (
 	"go.entitychurch.org/entity-core-go/ext/identity"
 	"go.entitychurch.org/entity-core-go/ext/inbox"
 	"go.entitychurch.org/entity-core-go/ext/localfiles"
+	extnetwork "go.entitychurch.org/entity-core-go/ext/network"
 	"go.entitychurch.org/entity-core-go/ext/publishedroot"
 	"go.entitychurch.org/entity-core-go/ext/query"
 	"go.entitychurch.org/entity-core-go/ext/registry"
@@ -82,6 +83,9 @@ func main() {
 	httpPath := flag.String("http-path", "/entity", "URL path the HTTP-live listener accepts POSTs at (when --http-addr set)")
 	wsAddr := flag.String("ws-addr", "", "additional WebSocket-live listen address (e.g. :9004); empty disables. Each binary WS message carries one length-prefixed ECF envelope per NETWORK §6.5.2b + §6.5.2c L864.")
 	wsPath := flag.String("ws-path", "/ws", "URL path the WebSocket listener accepts upgrades at (when --ws-addr set)")
+	kaIntervalMs := flag.Uint64("keepalive-interval-ms", 0, "EXTENSION-NETWORK §2.3 keepalive interval_ms for the §5.4 outbound ping loops (0 = spec default 30000). Short values (e.g. 1500) make the suspect→disconnected escalation observable in seconds — pair with validate-peer -keepalive-envelope-ms for the liveness harness.")
+	kaTimeoutMs := flag.Uint64("keepalive-timeout-ms", 0, "EXTENSION-NETWORK §2.3 keepalive timeout_ms per ping (0 = spec default 10000)")
+	kaMaxMissed := flag.Uint64("keepalive-max-missed", 0, "EXTENSION-NETWORK §2.3 consecutive misses before the disconnected/keepalive-miss demotion (0 = spec default 3)")
 	// Chunk E serving-mode flags. impl plan §3.
 	httpPollAddr := flag.String("http-poll-addr", "", "Chunk E: isolated HTTP poll listener address (e.g. :9201); GET /content/{hex(H)}. Mutually exclusive with --http-poll-mount-on-live.")
 	httpPollMountOnLive := flag.Bool("http-poll-mount-on-live", false, "Chunk E: mount poll routes on the live HTTP listener (Posture 2). Requires --http-addr. Mutually exclusive with --http-poll-addr.")
@@ -218,6 +222,14 @@ func main() {
 
 	// Wire system extensions: clock + inbox + continuation + subscription + query.
 	clockH := clock.NewHandler()
+
+	// system/network handler (EXTENSION-NETWORK §3–§4, Amendment 12 rung 3):
+	// the maintain-peer reconnect lifecycle over the ambient liveness floor.
+	// Bound to the peer after construction (needs keypair + dispatcher).
+	networkH := extnetwork.NewHandler()
+	if debugLog != nil {
+		networkH.SetDebugLog(debugLog)
+	}
 
 	engine := subscription.NewEngine(cs, li, debugLog)
 	engineCtx, cancelEngine := context.WithCancel(context.Background())
@@ -409,6 +421,7 @@ func main() {
 			return h
 		}()),
 		peer.WithHandler("system/continuation", continuation.NewHandler()),
+		peer.WithHandler(extnetwork.HandlerPattern, networkH),
 		peer.WithHandler("system/subscription", subscription.NewHandler(engine)),
 		peer.WithHandler("system/revision", func() *revision.Handler {
 			h := revision.NewHandler()
@@ -502,6 +515,22 @@ func main() {
 		peer.WithCloseFunc(func() { _ = filesH.Close() }),
 	)
 
+	// §2.3 keepalive overrides (zero-valued fields keep the spec defaults —
+	// KeepaliveConfigData's Effective* accessors handle the nil case).
+	if *kaIntervalMs > 0 || *kaTimeoutMs > 0 || *kaMaxMissed > 0 {
+		var kcfg types.KeepaliveConfigData
+		if *kaIntervalMs > 0 {
+			kcfg.IntervalMs = kaIntervalMs
+		}
+		if *kaTimeoutMs > 0 {
+			kcfg.TimeoutMs = kaTimeoutMs
+		}
+		if *kaMaxMissed > 0 {
+			kcfg.MaxMissed = kaMaxMissed
+		}
+		opts = append(opts, peer.WithKeepaliveConfig(kcfg))
+	}
+
 	p, err := peer.New(opts...)
 	if err != nil {
 		log.Fatalf("create peer: %v", err)
@@ -510,6 +539,10 @@ func main() {
 	// Wire clock advancement after peer construction (needs store, identity).
 	clockH.SetupAdvancement(
 		p.Store(), p.LocationIndex(), string(p.PeerID()), p.Identity().ContentHash, debugLog)
+
+	// Bind the network handler to the peer (EnsureConnected/evict seams +
+	// self-authored lifecycle subscribe/advance).
+	networkH.Bind(p)
 
 	// Wire compute engine after peer construction (needs peer ID + notifying index).
 	computeEngine.SetLocalPeerID(string(p.PeerID()))

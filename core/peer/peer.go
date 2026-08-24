@@ -49,6 +49,13 @@ type Peer struct {
 
 	remote remoteState // connection pool for remote peers
 
+	// keepalive is the §5 application-level keepalive machinery (Amendment
+	// 12 rung 2): per-peer ping loops over the outbound pool + the activity
+	// timestamps for §5.4 adaptive suppression. keepaliveCfg is fixed at
+	// construction (WithKeepaliveConfig); zero value = §2.3 spec defaults.
+	keepalive    keepaliveState
+	keepaliveCfg types.KeepaliveConfigData
+
 	closeFuncs  []func()
 	mu          sync.Mutex
 	connections []*Connection
@@ -316,9 +323,14 @@ func New(opts ...Option) (*Peer, error) {
 		listenAddr:      cfg.listenAddr,
 		closeFuncs:      cfg.closeFuncs,
 		remote:          remoteState{conns: make(map[crypto.PeerID]remoteEndpoint)},
-		serveCtx:        serveCtx,
-		serveCancel:     serveCancel,
-		wireHooks:       wireHooks,
+		keepalive: keepaliveState{
+			loops:        make(map[crypto.PeerID]bool),
+			lastActivity: make(map[crypto.PeerID]time.Time),
+		},
+		keepaliveCfg: cfg.keepaliveCfg,
+		serveCtx:     serveCtx,
+		serveCancel:  serveCancel,
+		wireHooks:    wireHooks,
 	}
 
 	// Wire remote execute.

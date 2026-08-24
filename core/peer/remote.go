@@ -283,8 +283,8 @@ func (p *Peer) AddRemoteConnection(peerID crypto.PeerID, conn *Connection) (*Con
 	}
 
 	p.remote.mu.Lock()
-	defer p.remote.mu.Unlock()
 	if existing, ok := p.remote.conns[peerID]; ok {
+		p.remote.mu.Unlock()
 		conn.Close()
 		// The pool stores remoteEndpoints polymorphically. AddRemoteConnection
 		// is the TCP-specific entry point — callers expect a *Connection back.
@@ -298,6 +298,11 @@ func (p *Peer) AddRemoteConnection(peerID crypto.PeerID, conn *Connection) (*Con
 		return existingTCP, nil
 	}
 	p.remote.conns[peerID] = conn
+	p.remote.mu.Unlock()
+
+	// Pool insert = liveness tracking begins (§5 keepalive, Amendment 12
+	// rung 2). Outside the pool lock — startKeepalive takes keepalive.mu.
+	p.startKeepalive(peerID)
 	return conn, nil
 }
 
@@ -398,17 +403,17 @@ func (p *Peer) remoteExecute(ctx context.Context, uri, operation string, params 
 
 	respEnv, err := conn.Execute(ctx, uri, operation, params, resource, async...)
 	if err != nil {
-		// Endpoint is likely broken — remove from pool so next call redials.
-		p.removeRemoteConnection(peerID)
-		// Also clear the §6.11 reentry inbound entry if this was the
-		// inbound-fallback conn — otherwise the next call would hand out
-		// the same broken conn (no transport profile to dial fresh).
-		// Cheap noop when conn isn't a *Connection (e.g. HTTPConnection).
-		if tcp, ok := conn.(*Connection); ok {
-			p.unregisterInboundForReentry(peerID, tcp)
-		}
+		// Transport error on a connection we believed active (§10 step 1):
+		// evict the dead conn from the pool AND demote peer liveness to
+		// suspect (Amendment 12 §A1), idempotently under the no-clobber
+		// guard. Also clears the §6.11 reentry entry so the next call redials
+		// rather than reusing the broken conn.
+		p.demotePeerOnTransportError(peerID, conn, err)
 		return nil, fmt.Errorf("remote execute to %s: %w", peerID, err)
 	}
+	// §5.4 adaptive suppression: a successful exchange counts as liveness,
+	// so the keepalive loop skips its next idle ping.
+	p.markPeerActivity(peerID)
 
 	return decodeExecuteResponse(respEnv)
 }
@@ -487,17 +492,18 @@ func (p *Peer) RemoteExecuteWithIncluded(ctx context.Context, uri, operation str
 	case *Connection:
 		respEnv, err := c.ExecuteWithIncluded(ctx, uri, operation, params, resource, extras)
 		if err != nil {
-			p.removeRemoteConnection(peerID)
-			p.unregisterInboundForReentry(peerID, c)
+			p.demotePeerOnTransportError(peerID, c, err)
 			return nil, fmt.Errorf("remote execute with included to %s (tcp): %w", peerID, err)
 		}
+		p.markPeerActivity(peerID)
 		return decodeExecuteResponse(respEnv)
 	case *HTTPConnection:
 		respEnv, err := c.ExecuteWithIncluded(ctx, uri, operation, params, resource, extras)
 		if err != nil {
-			p.removeRemoteConnection(peerID)
+			p.demotePeerOnTransportError(peerID, c, err)
 			return nil, fmt.Errorf("remote execute with included to %s (http): %w", peerID, err)
 		}
+		p.markPeerActivity(peerID)
 		return decodeExecuteResponse(respEnv)
 	default:
 		return nil, fmt.Errorf("remote execute with included to %s: unsupported transport type %T", peerID, conn)
@@ -578,6 +584,11 @@ func (p *Peer) getRemoteConnection(ctx context.Context, peerID crypto.PeerID) (r
 	p.remote.conns[peerID] = endpoint
 	p.remote.mu.Unlock()
 
+	// Pool insert = liveness tracking begins: start the §5 keepalive loop
+	// (Amendment 12 rung 2). Idempotent — a running loop for this peer
+	// simply keeps watching the new binding.
+	p.startKeepalive(peerID)
+
 	return endpoint, nil
 }
 
@@ -589,6 +600,32 @@ func (p *Peer) removeRemoteConnection(peerID crypto.PeerID) {
 		delete(p.remote.conns, peerID)
 	}
 	p.remote.mu.Unlock()
+}
+
+// EnsureConnected establishes (or reuses) the pooled outbound connection to
+// peerID: pool hit returns immediately; otherwise transport-profile
+// resolution → dial → §6.2 handshake → pool insert, which writes the §3.13
+// connected status and starts the §5 keepalive loop. This is the
+// EXTENSION-NETWORK §4.1 "connect if needed" seam the system/network
+// handler's maintain-peer/reconnect operations compose on — the connect
+// path is exactly the one ordinary dispatch takes, so the handler adds no
+// second establish flow (§A4 discipline).
+func (p *Peer) EnsureConnected(ctx context.Context, peerID crypto.PeerID) error {
+	_, err := p.getRemoteConnection(ctx, peerID)
+	return err
+}
+
+// IsConnected reports whether an outbound pooled connection (or a §6.11
+// inbound-reentry binding) currently exists for peerID. Observational only —
+// liveness truth is the system/peer/status entity.
+func (p *Peer) IsConnected(peerID crypto.PeerID) bool {
+	p.remote.mu.Lock()
+	_, pooled := p.remote.conns[peerID]
+	p.remote.mu.Unlock()
+	if pooled {
+		return true
+	}
+	return p.inboundForReentry(peerID) != nil
 }
 
 // EvictRemoteConnection drops any cached outbound connection to peerID

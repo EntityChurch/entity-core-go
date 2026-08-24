@@ -41,6 +41,13 @@ type ValidationSuite struct {
 	// "use the recommended default" (16 MiB / 64).
 	declaredMaxPayload    int
 	declaredMaxChainDepth int
+
+	// keepaliveEnvelopeMs is the target's §2.3 keepalive envelope
+	// (interval_ms × max_missed + timeout_ms) declared by the operator via
+	// -keepalive-envelope-ms. Zero (unset) makes the liveness category's
+	// §5.4 escalation probe SKIP with instructions — spec defaults put the
+	// envelope near 100 s and a default suite run must not stall on it.
+	keepaliveEnvelopeMs int
 }
 
 // NewValidationSuite creates a suite targeting the given peer address.
@@ -109,6 +116,13 @@ func (s *ValidationSuite) Profile() string {
 		return ProfileCore
 	}
 	return ProfileFull
+}
+
+// SetKeepaliveEnvelopeMs declares the target's §2.3 keepalive envelope
+// (interval_ms × max_missed + timeout_ms, in ms) so the liveness category's
+// §5.4 escalation probe can run with a matched deadline. Zero = probe skips.
+func (s *ValidationSuite) SetKeepaliveEnvelopeMs(ms int) {
+	s.keepaliveEnvelopeMs = ms
 }
 
 // SetDeclaredMaxPayload sets the peer-declared max payload size (bytes)
@@ -468,6 +482,26 @@ func (s *ValidationSuite) Run(ctx context.Context) (*Report, error) {
 	// memory.
 	runCat(catSession, func() []CheckResult { return runSession(ctx, client) })
 
+	// Category 28b: EXTENSION-NETWORK Amendment 12 §A3 liveness floor —
+	// the directional two-peer demotion harness. Spins an in-process
+	// killable counterpart, forces the target to dial it, then kills it
+	// and watches the target's system/peer/status transition writes
+	// (connected / suspect·transport-error / disconnected·keepalive-miss).
+	// The §5.4 escalation probe is opt-in via -keepalive-envelope-ms.
+	runCat(catLiveness, func() []CheckResult {
+		return runLiveness(ctx, client, s.keepaliveEnvelopeMs)
+	})
+
+	// Category 28c: EXTENSION-NETWORK Amendment 12 rung 3 — the system/network
+	// handler driven live. maintain-peer installs the §4.1 reconnect graph,
+	// status reports the peer, release-peer tears it down, and the reconnect
+	// anchor kills + restarts an in-process counterpart to observe the
+	// autonomous re-establish + the §3.10 lost marker. The reconnect anchor is
+	// opt-in via -keepalive-envelope-ms (same gate as the liveness §5.4 probe).
+	runCat(catNetwork, func() []CheckResult {
+		return runNetwork(ctx, client, s.keepaliveEnvelopeMs)
+	})
+
 	// Category 29: V7 v7.65 peer entity canonicalization conformance vectors
 	// (PROPOSAL-V7-PEER-ENTITY-CANONICALIZATION-AND-V1-CONTRACT §13).
 	// Seven vectors: PEER-CANON-1/2, PEER-PATTERN-1/2, PEER-MUT-1/2,
@@ -799,6 +833,10 @@ func (s *ValidationSuite) RunCategory(ctx context.Context, category string) (*Re
 		}))
 	case catSession:
 		report.AddAll(runSession(ctx, client))
+	case catLiveness:
+		report.AddAll(runLiveness(ctx, client, s.keepaliveEnvelopeMs))
+	case catNetwork:
+		report.AddAll(runNetwork(ctx, client, s.keepaliveEnvelopeMs))
 	case catPeerIDForm:
 		report.AddAll(runPeerIDForm(ctx, client))
 	case catPolicyDualForm:

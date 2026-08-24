@@ -46,6 +46,7 @@ type config struct {
 	rootTracker            *tree.RootTracker
 	contextFields          []store.ContextFieldRegistration
 	identityBindingChecker protocol.IdentityBindingChecker
+	keepaliveCfg           types.KeepaliveConfigData
 	maxCascadeDepth        *uint64
 	ownerIdentityHash      *hash.Hash
 	seedPolicy             []SeedPolicyEntry
@@ -91,6 +92,17 @@ func WithLocationIndex(li store.LocationIndex) Option {
 func WithListenAddr(addr string) Option {
 	return func(c *config) {
 		c.listenAddr = addr
+	}
+}
+
+// WithKeepaliveConfig sets the §2.3 keepalive parameters for the peer's
+// outbound-pool ping loops (EXTENSION-NETWORK §5, Amendment 12 rung 2).
+// Unset fields use the spec defaults (interval 30000 ms, timeout 10000 ms,
+// max_missed 3 — §12.4 impl-defined; Go ships the documented defaults). The
+// §B consumer latency envelope is interval_ms × max_missed + timeout_ms.
+func WithKeepaliveConfig(cfg types.KeepaliveConfigData) Option {
+	return func(c *config) {
+		c.keepaliveCfg = cfg
 	}
 }
 

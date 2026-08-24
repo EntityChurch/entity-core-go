@@ -739,6 +739,49 @@ func (c *Connection) PerformConnect(ctx context.Context) error {
 			); writeErr != nil {
 				c.debugf("[%s] R6 session entity write: %v", addr, writeErr)
 			}
+
+			// §3.13 establish transition (ruling C, full-conformance
+			// surface): record how we are attached — transport + address,
+			// status "active". Write-on-transition only; the close/failure
+			// transition fires at the demotion seam (liveness.go). Soft-fail
+			// like every operational-state write here.
+			if _, connErr := protocol.WriteConnectionState(
+				c.peer.Store(),
+				c.peer.LocationIndex(),
+				string(c.peer.PeerID()),
+				remoteIdentityHash,
+				types.ConnectionData{
+					PeerID:        string(remotePeerID),
+					Transport:     addr.Network(),
+					Address:       addr.String(),
+					Status:        types.ConnectionStatusActive,
+					EstablishedAt: grantedAt,
+				},
+			); connErr != nil {
+				c.debugf("[%s] connection-state active write: %v", addr, connErr)
+			}
+
+			// Amendment 12 §A1/§A3: write the connected liveness entity now
+			// that the handshake completed (§6.2). Reuses the identity hash
+			// derived above for the session write. Ordinary tree entity →
+			// fires any system/subscription on the status path (no poll).
+			// Soft-fail: a liveness-write miss is observability-only and must
+			// never fail an otherwise-good connection. Carries the §3.13
+			// `connection` path ref to the entity written above.
+			if _, statusErr := protocol.WritePeerStatus(
+				c.peer.Store(),
+				c.peer.LocationIndex(),
+				string(c.peer.PeerID()),
+				remoteIdentityHash,
+				types.PeerStatusData{
+					PeerID:      string(remotePeerID),
+					Status:      types.PeerStatusConnected,
+					ConnectedAt: grantedAt,
+					Connection:  types.ConnectionPath(string(c.peer.PeerID()), remoteIdentityHash),
+				},
+			); statusErr != nil {
+				c.debugf("[%s] peer-status connected write: %v", addr, statusErr)
+			}
 		}
 	}
 

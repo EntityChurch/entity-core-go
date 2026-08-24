@@ -490,12 +490,19 @@ func TestRegistryCoreTypes(t *testing.T) {
 	// encryption/wrapped-key (Go-only handles for §6.1 / §8.2 anonymous
 	// inline shapes — other impls don't need to mirror the names) → 193.
 	// EXTENSION-ENCRYPTION v2.5 R3 ENC-KAT-INNER adds system/note → 194.
-	if len(defs) != 194 {
+	// EXTENSION-NETWORK Amendment 12 §A3 adds system/peer/status → 195.
+	// EXTENSION-NETWORK Amendment 12 rung 2 adds the §2.2/§2.3/§5.2/§5.3
+	// keepalive four (keepalive-config, backoff-config, ping, pong) plus the
+	// §3.13 system/connection state entity (ruling C) → 200.
+	// EXTENSION-NETWORK Amendment 12 rung 3 adds the §2 handler-operation
+	// seven (maintain-request, maintain-result, release-request,
+	// release-result, status, peer-summary, close-request) → 207.
+	if len(defs) != 207 {
 		names := make([]string, len(defs))
 		for i, d := range defs {
 			names[i] = d.Name
 		}
-		t.Fatalf("expected 194 core type definitions, got %d: %v", len(defs), names)
+		t.Fatalf("expected 207 core type definitions, got %d: %v", len(defs), names)
 	}
 
 	seen := make(map[string]bool)
@@ -557,13 +564,21 @@ func TestReflectedTypesMatchSpec(t *testing.T) {
 	// EXTENSION-REGISTRY §6a.9 peer-issued live-registration adds 4 → 191 total.
 	// EXTENSION-ENCRYPTION v1.0 adds 7 → 198 total.
 	// EXTENSION-ENCRYPTION v2.5 R3 ENC-KAT-INNER adds system/note → 199 total.
+	// EXTENSION-NETWORK Amendment 12 §A3 adds system/peer/status (the §3.13
+	// liveness slice) → 200 total.
+	// EXTENSION-NETWORK Amendment 12 rung 2 adds the §2.2/§2.3/§5.2/§5.3
+	// keepalive four (keepalive-config, backoff-config, ping, pong) plus the
+	// §3.13 system/connection state entity (ruling C) → 205 total.
+	// EXTENSION-NETWORK Amendment 12 rung 3 adds the §2 handler-operation
+	// seven (maintain-request, maintain-result, release-request,
+	// release-result, status, peer-summary, close-request) → 212 total.
 	all := r.All()
-	if len(all) != 199 {
+	if len(all) != 212 {
 		names := make([]string, len(all))
 		for i, d := range all {
 			names[i] = d.Name
 		}
-		t.Fatalf("expected 199 total type definitions, got %d: %v", len(all), names)
+		t.Fatalf("expected 212 total type definitions, got %d: %v", len(all), names)
 	}
 
 	// Verify specific types have correct fields.
