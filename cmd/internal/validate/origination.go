@@ -34,8 +34,8 @@ const catOrigination = "origination"
 func runOriginationCore(ctx context.Context, target *PeerClient, referenceAddr string, identityName string) []CheckResult {
 	r := NewCheckRunner(catOrigination)
 
-	r.Declare("reference_connect", "")
-	r.Declare("reference_ready", "")
+	r.Declare("reference_connect", "harness precondition (not a spec vector) — dial the reference peer with the TARGET's keypair, so the validator presents one byte-equal identity to both peers per EXTENSION-CONTINUATION §4.2 case 3")
+	r.Declare("reference_ready", "harness precondition (not a spec vector) — the reference peer completed its connectivity checks and is usable as the handshake half")
 	r.Declare("dispatch_outbound_reentry", "GUIDE-CONFORMANCE §7a.1 + §7a.2a; PROPOSAL v7.74 §10.2")
 
 	var subResults []CheckResult
@@ -121,11 +121,11 @@ func runOrigination(ctx context.Context, target *PeerClient, referenceAddr strin
 
 	// --- Declare all checks ---
 
-	r.Declare("reference_connect", "")
-	r.Declare("reference_ready", "")
-	r.Declare("chain_sync", "")
-	r.Declare("psync", "")
-	r.Declare("filesync", "")
+	r.Declare("reference_connect", "harness precondition (not a spec vector) — dial the reference peer with the TARGET's keypair; a byte-distinct identity makes the writer-on-A differ from the leaf-granter-on-B and §3.1a in-chain checks 403 embedded_cap_unauthorized")
+	r.Declare("reference_ready", "harness precondition (not a spec vector) — the reference peer completed its connectivity checks and is usable as the A-role counterpart")
+	r.Declare("chain_sync", "sub-suite DRIVER (not a spec vector) — runs the chain-sync sub-suite; its checks are scored under their own categories, this only reports that the sub-suite executed")
+	r.Declare("psync", "sub-suite DRIVER (not a spec vector) — runs the prefix extract+merge sync sub-suite; its checks are scored under their own categories")
+	r.Declare("filesync", "sub-suite DRIVER (not a spec vector) — runs the file-sync sub-suite; SKIPs unless the local/files handler is present on both peers")
 
 	// Sub-suite results collected separately (they carry their own categories).
 	var subResults []CheckResult

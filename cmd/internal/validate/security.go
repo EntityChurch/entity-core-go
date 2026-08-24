@@ -3,6 +3,8 @@ package validate
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
@@ -272,7 +274,53 @@ func sendAndExpectAuthDeny(client *PeerClient, env entity.Envelope, checkName, s
 // surface per V7 v7.71 §3.3: status 403 (request-time authorization DENY,
 // §5.2 verify_request). Used by Phase-2 scope / expiry / forged-root checks
 // where the failure is in the authorization domain.
+// denyStateProbe describes what MUST NOT have changed after a refusal —
+// GUIDE-CONFORMANCE §2.4a conjuncts 2 and 3 (no state change, no
+// publication). A nil probe means the guarded operation is a READ, where
+// both conjuncts are vacuous and asserting the status alone is complete.
+//
+// WHY THIS TYPE EXISTS. Before 2026-08-11 every caller of
+// sendAndExpectAuthzDeny asserted `status == 403` and nothing else, so a
+// peer that returned 403 and performed the write anyway passed. The audit
+// (docs/validation/reports/2026-08-11-2-4a-*) found the gap concentrates
+// in the shared helper rather than in individual vectors: one helper,
+// eight callers, four of them driving writes. Putting the probe HERE
+// rather than in each caller is the point — a future caller inherits the
+// negative half by construction instead of by the author remembering.
+type denyStateProbe struct {
+	// AbsentPath MUST NOT resolve after the refusal. Use when the caller
+	// controls the exact write path.
+	AbsentPath string
+	// UnchangedPrefix MUST hold the same child set before and after. Use
+	// when the write path carries a peer-generated id the caller cannot
+	// predict (a subscription lands at system/subscription/{id}, so
+	// "nothing new appeared under the prefix" is the only assertable
+	// form of "it did not publish").
+	UnchangedPrefix string
+}
+
 func sendAndExpectAuthzDeny(client *PeerClient, env entity.Envelope, checkName, specRef string) CheckResult {
+	return sendAndExpectAuthzDenyProbed(context.Background(), client, env, checkName, specRef, nil)
+}
+
+// sendAndExpectAuthzDenyProbed asserts all three §2.4a conjuncts: the
+// request is refused 403, AND the state the operation would have written
+// is absent or unchanged. The snapshot for UnchangedPrefix is taken
+// BEFORE the send, which is why the probe cannot live in the caller
+// after the fact.
+func sendAndExpectAuthzDenyProbed(
+	ctx context.Context,
+	client *PeerClient,
+	env entity.Envelope,
+	checkName, specRef string,
+	probe *denyStateProbe,
+) CheckResult {
+	// Conjunct 2/3 pre-state, captured before the refusal can occur.
+	var beforeKeys map[string]bool
+	if probe != nil && probe.UnchangedPrefix != "" {
+		beforeKeys = listingKeys(ctx, client, probe.UnchangedPrefix)
+	}
+
 	respEnv, _, err := client.SendRawEnvelope(env)
 	if err != nil {
 		return fail(catSecurity, checkName, specRef,
@@ -283,16 +331,61 @@ func sendAndExpectAuthzDeny(client *PeerClient, env entity.Envelope, checkName, 
 		return fail(catSecurity, checkName, specRef,
 			"could not decode response: "+err.Error())
 	}
-	if respData.Status == 403 {
-		return pass(catSecurity, checkName, specRef,
-			"correctly rejected with 403 (v7.71 §3.3 authz-class DENY)")
-	}
 	if respData.Status == 401 {
 		return fail(catSecurity, checkName, specRef,
 			"v7.71 §3.3 maps authorization-class failures to 403, not 401; impl is conflating authz-class with auth-class DENY")
 	}
-	return fail(catSecurity, checkName, specRef,
-		fmt.Sprintf("expected status 403 (v7.71 §3.3 authz-class), got %d", respData.Status))
+	if respData.Status != 403 {
+		return fail(catSecurity, checkName, specRef,
+			fmt.Sprintf("expected status 403 (v7.71 §3.3 authz-class), got %d", respData.Status))
+	}
+
+	// Conjunct 1 satisfied. Now the two that a status-only check misses.
+	if probe == nil {
+		return pass(catSecurity, checkName, specRef,
+			"correctly rejected with 403 (v7.71 §3.3 authz-class DENY); guarded op is a read, so §2.4a conjuncts 2+3 are vacuous")
+	}
+	if probe.AbsentPath != "" {
+		if ent, _, err := client.TreeGet(ctx, probe.AbsentPath); err == nil {
+			return fail(catSecurity, checkName, specRef, fmt.Sprintf(
+				"refused with 403 but PUBLISHED at %s (type=%q) — §2.4a conjuncts 2+3: a 403 that writes anyway passes every status-only check",
+				probe.AbsentPath, ent.Type))
+		}
+	}
+	if probe.UnchangedPrefix != "" {
+		afterKeys := listingKeys(ctx, client, probe.UnchangedPrefix)
+		var added []string
+		for k := range afterKeys {
+			if !beforeKeys[k] {
+				added = append(added, k)
+			}
+		}
+		if len(added) > 0 {
+			sort.Strings(added)
+			return fail(catSecurity, checkName, specRef, fmt.Sprintf(
+				"refused with 403 but %d new entr(y/ies) appeared under %s: %s — §2.4a conjuncts 2+3",
+				len(added), probe.UnchangedPrefix, strings.Join(added, ", ")))
+		}
+	}
+	return pass(catSecurity, checkName, specRef,
+		"correctly rejected with 403 AND wrote nothing (§2.4a all three conjuncts: refused, no state change, no publication)")
+}
+
+// listingKeys returns the child-key set under prefix, or an empty set if
+// the prefix does not resolve. An unreadable prefix is treated as empty
+// rather than as an error: the probe's question is "did anything NEW
+// appear", and both snapshots are taken the same way, so a consistently
+// unreadable prefix simply yields no false positive.
+func listingKeys(ctx context.Context, client *PeerClient, prefix string) map[string]bool {
+	out := map[string]bool{}
+	entries, _, err := client.TreeListing(ctx, prefix)
+	if err != nil {
+		return out
+	}
+	for k := range entries {
+		out[k] = true
+	}
+	return out
 }
 
 // buildSimpleGetParams creates params and resource target for a basic tree get.
@@ -752,6 +845,9 @@ func checkOperationScopeDenied(ctx context.Context, client *PeerClient) CheckRes
 		},
 		"system/tree", "put", // exceeds: put not allowed
 		"system/validate/security-test",
+		// §2.4a conjuncts 2+3: the denied op is a WRITE to a path we
+		// control, so the absence is directly assertable.
+		&denyStateProbe{AbsentPath: "system/validate/security-test"},
 	)
 }
 
@@ -765,6 +861,10 @@ func checkHandlerScopeDenied(ctx context.Context, client *PeerClient) CheckResul
 		},
 		"system/subscription", "subscribe", // exceeds: wrong handler
 		"system/validate/security-test",
+		// §2.4a conjuncts 2+3: a subscription lands at
+		// system/subscription/{peer-generated id}, so "nothing new under
+		// the prefix" is the only assertable form of "did not publish".
+		&denyStateProbe{UnchangedPrefix: "system/subscription/"},
 	)
 }
 
@@ -782,6 +882,13 @@ func checkHandlerScopeDeniedCore(ctx context.Context, client *PeerClient) CheckR
 		},
 		"system/capability", "request", // exceeds: wrong handler (capability is core)
 		"system/validate/security-test",
+		// §2.4a: probe DELIBERATELY nil. `capability:request` mints a cap,
+		// so conjuncts 2+3 are NOT vacuous here — but the write location
+		// was not established, and a probe against a guessed path would
+		// pass for the wrong reason, which is the exact defect §2.4a
+		// exists to catch. Left unasserted and visible rather than
+		// asserted and wrong. See WORK-STATUS G-1a.
+		nil,
 	)
 }
 
@@ -795,6 +902,9 @@ func checkResourceScopeDenied(ctx context.Context, client *PeerClient) CheckResu
 		},
 		"system/tree", "get", // handler+op ok
 		"system/handler/system/tree", // exceeds: resource not in scope
+		// §2.4a: the guarded op is a READ — conjuncts 2+3 are vacuous and
+		// the status assertion is complete.
+		nil,
 	)
 }
 
@@ -888,6 +998,7 @@ func sendScopeTest(
 	restrictedGrant types.GrantEntry,
 	handler, operation string,
 	resourcePath string,
+	probe *denyStateProbe,
 ) CheckResult {
 	kp := client.Keypair()
 	identity := client.IdentityEntity()
@@ -924,6 +1035,8 @@ func sendScopeTest(
 
 	// Scope checks (operation / handler / resource) are authz-class — the
 	// child cap's grant restrictions exclude the request, surfacing as the
-	// §5.2 authorization-domain DENY (v7.71 §3.3 403).
-	return sendAndExpectAuthzDeny(client, env, checkName, specRef)
+	// §5.2 authorization-domain DENY (v7.71 §3.3 403). `probe` carries the
+	// §2.4a conjuncts 2+3 for the rows whose guarded op WRITES; a read row
+	// passes nil, where those conjuncts are vacuous.
+	return sendAndExpectAuthzDenyProbed(ctx, client, env, checkName, specRef, probe)
 }

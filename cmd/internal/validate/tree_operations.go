@@ -114,7 +114,7 @@ func runTreeOperations(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("core_tree_path_flex_1", "V7 v7.72 §9.5a (CORE-TREE-PATH-FLEX-1) — §1.4 path validation flex set")
 
 	// Cleanup
-	r.Declare("cleanup", "")
+	r.Declare("cleanup", "harness teardown (not a spec vector) — removes the category's test entities under system/validate/tree-ops/ so a re-run starts clean; WARNs rather than FAILs, since leftover state is a hygiene problem, not a conformance one")
 
 	// --- Step 1: Snapshot before mutation ---
 

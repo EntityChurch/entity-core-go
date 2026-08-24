@@ -1,6 +1,6 @@
 # entity-core-go — status
 
-_Updated: 2026-08-07 · public: v0.8.0 (master)_
+_Updated: 2026-08-12 · public: v0.8.0 (master) · **live tracker: `docs/status/WORK-STATUS.md`**_
 
 ## Where it is
 
@@ -12,8 +12,8 @@ the other implementations validate against this one as the interop baseline.
 The codebase is a three-module `go.work` workspace — `core` (the protocol
 library, a strict 14-package DAG: `errors → ecf → hash → entity, crypto,
 store, types, wire → capability → handler → protocol, tree → peer`), `ext`
-(system extensions, each depending only on `core`), and `cmd` (CLIs, the
-~60-category validation suite, and cross-impl interop tooling). Go 1.25, only
+(system extensions, each depending only on `core` — **28 packages**), and `cmd`
+(CLIs, the **66-category** validation suite, and cross-impl interop tooling). Go 1.25, only
 two external dependencies (`fxamacker/cbor` for ECF, `mr-tron/base58` for
 PeerID), pure-Go/no-CGo. The build is fully containerized (`make` + `podman`,
 per-invocation resource caps in the `Makefile` / `RESOURCE-CAPS.md`); a fresh
@@ -27,8 +27,241 @@ live-HTTP transport surfaces.
 
 ## Where we left off
 
-**The connectivity cycle — EXTENSION-SIGNALING — is the live work**, and has
-been since early July. It is a cohort effort with `entity-core-rust`,
+> **NEXT SESSION STARTS HERE:**
+> `docs/status/HANDOFF-2026-08-12-clean-foundation-and-what-to-build-next.md`
+> — the foundation is clean and measured; that doc carries what to build on it,
+> what NOT to start, and the reconnect criteria for arch/browser-rust.
+> **Live tracker:** `docs/status/WORK-STATUS.md` (updated in place; the *state*, where
+> dated ROUTING-*/HANDOFF-* docs are the *record*).
+> **Ready to send, needs a human:**
+> `docs/status/PEER-PACKET-2026-08-12-rust-and-py-restart-here.md` — one packet
+> consolidating everything rust and py owe, superseding the 08-11 handoffs neither read.
+> rust is carrying a **live security hole** (unauthenticated `revoke`/`renew`).
+>
+> **GATE: 1569 · 0F · 0S / 55 · 0F · 0S / 18 · 0F · 0S**, measured 2026-08-11 (f), all
+> three passes exit 0. **1567 → 1569** because the §2.4a register negative half had been
+> landing in a profile *nothing invokes* and now runs in the standing gate.
+>
+> **§2.4a is closed structurally:** the state probe lives in the shared deny helper
+> (`denyStateProbe` / `sendAndExpectAuthzDenyProbed`), so callers inherit conjuncts 2+3
+> by construction. Both probe modes mutation-tested. **One row is deliberately
+> unasserted** — `handler_scope_denied_core_1`, whose write location was not established;
+> a guessed probe would pass for the wrong reason. That is **G-1a**, the top next item.
+>
+> **Do NOT start `ext/identity` pre-rotation** (§4 gated on §6.1, §6.1 on a matrix that
+> does not exist), and do not re-open arch/browser-rust until the reconnect criteria in
+> §7 of the handoff are met.
+>
+> **Before anything else: check every sibling's `git log` including `origin/`.** A ruling
+> that is not pushed has not been made.
+
+> **[SUPERSEDED by the 1569 measurement above.]** GATE RE-MEASURED 2026-08-11 (e) at
+> `cf99a59`: **1567 · 0F · 0S / 55 · 0F · 0S / 18 · 0F · 0S**, all three passes exit 0. This supersedes every carried instance of
+> that triple below. Two standing WARNs the carried number never mentioned —
+> `compute.eval_depth_limit` (COMPUTE §5.4) and `resource_bounds.r3_connection_flood`
+> (V7 §4.10(c) SHOULD) — both pre-existing, tracked as W-1 in WORK-STATUS.
+
+> **As of 2026-08-11 (b) — arch ruled everything routed in the last two cycles.
+> Nothing is frozen; two rulings are coordinated cohort cuts.** Gate at
+> `1745f16`: **1567 · 0F · 0S / 55 · 0F · 0S / 18 · 0F · 0S** (1566 → 1567 = the
+> new announce-stop negative half). Peer handoff:
+> `docs/status/HANDOFF-2026-08-11-b-…`. Arch pins: `4dd07f5`, `03ba755`.
+>
+> - **`{peer_id_hex}` is UNFROZEN — §4.5a item 1a (v7.77)** (`d7e44f6`).
+>   `system/peer` is authored at the ECFv1-SHA-256 floor **unconditionally**,
+>   whatever the home or negotiated active format. Our preferred resolution was
+>   **rejected**: promoting §8.4.6's prose to a peer-level MUST would retire
+>   `hash_formats` negotiation and make our own SHA-384 gate arm illegal by
+>   construction. Implemented at two choke points; the format **parameter** is
+>   deleted, not defaulted, because §4.5a item 4 now says two derivation
+>   functions is the defect.
+> - **The mixed-home seam HOLDS: 35/35 both arms**, control green in the same
+>   invocation, from 2 FAIL + 3 SKIP. The `401 invalid_nonce` at
+>   `connect:authenticate` is gone — arch declined to claim 1a would fix it and
+>   was right not to; measured, it does. Still diagnostic, not a gate.
+> - **`notification` cut** (`d7e44f6`) — RATIFIED; the banner we declined to cut
+>   against was stripped in `03ba755`. `system/protocol/inbox/notification` →
+>   **`system/subscription/notification`**, re-homed INBOX → SUBSCRIPTION. One
+>   round with `delivery`, no dual-kind window, drain undelivered mail first.
+> - **DISCOVERY §3.3 is a TWO-case rule** (`1745f16`) — ruled reading (b). Go
+>   failed the half nobody had stated: `announce-stop` returned success for any
+>   ref not currently announced, which is idempotency applied to a question it
+>   never asked. Fixed, plus `v7c_announce_stop_unknown_profile_ref`. Our
+>   `v7_announce_stop_idempotent` was scoring the wrong case and would have
+>   failed a conformant peer.
+> - **`issuerNoParams` sent `primitive/map`** where §3.2 pins `primitive/any` +
+>   canonical `a0` — arch caught it reviewing the instrument. Would have surfaced
+>   as a rust/py FAIL that was ours.
+> - **Cohort state:** rust owes `revoke`/`renew` layer 1 (its 16/16 was scored
+>   against the checks that certified the hole and will drop to 16/18); py's two
+>   failures go green unchanged. Both owe the `notification` cut.
+> - **[SUPERSEDED 2026-08-11 (e) — the corpus LANDED at
+>   `entity-core-protocol/specs/test-vectors/v767/` (core-protocol `56d4de4`),
+>   verbatim, pin unchanged and re-verified. The legacy path below is where it
+>   *was*. The six M3/M6 assertions are now a written re-stamp proposal with full
+>   derived values: `spec-issues/2026-08-11-d-*`. `core_register_gate`'s negative
+>   half has shipped. Snapshot kept as authored per the immutability rule.]**
+> - **Owed to arch: migrate the `v767` corpus.** It is **not** missing — it is at
+>   `entity-lab-legacy-meta/entity-core-architecture/docs/architecture/v7.0-core-revision/…/test-vectors/v767/`,
+>   sha `8e7c5232…` matching the pin exactly. The V8 split carried its two
+>   siblings (`ecf-conformance`, `crypto-agility`) into `entity-core-protocol`
+>   and left `v767` behind — visible even in the legacy repo's own `V8/` staging
+>   subtree. **Measured, not predicted:** running it against item 1a gives
+>   **49 PASS / 6 FAIL**, one root cause — M3/M6 pin peer A's `system/peer` hash
+>   under SHA-384 and the root cap embeds it as `Granter`, so the cap hash and
+>   its signature move too. Those six need re-stamping. Separately,
+>   `hash-format-sha-384.2.rehash` **passes** while asserting a construction the
+>   ruling forbids, because that vector builds the entity by hand and bypasses
+>   the pinned constructor. Also: `core_register_gate` is ten positive checks
+>   with no negative half — recorded as a §2.4a candidate, not claimed as a
+>   defect.
+> - **Correction, same day:** the first version of that spec-issue claimed the
+>   corpus "exists nowhere." Wrong, and wrong because the search was insufficient
+>   — `find -maxdepth 6` against a path 8 levels deep, over the church-meta
+>   siblings only. `entity-core-architecture` is the **pre-V8 arch repo and lives
+>   under `entity-lab-legacy-meta`**, not beside this repo. Second insufficient
+>   build-state claim from here in two days; both were caught by a person, not by
+>   the process.
+> - **Correction to our 08-11 packet.** It claimed EXTENSION-SUBSCRIPTION §2.2's
+>   banner "still reads not ratified, untouched since `4fe5348`." False when
+>   written — stripped in `03ba755`, on disk at the time. We carried a prior
+>   session's measurement across a commit change without reopening the file,
+>   which is the exact failure `AGENTS.md` names. Arch's 08-10 (f) packet was
+>   also committed-but-unpushed for a cycle, and the rule they recorded from it
+>   stands on its own: **a ruling that is not pushed has not been made.**
+
+> **As of 2026-08-11 — the cohort caught up, and two authorization holes came
+> back with it. In both cases our own conformance check was certifying the
+> hole.** Read this block first. Gate at `e91817f`: **1566 · 0F · 0S / 55 · 0F ·
+> 0S / 18 · 0F · 0S** (`/18` was `/16` — two new §6a.9 layer-1 checks), three
+> consecutive clean runs. Full routing:
+> `docs/status/ROUTING-2026-08-11-the-checks-were-certifying-the-holes.md`.
+>
+> - **REGISTRY §6a.9 `revoke` + `renew` verified NOTHING** (`e91817f`). Any peer
+>   that could reach the registry could **permanently revoke any binding in it**
+>   — revocation is monotonic, there is no undo — or extend any binding past its
+>   registrant's intended lapse. `verifyOwnershipProof` existed and was called
+>   from exactly one place: register. Renew's nonce discipline reads as
+>   authorization and is not; it stops a *captured* request being re-run while
+>   leaving a fresh unsigned one accepted. Fixed for the pinned `target_peer_id`
+>   half; the **"or the operator" half has no proof shape anywhere in the corpus**
+>   and is routed.
+> - **Our two checks certified it** — they dispatched revoke/renew with no proof
+>   and asserted 200/202, so a *correctly implemented* peer failed them. **core-py
+>   refused to match and reported it instead, which is the only reason it was
+>   found.** Now they prove ownership, plus the two negative halves
+>   (`layer1_unsigned_revoke_rejected` asserts 401 **and** that nothing was
+>   published). `registry_issuer` 16 → 18.
+> - **LOCAL-FILES §8.3 containment had no component boundary** (`e91817f`) —
+>   root `/srv/peerroot` "contained" `/srv/peerroot-backup`, with **both**
+>   §8.3-named defenses fully satisfied. Found by auditing what rust's V4a report
+>   pointed at, not by the report; **neither sibling reported this one.** Third
+>   distinct member of one defect family, each missed by a different impl, none
+>   visible to the shared V4/V4a probe.
+> - **`validate-peer`: an excluded check's live FAIL now says so.** py's
+>   `serving_mode.content_get_out_of_scope_404` report was right — reporting
+>   artifact in our tool. Annotated `[excluded from scoring]` rather than
+>   suppressed; a dropped line would hide a real failure when someone excludes a
+>   whole category.
+> - **Cohort effect to announce:** rust's `registry_issuer` 16/16 was scored
+>   against the checks that certified the hole and **will drop** until rust
+>   implements layer 1 on both ops — correct outcome, not a rust regression.
+>   **py's two pass-3 failures should go green unchanged.**
+> - **Owed to arch, none blocking except the first:** `{peer_id_hex}` (carried,
+>   still frozen for everyone); the operator proof shape; **DISCOVERY §3.3
+>   `profile_ref`, now corroborated 3/3** — and Go's `v7_announce_stop_idempotent`
+>   asserts the *opposite* of the ratified sentence, so the cohort's shared
+>   instrument and the spec disagree; §6a.9's unpinned status codes (rust and py
+>   both converged to Go's 401/202 with no MUST to point at); the `notification`
+>   half-cut round, now 3/3 holding the old string on purpose.
+
+> **As of 2026-08-10 (e) — the 08-10 packet's four items are through, and the two
+> that did NOT land as scoped are the useful ones.** Read this block first.
+> Gate at `4fb3c1b`: **1566 · 0F · 0S / 55 / 16**, identical under both
+> content_hash_formats (`/16` was `/12` — four new §6a.9.2 checks).
+> Full routing: `docs/status/ROUTING-2026-08-10-e-…`.
+>
+> - **Landed: the `system/inbox/delivery` cut** (`927070c`). Go has cut; **rust
+>   and py have not**, and §2.1's one-round `[MUST]` means the delivery type is a
+>   known cohort divergence until they do — expected at the next cross-impl run,
+>   not news. **It may be a two-string round — see the `notification` question below.**
+> - **Landed: REGISTRY §6a.9.2** (`8d3a6d4`) — `set-issuer-policy` /
+>   `get-issuer-policy`, plus two behaviours that were non-conformant: the CLI
+>   flag was a request-time parallel source (now a startup **seed** of the policy
+>   entity), and an absent policy defaulted to `open` (now curated-only —
+>   "unset is not a mode"). Four validate-peer checks are the cross-impl
+>   instrument; `registry_issuer` is 16/16 on Go.
+> - **Routed, NOT landed: the `{peer_id_hex}` pin** (`a2a4ccf`). The prescribed
+>   one-line fix breaks capability-grant and ownership-proof equality in `core/`
+>   on any non-floor home. `{peer_id_hex}` is not separable: one hash per
+>   connection is both a path key and an identity-reference equality operand, and
+>   §8.4.6 / §514 / §1772 rule those two roles in opposite directions. Two green
+>   tests measure it. **Awaiting one ruling from arch; nothing else is blocked.**
+> - **Landed: the mixed-home probe** (`4fb3c1b`) — and **the seam diverges.**
+>   `scripts/probe-mixed-home.sh` runs it with a control in ~30s. Two Go peers on
+>   different homes fail cross-peer rexec + subscription delivery on checks that
+>   pass 35/35 same-home. Proximate cause `401 invalid_nonce` at
+>   `connect:authenticate`; **not bisected.** Deliberately not in the gate —
+>   §1.2a keeps the uniform network as the supported v1 deployment.
+>
+> **Owed to arch:** whether `system/subscription/notification` is in the delivery
+> cut round (its spec banner still says unratified while the delivery ruling cites
+> it as settled), and the machine spec's two stale type strings. Neither blocks us.
+
+> **As of 2026-08-10 — ENCRYPTION v1.0's vector set is closed, and the open finding
+> is hash agility.** Read this block first; everything below it is the connectivity
+> narrative it superseded, kept because the substrate it describes is still the
+> substrate.
+>
+> **Connectivity is parked at its hardware boundary, not stalled.** G3 — the emulated
+> dual-NAT crossing — **ran and closed 2026-08-08 at 12/12 across 3 rungs, gate 6/6**,
+> which retires the `EXTENSION-SIGNALING` §11.5.1 loopback-blindness class for the
+> punch. The only remaining connectivity gates are **G4** (two real independent NATs,
+> for NAT *diversity*) and **S5** (two real browsers) — both lead time, not work.
+> Python's punch is the largest M-level gap in the corpus and is **python's**, not ours.
+>
+> **ENCRYPTION v1.0 (M2→M3): 11 of 12 §16 vectors built, and the 12th is not v1
+> work.** `ENC-ROUNDTRIP-FORMAT-1` landed 2026-08-10 — the last substantive gap.
+> `ENC-PEER-KAT-2` is the hybrid-PQ slot that §16 itself marks *"validate slot, no
+> impl required v1."* BLOCK-0 is locked three-way; BLOCK-1 is built at all three
+> tiers plus cross-tier interop, multi-device Tier C, and `ENC-RESOLVE-ORDER-1`
+> (27 rows, now including the mixed-content_hash_format rows that make arch's Q2
+> tie-break ruling falsifiable at all). The encryption category is **22 · 0F · 0S
+> under both SHA-256 and SHA-384**.
+>
+> **The open finding is not encryption's.** Building that vector meant turning
+> `--hash-type sha384` on for the first time — `validate-complete.sh` had no way to
+> pass it, so every conformance number this project has published was measured under
+> exactly one content_hash_format. Under SHA-384, **31 distinct checks fail and 30 are
+> one spec rule**: `EXTENSION-NETWORK` §6.5.3.1 pins the served hash hex at 66 chars
+> while justifying the format byte as crypto-agility, so a SHA-384 peer `400`s on its
+> own content route. The 31st is `EXTENSION-SIGNALING` §6.3's `inner_content_hash(33)`.
+> **Our peer is conformant in failing both** — they are arch's, and are filed in
+> `docs/validation/spec-issues/2026-08-10-*`. The SHA-384 run is a **diagnostic**; the
+> gate remains the default SHA-256 run at **1551 · 0F · 0S** (pass 2: 54 · 0F · 0S).
+>
+> **Routed to arch 2026-08-10** —
+> `ROUTING-2026-08-10-sha-384-does-not-work-and-the-cohort-already-disagrees.md`,
+> with the per-peer measurement in
+> `docs/validation/reports/2026-08-10-sha384-home-format-cohort.md`. The cohort is
+> already split on it: go and rust `400`, **python `200`** — letter vs intent, and
+> nothing caught it because no run ever produced a hash that was not 66 chars.
+>
+> **We own exactly one substantial unblocked item:** REGISTRY §6a.9
+> live-registration is fully built (`ext/registry/peerissued`, three ops × three
+> policy modes) and has **zero** validator coverage — because `peer-manager` has no
+> `--issuer-policy-mode` passthrough, so the suite cannot start the surface. That is
+> the same shape as the SHA-384 gap: a real, correct, default-off surface with no way
+> to turn it on.
+>
+> Entry points for the current cycle:
+> `HANDOFF-2026-08-10-encryption-v1-0-is-closed-and-sha-384-is-not-runnable.md`
+> (position), then
+> `HANDOFF-2026-08-10-b-the-blocker-review-and-what-closes-each-one.md`
+> (every open blocker, verified, with what closes it).
+
+**The connectivity cycle — EXTENSION-SIGNALING — was the live work** from early July
+through 2026-08-08. It is a cohort effort with `entity-core-rust`,
 `entity-system-architecture` (spec) and `entity-browser-rust` (the browser leg),
 routed through dated `ROUTING-*` / `HANDOFF-*` docs in this directory.
 
@@ -405,6 +638,128 @@ Keystone leg. That is now the only thing standing between us and a run that
 exercises every surface — and it is named in COVERAGE on every run rather than
 sitting silent.
 
+### 2026-08-07 (d) — the signaling/network set is closed out
+
+**The §6.7.5 gate has run** — the one arch records as *"a cross-impl reflect plus
+a dial-back… has not run"* — and the Amendment 13 build-state note is stale twice
+over. The **client-side srflx gatherer** is present in **both** Go
+(`--reflector` → `punchwire.ObserveSRFLXFrom` → `signaling.DialReflector`) and
+Rust, not "absent in every tree." But it had **never been exercised**: every V3
+crossing this cohort published, including yesterday's 6/6, reported
+`srflx_source: "bind"`. Built, then never put in the path — a capability that is
+never exercised is indistinguishable from one that does not exist.
+
+Now green, with a Go peer doubling as the reflector:
+
+| Cell | Acceptor | Initiator | `srflx_source` | `reciprocal_reach_status` |
+|---|---|---|---|---|
+| Go↔Go | Go | Go | `reflector` both seats | **200** |
+| B, B2 | Go | **Rust** | `reflector` both seats | **200** |
+| A, A2 | **Rust** | Go | `reflector` both seats | **200** |
+
+Corroborated at the reflector's vantage: **10 `op=observe-address` executes**
+across five cells, two per cell. The full §6.7.1 → §6.7.3 → §7 chain runs end to
+end and interoperates.
+
+**Honest limit:** loopback, so observed == bind. The *mechanism* is proven; the
+case it exists for — mapping differs from bind — still needs a real NAT. §6.7.5 is
+**partially** discharged, not closed.
+
+**What remains open in this set is one thing in three costumes: nobody has run it
+across a real NAT.** The §6.7.5 dial-back half, the §10.3 seam gate (two NAT'd
+peers, direct transport surviving idle), and §11.5.1 S5 (two real browsers) are
+all blocked on the same missing infrastructure, not on any implementation's code.
+That is cohort infrastructure and is the next thing worth building.
+
+Everything else in the arc is landed: §4 node+client, §3 derivation/pool, §7
+choreography + §7.4, §6.1 sealing (flag day closed, `VerifyRequire` default), §6.3
+envelope, §6.5 (b) carriage (Go+Rust, 200 both directions incl. under
+reflector-gathered srflx), §10.3 obligation 5, §11.5 teeth, §6.7.1/§6.7.2/§6.7.3.
+
+Report:
+`docs/validation/reports/2026-08-07-c-signaling-network-closeout-full-coverage.md`.
+
+Superseded by 2026-08-07 (f) below — Track 2 is finished and the `serving_mode`
+question is settled.
+
+Superseded: `HANDOFF-2026-08-07-full-coverage-and-the-open-queue.md`. Its queue is
+largely resolved — arch ruled all five open questions (`c78b3dc`), the 42 serving
+failures were withdrawn as **our** harness defect, and the
+`type/violation.kind` item in it was based on an inverted sentence (Go was never
+the outlier). Real-NAT remains open and remains **infrastructure, not
+implementation debt** — recorded as such in the spec now.
+
+Current cross-impl state (oracle `2305008`, full coverage, both passes):
+**Go 0 F / 6 S · rust 0 F / 40 S · py 8 F / 42 S**, pass 2 54/54 on all three.
+Report: `docs/validation/reports/2026-08-07-e-remeasure-under-the-ruled-oracle.md`.
+Superseded for Go by 2026-08-07 (f) — Go is now **0 F / 0 S**.
+
+### 2026-08-07 (f) — Track 2 finished: Go is at ZERO SKIPS · and the `serving_mode` question is settled
+
+**Go: 1539 total — 1537 P / 2 W / 0 F / 0 S**, pass 2 54/54. First peer in the
+cohort at zero skips. Oracle `76b5a79`.
+
+**1. The six `peer_issued` wire vectors now run against a live peer.** The
+validator serves the `-wire` fixture bundle as a static peer-issued registry
+(`-peer-issued-bundle` / `-peer-issued-addr`) and the target is started pinned
+to it (`--peer-issued-registry`, now a `peer-manager` passthrough);
+`validate-complete.sh` does all three steps. Report this as a **REGISTRY
+conformance-completeness milestone, non-gating for S5** — it is a real cohort
+first, and it is *not* an S5 or connectivity claim.
+
+Two things the wire genuinely cannot see, handled rather than papered over:
+
+- The meta-resolver advances past a backend that errors (§2.2) and **drops the
+  reason**, so VERIFY-FAIL-1 / REVOKED-1 / EXPIRED-1 all surface the *same*
+  status as a peer with no backend at all: `chain_exhausted`. Status alone
+  would pass against a peer that never looked. So the fixture origin records
+  every request and each vector asserts the **fetch pattern**. Proven by
+  negative control: all six FAIL against an unpinned peer.
+- OFFLINE-NOTFOUND-1's `neg_ttl` is backend-level and the chain loop discards
+  it; the wire assertion is the surviving pair — the name does not resolve AND
+  the fixture answered its by-name probe with a 404.
+
+Found the honest way: **registering a backend is not the same as consulting
+one.** With no `resolver-config` installed the §4 chain is empty and the pinned
+registry is never dialed — the first armed run failed all six with "fixture saw
+0 requests." The category now installs a chain naming only the fixture
+registry, so a rejected name cannot be rescued by a second backend.
+
+**2. `--publish-root` does NOT republish on rust or python — answer (a).** The
+27+27 `serving_mode` skips were masking a real defect, and it is a bigger one
+than the 42 we withdrew. Both siblings mint `system/peer/published-root` **once
+at startup and never again**; a `tree:put` that changes the tree root triggers
+no republish at 10 s or at **6 minutes**. Go republishes within seconds — the
+control proving the harness detects one when it happens.
+
+Timing-independent corroboration, so this is **not** a debounce: rust/py
+manifests are 216 B with **no `predecessor`** while Go's is 263 B and carries
+one; `published_root.seq` is `0` and stays `0`; rust's log shows a single mint,
+`change=Created`, never `Updated`. Confounder ruled out — `seed_in_scope`
+PASSes, so the binding landed and the root did change.
+
+Why it bites: under §6.5.6 Amendment 10 the served closure tracks the *current*
+`published-root.root_hash`, so a peer that advertises a signed root and never
+republishes serves a closure **frozen at boot** — every entity written after
+startup is permanently outside the served set. For a static-origin publisher,
+that is a publisher that can never publish.
+
+The 27 dependent checks stay **UNEXERCISED, not failed**: under a frozen
+closure a 404 would be conformant and a 200 would not prove recomputation. The
+finding is about the republish, not the serve. **Routed, not fixed from here.**
+
+`--publish-root`'s own help text claimed *"Honored by all three impls"* without
+qualification — corrected. That claim is what made "all three peers are
+configured identically" look true while the behavior differed.
+
+Report:
+`docs/validation/reports/2026-08-07-f-publish-root-republish-contract-rust-py.md`.
+
+**→ NEXT SESSION STARTS HERE:**
+`docs/status/HANDOFF-2026-08-07-c-go-is-at-zero-and-the-rest-is-sibling-work.md`.
+Superseded: `HANDOFF-2026-08-07-b-finish-track-2-then-kill-every-skip.md` (both
+its jobs are done).
+
 ## Backlog
 
 Ranked roughly by readiness to pick up.
@@ -477,6 +832,26 @@ Ranked roughly by readiness to pick up.
 
 ## Done recently
 
+- **`HASH_TYPE=sha384` is a GATE, not a diagnostic** (go peer). Arch ruled both
+  blocking gaps on 2026-08-10 — NETWORK §6.5.3.1's hex length follows its own
+  format byte, SIGNALING §6.3 drops the fixed-33 on `inner_content_hash` — and
+  both landed with the three validator SHA-256 assumptions sequenced behind
+  them. **1566 · 0F · 0S / 55 / 12, identical under both content_hash_formats.**
+  Still a diagnostic against rust, which has not landed the width ruling (rust
+  `b8e0ae2`: `content/{hex33}` route, `hex.len() != 66` in the FFI parse).
+- **Two validation categories were never reachable, and one was failing.**
+  `peer_id_form` (4) and `policy_dual_form` (5) were registered, dispatchable
+  and advertised, and never called by the full run — nine checks outside every
+  number this repo has published, with one FAILING under SHA-384 throughout.
+  Now wired in, and the class is a test
+  (`TestEveryCategoryIsReachableFromARun`) rather than a discipline, per
+  GUIDE-CONFORMANCE §5.2b. It found two further categories, both genuine and
+  both now declared exclusions. This is why the gate moved 1557 → 1566.
+- **The `--open-access` + `--issuer-policy-mode` footgun is closed.** A policy
+  entry is a request-time ceiling (V7 v7.62 §4), so two flags that each grant
+  combined to grant less than either alone. `entity-peer` unions them, guarded
+  by a monotonicity test; one peer with both flags now scores capability 13/13,
+  authz 11/11, registry_issuer 12/12.
 - **EXTENSION-SIGNALING §4 node + client, §3 keys/pool, §7 punch**, wired to a
   live peer via `ext/signaling/peerwiring` behind NETWORK §10.3's
   `establish_live` seam. Validated over a live node (`signaling_punch`
@@ -532,12 +907,43 @@ Ranked roughly by readiness to pick up.
    names its own signer, so only the row field is false and the row cannot
    catch a read path with step 3 unwired on the payload side. Routed; one
    field on their end closes it.
-3. **Two real machines.** This is the gap that matters and it is not blocked
-   on code. Everything above is loopback, where there is no NAT to punch —
-   so both implementations agreeing proves they wrote the same code, not that
-   traversal works. The §7.5 emulated-NAT rung and §11.5.1's S5 are both
-   unrun, and Python catching up to the punch is queued behind neither.
-3. Open the v1.x cycle: implement Tier-2 dispatch-fallback to the
+3. ~~**Two real machines.**~~ **PARTLY DONE, and the rest is lead time.** This
+   item asserted that "the §7.5 emulated-NAT rung and §11.5.1's S5 are both
+   unrun." **The emulated rung (G3) ran on 2026-08-08 and closed 12/12 across
+   3 rungs, gate 6/6**, retiring the loopback-blindness class for the punch.
+   *(Left visible rather than edited away: a durable doc asserting an unrun
+   gate that has since run and passed is the stale-build-state defect this
+   repo keeps catching in other people's text — worth one instance of catching
+   it in our own.)* What remains is **G4** (two real independent NATs, for NAT
+   diversity) and **S5** (two real browsers). Python's punch is queued behind
+   neither and is python's to build.
+4. ~~**Close ENCRYPTION v1.0.**~~ **DONE.** `ENC-ROUNDTRIP-FORMAT-1` landed and
+   the §16 vector set is closed; encryption is 22 · 0F · 0S under both
+   content_hash_formats. `ENC-PEER-KAT-2` is the hybrid-PQ slot §16 itself marks
+   *"validate slot, no impl required v1."*
+
+**The live work list is arch's 2026-08-10 answer packet (arch `ed3de7a`), and
+all four items are shovel-ready** — full scoping, call-site surveys and ordering
+in `HANDOFF-2026-08-10-c-arch-answered-everything-and-four-items-are-shovel-ready.md`:
+
+5. **Cut `system/inbox/delivery`.** Arch granted the sequencing; Go's half is one
+   constant (`core/types/delivery.go:14`) plus three comments. The MUST is that
+   the cohort not be left half-cut, so say so when we cut.
+6. **`{peer_id_hex}` must pin to the SHA-256 floor** — the one place we are
+   non-conformant under the new `SPECIFICATION-FORMAT` §8.4.6 derive-to-meet
+   rule. `types.ComputePeerIdentityHash` follows the home format today;
+   `PeerData.ToEntity()` must keep it. `prefix_hash` and the rendezvous key
+   already match.
+7. **REGISTRY §6a.9.2** — build `set-issuer-policy` / `get-issuer-policy`
+   (replace-whole, 404-on-unset, `domain-control` → 400), and convert
+   `--issuer-policy-mode` from a request-time fallback into a startup **seed of
+   the policy entity**, which store-first-as-a-MUST now requires.
+8. **The mixed-home probe.** Unblocked and explicitly not urgent, but it is the
+   only thing that can *prove* §8.4.6 rather than assert it: every
+   `HASH_TYPE=sha384` run to date sets every peer to SHA-384, so the cross-peer
+   seam where the rule bites has never been exercised.
+
+9. Open the v1.x cycle: implement Tier-2 dispatch-fallback to the
    byte-identical-envelope bar, paired with the encrypted-relay boundary, and
    stand up dated, oracle-pinned cross-impl conformance reports for Rust and
    Python once the sibling repos are available.

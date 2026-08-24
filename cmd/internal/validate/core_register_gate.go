@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
@@ -46,6 +47,43 @@ import (
 const coreRegisterTestPattern = "app/validate/core-register/echo"
 const coreRegisterTestSlot = coreRegisterTestPattern
 const coreRegisterTestExprPath = coreRegisterTestPattern + "/expr"
+
+// coreRegisterReservedPattern is the §2.4a negative half's target: a
+// reserved `system/*` pattern, which V7 §6.6 forbids a user-installed
+// handler from claiming. It is deliberately DISTINCT from
+// coreRegisterTestPattern so "published nothing" cannot be confused with
+// "the positive half's unregister cleaned up."
+//
+// WHY THIS GUARD AND NOT THE CAPABILITY GUARD. The obvious negative half
+// is "register under a cap that does not cover system/handler." That was
+// built first and DISCARDED, and the reason is worth keeping because the
+// first diagnosis of it was WRONG.
+//
+// Observed: a delegated child cap was refused 403 even WITH system/handler
+// in scope — under a covering scope, a wildcard scope, and a literal
+// `register` operation scope. That was written up as "a delegated child
+// cap cannot register at all," and it is not true.
+//
+// Root cause, found by reading the spec rather than the tree:
+// ENTITY-CORE-PROTOCOL §5.5a (normative) — cap resource patterns
+// canonicalize against the GRANTER's peer_id, so peer-relative patterns
+// (bare `*`, `system/foo`) are **granter-local**: they authorize only
+// within the granter's own namespace. A child cap delegated by the
+// CLIENT carries the client's namespace, so `Resources: ["*"]` never
+// covers the responder's paths. 403 is the spec-required answer.
+//
+// Proven: the same delegated child cap with `Resources: ["/*/*"]`
+// (absolute / universal form, which §5.5a requires for cross-peer
+// authority) registers successfully — status 200. The refusal was our
+// probe's construction, not a peer defect.
+//
+// It still cannot serve as the negative half, for the original reason:
+// a 403 attributable to §5.5a namespace framing is not a 403 attributable
+// to the handler-scope guard the check would be named for.
+//
+// §6.6 is used instead because it is unambiguous, reachable over the
+// connection cap, and its refusal is attributable to exactly one rule.
+const coreRegisterReservedPattern = "system/validate/core-register-forbidden"
 
 // runCoreRegisterGate is the §10.1 gate. Declares + runs its own
 // checks under the `handlers` category (uses the runner from the
@@ -281,6 +319,7 @@ func runCoreRegisterGate(ctx context.Context, client *PeerClient, r *CheckRunner
 		}
 		return PassCheck(fmt.Sprintf("signature at %s removed by unregister", sigPath))
 	})
+
 }
 
 // sendCoreRegister issues the wire register-op without the
@@ -314,4 +353,81 @@ func sendCoreRegister(ctx context.Context, client *PeerClient, peerID, pattern, 
 		return types.ExecuteResponseData{}, fmt.Errorf("dispatch register: %w", err)
 	}
 	return types.ExecuteResponseDataFromEntity(env.Root)
+}
+
+// runCoreRegisterNegativeHalf is the GUIDE-CONFORMANCE §2.4a negative half
+// for `system/handler:register`, deliberately split out of
+// runCoreRegisterGate so it runs under EVERY profile.
+//
+// The gate above is `--profile core` only, and as of 2026-08-11 (e)
+// nothing invokes that profile — not validate-complete.sh, not any
+// script, not the Makefile. The positive half can live there (full
+// profile covers the same surface via entity_native); the negative half
+// cannot, because nothing else in either profile asserts that a refused
+// register publishes nothing.
+//
+// Preconditions differ from the gate's, which is why it does not inherit
+// them: this needs no body-binding seam and never touches
+// app/validate/core-register. It registers at a reserved system/* path
+// that MUST be refused, then probes that nothing landed.
+func runCoreRegisterNegativeHalf(ctx context.Context, client *PeerClient, r *CheckRunner) {
+	peerID := string(client.RemotePeerID())
+
+	r.Declare("core_register_reserved_refused", "GUIDE-CONFORMANCE §2.4a negative half, conjunct 1 (V7 §6.6) — a register whose resource-derived pattern is reserved (system/*) MUST be refused 403 forbidden_pattern. register is a guarded operation and §6.6 is one of its guards. Runs under EVERY profile: the positive half is core-profile-only, but nothing else asserts the refusal.")
+	r.Declare("core_register_reserved_publishes_nothing", "GUIDE-CONFORMANCE §2.4a negative half, conjuncts 2+3 — THE ONE THAT MATTERS, and until 2026-08-11 this gate had no negative half at all. A refused register MUST leave NONE of the artifacts the positive half asserts: manifest at system/handler/<pattern>, handler entity at <pattern>, grant at system/capability/grants/<pattern>. A 403 that published anyway satisfies a status-only check while defeating the gate entirely — the register analogue of policy_manual_publishes_nothing. Mutation-tested 2026-08-11 in both directions: with a simulated refuse-then-publish leak it FAILs and names the leaked artifact by path and type; unmutated it passes.")
+
+	// --- §2.4a negative half ---------------------------------------
+	//
+	// Everything above asserts that an ACCEPTED register lands the
+	// spec-required writes. Until 2026-08-11 that was the whole gate,
+	// which made it coverage of the UNGUARDED behavior: a peer that
+	// registered whatever it was asked scored ten out of ten, and a
+	// correctly-guarded peer scored no better. GUIDE-CONFORMANCE §2.4a
+	// names that shape and requires three conjuncts — refused, no state
+	// change, no publication. The refusal and the absence are scored
+	// separately because only the second catches "403, wrote it anyway,"
+	// which is invisible in the response.
+
+	r.Run("core_register_reserved_refused", func() CheckOutcome {
+		respData, err := sendCoreRegister(ctx, client, peerID, coreRegisterReservedPattern,
+			coreRegisterReservedPattern+"/expr", wildcardScope(peerID))
+		if err != nil {
+			return FailCheck("dispatch register at reserved pattern: " + err.Error())
+		}
+		r.Store("reserved_register_attempted", true)
+		if respData.Status == 403 {
+			return PassCheck("register at a reserved system/* pattern refused with 403 (V7 §6.6)")
+		}
+		if respData.Status == 200 {
+			return FailCheck("register at a reserved system/* pattern returned 200 — V7 §6.6 forbids user-installed handlers at system/* paths; the pattern guard is absent")
+		}
+		return FailCheck(fmt.Sprintf("register at a reserved system/* pattern returned status %d; V7 §6.6 pins 403 forbidden_pattern", respData.Status))
+	})
+
+	r.Run("core_register_reserved_publishes_nothing", func() CheckOutcome {
+		if out, ok := r.Require("core_register_reserved_refused"); !ok {
+			return out
+		}
+		// The same writes the positive half asserts, inverted. The
+		// grant-signature is covered transitively: no grant entity means
+		// no invariant-pointer slot for a signature to occupy.
+		probes := []struct{ label, path string }{
+			{"manifest", "system/handler/" + coreRegisterReservedPattern},
+			{"handler entity", coreRegisterReservedPattern},
+			{"grant", "system/capability/grants/" + coreRegisterReservedPattern},
+		}
+		var leaked []string
+		for _, p := range probes {
+			ent, _, err := client.TreeGet(ctx, p.path)
+			if err == nil {
+				leaked = append(leaked, fmt.Sprintf("%s at %s (type=%q)", p.label, p.path, ent.Type))
+			}
+		}
+		if len(leaked) > 0 {
+			return FailCheck(fmt.Sprintf(
+				"refused register PUBLISHED %d of %d probed artifacts: %s — a 403 that writes anyway passes every status-only check (GUIDE-CONFORMANCE §2.4a conjuncts 2+3)",
+				len(leaked), len(probes), strings.Join(leaked, "; ")))
+		}
+		return PassCheck("refused register left no manifest, no handler entity and no grant — so no invariant-pointer slot to carry a grant-signature either")
+	})
 }

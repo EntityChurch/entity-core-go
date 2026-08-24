@@ -41,20 +41,28 @@ import (
 )
 
 const (
-	// The v767 corpus did NOT migrate in the V8 split. Its two siblings
-	// (`ecf-conformance`, `crypto-agility`) are in
-	// entity-core-protocol/specs/test-vectors/; `v767` was left in the pre-V8
-	// arch repo, which lives under entity-lab-legacy-meta — NOT beside this
-	// repo. The old default here assumed the pre-split sibling layout
-	// (`../entity-core-architecture/…`) and resolved to nothing on any current
-	// checkout, so the tool had been unrunnable at its default since the split.
+	// LANDED 2026-08-11. The v767 corpus missed the V8 split and sat in the
+	// pre-V8 arch repo under entity-lab-legacy-meta; it now lives beside its
+	// two siblings (`ecf-conformance`, `crypto-agility`) in
+	// entity-core-protocol/specs/test-vectors/ — core-protocol `56d4de4`,
+	// copied verbatim, legacy tree untouched.
 	//
-	// The bytes are intact and match the F16 re-stamp below. Routed for
-	// migration in
-	// docs/validation/spec-issues/2026-08-11-b-the-v767-corpus-did-not-migrate-in-the-v8-split.md
-	// — when it lands beside its siblings this becomes a one-line change (and
-	// the re-stamp for §4.5a item 1a will change expectedSHA with it).
-	defaultPath = "../../entity-lab-legacy-meta/entity-core-architecture/docs/architecture/v7.0-core-revision/core-protocol-domain/specs/test-vectors/v767/conformance-vectors-v1.cbor"
+	// THE PIN IS UNCHANGED AND THAT IS THE POINT: the bytes are identical, so
+	// expectedSHA still verifies at the new location. Re-computed here, not
+	// taken on report — `sha256sum` at the landed path returns
+	// 8e7c5232…e31f982e. Path changed; pin did not.
+	//
+	// Still owed, and ours to propose rather than arch's to hand down: the
+	// M3/M6 re-stamp for §4.5a item 1a (six assertions, one root cause) plus a
+	// re-authored `hash-format-sha-384.2.rehash`, which asserts a system/peer
+	// entity under content_hash_format = 0x01 that 1a forbids and stays green
+	// only because the verifier builds that entity by hand and bypasses the
+	// pinned constructor — a vector testing the thing it bypasses. That
+	// re-stamp WILL change expectedSHA. Protocol: we post the six failing
+	// assertions with derived expectations, arch ratifies and lands the
+	// regenerated corpus, and only THEN does this tool get wired into
+	// validate-complete.sh (never hand-edit a red run green).
+	defaultPath = "../entity-core-protocol/specs/test-vectors/v767/conformance-vectors-v1.cbor"
 	expectedSHA = "8e7c5232f64bee83d628679f930c771e4e49f2f1e37d19e41e0d7838e31f982e"
 )
 
@@ -62,7 +70,20 @@ var (
 	flagPath        = flag.String("path", defaultPath, "path to conformance-vectors-v1.cbor")
 	flagExpectedSHA = flag.String("expected-sha", expectedSHA, "expected file sha256 (hex)")
 	flagVerbose     = flag.Bool("verbose", false, "print a line per vector")
+	flagFullHashes  = flag.Bool("full-hashes", false, "print derived hashes in full rather than truncated — required when producing a re-stamp proposal, since a truncated value cannot be ratified")
 )
+
+// hx renders a derived value for reporting. Truncated by default to keep
+// the summary readable; full under -full-hashes, which is the mode a
+// re-stamp proposal has to be written from (arch ratifies literal bytes,
+// and "009b78514a0c74a757e6…" is not a value anyone can ratify).
+func hx(b []byte) string {
+	h := hex.EncodeToString(b)
+	if *flagFullHashes || len(h) <= 20 {
+		return h
+	}
+	return h[:20] + "…"
+}
 
 type checks struct {
 	pass, fail int
@@ -223,7 +244,7 @@ func verifyEd448SeedToPubkey(c *checks, id string, v map[string]any) {
 	kp := crypto.Ed448FromSeed(s)
 	got := kp.PublicKeyBytes()
 	c.record(id, "pubkey-derive", bytesEq(got, want),
-		fmt.Sprintf("derived %s", hex.EncodeToString(got)[:20]+"…"))
+		fmt.Sprintf("derived %s", hx(got)))
 }
 
 func verifyPeerIDConstruct(c *checks, id string, v map[string]any) {
@@ -269,7 +290,7 @@ func verifyEd448PeerEntity(c *checks, id string, v map[string]any) {
 	c.record(id, "entity-cbor", bytesEq(ent.Data, wantCBOR),
 		fmt.Sprintf("len=%d", len(ent.Data)))
 	c.record(id, "entity-content-hash", bytesEq(ent.ContentHash.Bytes(), wantHash),
-		fmt.Sprintf("%s", hex.EncodeToString(ent.ContentHash.Bytes())[:20]+"…"))
+		hx(ent.ContentHash.Bytes()))
 }
 
 func verifyEd448Signature(c *checks, id string, v map[string]any) {
@@ -310,7 +331,7 @@ func verifyPeerEntityUnderFormat(c *checks, id string, v map[string]any, alg byt
 	}
 	c.record(id, fmt.Sprintf("content_hash(alg=0x%02x)", alg),
 		bytesEq(ent.ContentHash.Bytes(), want),
-		fmt.Sprintf("%s", hex.EncodeToString(ent.ContentHash.Bytes())[:20]+"…"))
+		hx(ent.ContentHash.Bytes()))
 }
 
 func verifyMatrix(c *checks, id string, v map[string]any, sha384gate bool) {
@@ -352,7 +373,8 @@ func verifyMatrix(c *checks, id string, v map[string]any, sha384gate bool) {
 		if want, ok := v[key].([]byte); ok {
 			c.record(id, "peer_a.content_hash["+key+"]",
 				bytesEq(entA.ContentHash.Bytes(), want),
-				fmt.Sprintf("len=%d", len(entA.ContentHash.Bytes())))
+				fmt.Sprintf("len=%d derived=%s want=%s",
+					len(entA.ContentHash.Bytes()), hx(entA.ContentHash.Bytes()), hx(want)))
 		}
 	}
 
@@ -412,12 +434,12 @@ func verifyMatrix(c *checks, id string, v map[string]any, sha384gate bool) {
 	if want, ok := v["expected_root_cap_content_hash"].([]byte); ok {
 		c.record(id, "root_cap.content_hash",
 			bytesEq(capEnt.ContentHash.Bytes(), want),
-			fmt.Sprintf("%s", hex.EncodeToString(capEnt.ContentHash.Bytes())[:20]+"…"))
+			hx(capEnt.ContentHash.Bytes()))
 	}
 	sig := keyA.Sign(capEnt.ContentHash.Bytes())
 	if want, ok := v["expected_root_cap_signature"].([]byte); ok {
 		c.record(id, "root_cap.signature", bytesEq(sig, want),
-			fmt.Sprintf("len=%d", len(sig)))
+			fmt.Sprintf("len=%d derived=%s want=%s", len(sig), hx(sig), hx(want)))
 	}
 }
 

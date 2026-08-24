@@ -76,7 +76,7 @@ func runSubscriptions(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("subscribe_missing_resource", "SUBSCRIPTION §3")
 
 	// Step 7: Cleanup
-	r.Declare("cleanup", "")
+	r.Declare("cleanup", "harness teardown (not a spec vector) — removes the test entity under system/validate/sub-test/ and drains notification entries at the deliver URI prefix so a re-run starts clean")
 
 	// Step 8: Max events enforcement
 	r.Declare("max_events_subscribe", "SUBSCRIPTION §7")

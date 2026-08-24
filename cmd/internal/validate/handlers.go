@@ -251,6 +251,25 @@ func runHandlers(ctx context.Context, client *PeerClient) []CheckResult {
 		runCoreRegisterGate(ctx, client, r)
 	}
 
+	// The §2.4a negative half runs in BOTH profiles, and that is not a
+	// symmetry preference — it is a coverage fix.
+	//
+	// `--profile core` is invoked by NOTHING: not validate-complete.sh,
+	// not any script, not the Makefile (audited 2026-08-11 (e)). So the
+	// whole core-register gate, including the negative half added this
+	// cycle, executed only when a human typed the flag — a conformance
+	// check nothing runs is indistinguishable from one that does not
+	// exist (GUIDE-CONFORMANCE §5.2b, stated from the tool end).
+	//
+	// The profile split above is defensible for the POSITIVE half: full
+	// profile really does cover that surface elsewhere. It is NOT
+	// defensible for the negative half, because "an unauthorized register
+	// is refused AND publishes nothing" is covered nowhere else, in
+	// either profile. V7 §6.6's reserved-pattern guard is also
+	// profile-independent by construction — a peer must refuse a
+	// `system/*` registration whatever else it implements.
+	runCoreRegisterNegativeHalf(ctx, client, r)
+
 	return r.Results()
 }
 
