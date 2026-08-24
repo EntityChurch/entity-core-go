@@ -105,7 +105,7 @@ func VerifyChain(capEntity entity.Entity, included map[hash.Hash]entity.Entity, 
 		if capData.NotBefore != nil && now < *capData.NotBefore {
 			return fmt.Errorf("%w: cap %s is not yet valid (not_before)", ecerrors.ErrCapabilityDenied, current.ContentHash)
 		}
-		if capData.ExpiresAt != nil && *capData.ExpiresAt < now {
+		if Expired(capData.ExpiresAt, now) { // CAP-6: exclusive upper bound, expired when now >= expires_at
 			return fmt.Errorf("%w: cap %s has expired (expires_at)", ecerrors.ErrCapabilityDenied, current.ContentHash)
 		}
 

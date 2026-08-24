@@ -113,7 +113,7 @@ func FindMatchingGrant(execute types.ExecuteData, cap types.CapabilityTokenData,
 	if cap.NotBefore != nil && now < *cap.NotBefore {
 		return types.GrantEntry{}, false
 	}
-	if cap.ExpiresAt != nil && *cap.ExpiresAt < now {
+	if Expired(cap.ExpiresAt, now) { // CAP-6: exclusive upper bound, expired when now >= expires_at
 		return types.GrantEntry{}, false
 	}
 
@@ -292,7 +292,7 @@ func CheckPathPermission(operation, path string, cap types.CapabilityTokenData, 
 	if cap.NotBefore != nil && now < *cap.NotBefore {
 		return false
 	}
-	if cap.ExpiresAt != nil && *cap.ExpiresAt < now {
+	if Expired(cap.ExpiresAt, now) { // CAP-6: exclusive upper bound, expired when now >= expires_at
 		return false
 	}
 

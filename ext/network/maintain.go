@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"go.entitychurch.org/entity-core-go/core/capability"
 	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
@@ -546,7 +547,7 @@ func (h *Handler) handleRestoreSubscriptions(ctx context.Context, req *handler.R
 		alive := ok
 		if ok {
 			if tok, terr := types.CapabilityTokenDataFromEntity(tokenEnt); terr == nil {
-				if tok.ExpiresAt != nil && *tok.ExpiresAt < nowMs {
+				if capability.Expired(tok.ExpiresAt, nowMs) { // CAP-6: exclusive bound, expired when now >= expires_at
 					alive = false
 				}
 			}

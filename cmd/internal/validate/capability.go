@@ -23,13 +23,17 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"strings"
+	"time"
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/types"
+
+	"github.com/fxamacker/cbor/v2"
 )
 
 const catCapability = "capability"
@@ -52,6 +56,12 @@ func runCapability(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("revoked_cap_denied_on_use", "V7 v7.62 §5.1 is_revoked — presenting a revoked cap on a subsequent EXECUTE MUST be refused")
 	r.Declare("delegate_remote_caller_returns_501", "V7 closeout F1 (§2.6) — delegate is same-peer-only in v1; a remote caller MUST receive 501 unsupported_operation (not 403)")
 	r.Declare("hash_hex_path_segment_lowercase", "V7 §3.5 / RT-14 — a peer-emitted content-hash-hex tree path segment MUST be lowercase (format-code byte included); an uppercase segment self-loopbacks but fails cross-peer")
+	// 0.8.1 CAP-1..CAP-7 fold (core-protocol 30ca731); GUIDE-CONFORMANCE §9 register (r),(t),(u),(v).
+	r.Declare("configure_empty_grants_withdrawal", "§6.2 CAP-2/CAP-3 (0.8.1) — configure MUST accept grants:[] and write it as the withdrawal form (present entry, empty grants; distinct from removal)")
+	r.Declare("request_mint_temporal_ceiling", "§6.2/§5.6 CAP-5 (0.8.1) — request over-long ttl_ms mints a CLAMPED token: 200 AND expires_at == MIN_DEFINED exactly (not a 403, not a `<=` check)")
+	r.Declare("request_ttl_zero_and_overflow", "§5.6 CAP-6 (0.8.1) — ttl_ms:0 = expire immediately (created_at, before caller cap); overflow term drops out (no wrap, no saturate)")
+	r.Declare("configure_rejects_base58_partial_prefix", "§6.2 CAP-7 (0.8.1) — partial prefixes rejected in the Base58 encoding too (a truncated peer-id + glob → 400)")
+	r.Declare("ingest_rejects_unrepresentable_expiry", "§6.2 CAP-6a INGEST (0.8.1; rust CAP-6b) — a RECEIVED token whose expires_at, not_before, OR created_at does not fit uint64 (bignum / negative / out of range) is malformed and MUST be refused via the capability_denied disposition (§5.2), NOT fail-open to never-expiring nor a silent decode drop")
 
 	uri := fmt.Sprintf("entity://%s/system/capability", client.RemotePeerID())
 
@@ -699,7 +709,527 @@ func runCapability(ctx context.Context, client *PeerClient) []CheckResult {
 		return PassCheck("peer stored the revocation marker at the lowercase content-hash-hex segment and not the uppercase one — segment is lowercase and case-sensitive (RT-14 §3.5)")
 	})
 
+	// --- 0.8.1 CAP-1..CAP-7 fold checks (§9 register (r),(t),(u),(v)) ---
+
+	// (r) CAP-2/CAP-3: configure MUST accept grants:[] and persist it as the
+	// WITHDRAWAL form — a present policy entry with an empty grants array,
+	// distinct from removal (which restores the `default` fallback). Written
+	// under a SYNTHETIC hex pattern that never dials in: an empty entry under
+	// the validator's own pattern (or "default") would suppress the validator's
+	// own default ceiling and poison every later category's handshake reconnect
+	// (see configure_writes_policy_entry). The dynamic leg — "an exact-match
+	// empty entry suppresses `default` → a subsequent request from THAT peer
+	// gets 403 scope_exceeds_authority" — keys on the requester's identity, so
+	// exercising it needs a second authenticated peer and cannot run from one
+	// connection without that poisoning. Here we pin CAP-2/CAP-3 structurally:
+	// accept + readback of a present entry whose grants array is empty.
+	r.Run("configure_empty_grants_withdrawal", func() CheckOutcome {
+		if len(client.Grants()) == 0 {
+			return SkipCheck("no authenticated grants")
+		}
+		synthKP, _ := crypto.Generate()
+		synthHash, _ := types.ComputePeerIdentityHashFromPeerID(synthKP.PeerID())
+		synthHex := hex.EncodeToString(synthHash.Bytes())
+		policy := types.CapabilityPolicyEntryData{
+			PeerPattern: synthHex,
+			Grants:      []types.GrantEntry{}, // the withdrawal form
+			Notes:       "validate-peer CAP-2/CAP-3 empty-grants withdrawal",
+		}
+		params, err := policy.ToEntity()
+		if err != nil {
+			return FailCheck("build policy-entry: " + err.Error())
+		}
+		respEnv, _, err := client.SendExecute(ctx, uri, "configure", params, nil)
+		if err != nil {
+			return FailCheck("send: " + err.Error())
+		}
+		respData, err := types.ExecuteResponseDataFromEntity(respEnv.Root)
+		if err != nil {
+			return FailCheck("decode EXECUTE_RESPONSE: " + err.Error())
+		}
+		if respData.Status == 403 {
+			return SkipCheck("configure refused 403 — validator identity does not hold a cap covering system/capability:configure")
+		}
+		if respData.Status != 200 {
+			return FailCheck(fmt.Sprintf("configure grants:[] returned %d — CAP-2 requires accepting the empty (withdrawal) form, not rejecting it", respData.Status))
+		}
+		policyPath := "system/capability/policy/" + synthHex
+		entry, _, err := client.TreeGet(ctx, policyPath)
+		if err != nil {
+			return FailCheck(fmt.Sprintf("tree get %s after configure: %v — the empty entry MUST be written (present), CAP-3", policyPath, err))
+		}
+		if entry.Type != types.TypeCapPolicyEntry {
+			return FailCheck(fmt.Sprintf("entry at %s has type %s (expected %s)", policyPath, entry.Type, types.TypeCapPolicyEntry))
+		}
+		var readback types.CapabilityPolicyEntryData
+		if err := ecf.Decode(entry.Data, &readback); err != nil {
+			return FailCheck("decode policy readback: " + err.Error())
+		}
+		if len(readback.Grants) != 0 {
+			return FailCheck(fmt.Sprintf("readback grants has %d entries — the empty write MUST persist as an empty grants array (CAP-3: the withdrawal form is a present, empty entry, distinct from removal)", len(readback.Grants)))
+		}
+		return PassCheck("configure accepted grants:[] and wrote a present policy entry with an empty grants array — CAP-2 withdrawal form, CAP-3 distinct from removal")
+	})
+
+	// (t) CAP-5: a request whose ttl_ms far exceeds the caller cap's expiry MUST
+	// mint a CLAMPED token — 200, expires_at == MIN_DEFINED(caller, policy, req)
+	// — not reject. The caller cap is built client-side with a known 1h expiry
+	// (delegate is same-peer-only; a remote validator gets 501, so we present a
+	// client-signed attenuated child cap instead). Assert the EXACT clamped
+	// value: a `<= caller_exp` assertion scores clamp-and-mint identically to
+	// reject-outright, which is exactly how this defect hid in two impls facing
+	// opposite directions (core-rust raised this; core-go seconded it).
+	r.Run("request_mint_temporal_ceiling", func() CheckOutcome {
+		if len(client.Grants()) == 0 {
+			return SkipCheck("no authenticated grants")
+		}
+		callerExp := uint64(time.Now().UnixMilli()) + 3_600_000 // 1h — tighter than any plausible policy ttl
+		childCap, childSig, err := buildChildCapWithExpiry(client, capRequestGrant(), callerExp)
+		if err != nil {
+			return FailCheck("build child cap: " + err.Error())
+		}
+		tenYears := uint64(315_360_000_000)
+		status, minted, err := requestPresentingCap(client, uri, childCap, childSig, []types.GrantEntry{capRequestGrant()}, &tenYears)
+		if err != nil {
+			return FailCheck(err.Error())
+		}
+		if status == 403 {
+			return FailCheck("over-long ttl_ms rejected (403) instead of clamping — CAP-5 requires minting a clamped token (200), not rejecting; this is the reject-direction defect")
+		}
+		if status != 200 {
+			return FailCheck(fmt.Sprintf("expected 200, got %d", status))
+		}
+		if minted.ExpiresAt == nil {
+			return FailCheck("minted token has no expires_at — MUST clamp to the caller cap's finite expiry (CAP-5)")
+		}
+		if *minted.ExpiresAt != callerExp {
+			return FailCheck(fmt.Sprintf("minted expires_at=%d, expected exact MIN_DEFINED == caller_exp=%d — a `<= caller_exp` check would pass this; CAP-5 requires the exact clamped value (delta %d ms)", *minted.ExpiresAt, callerExp, int64(*minted.ExpiresAt)-int64(callerExp)))
+		}
+		return PassCheck(fmt.Sprintf("over-long request clamped to the caller cap exactly (expires_at=%d) and returned 200 — CAP-5", callerExp))
+	})
+
+	// (u) CAP-6: two wire-observable properties of MIN_DEFINED.
+	//   1. ttl_ms == 0 is DEFINED and means expire immediately (created_at),
+	//      NOT "no bound". With a caller cap expiring in 1h, the minted expiry
+	//      MUST be strictly before the caller cap (≈ now). The pre-CAP-6 reading
+	//      (0 == not defined) would clamp to the caller cap instead, so
+	//      minted < caller_exp cleanly distinguishes the two.
+	//   2. An overflowing created_at+ttl_ms term contributes NO ceiling — it
+	//      drops out, leaving the finite caller cap as the mint expiry. A wrap
+	//      would yield a past/earlier value < caller_exp; asserting == caller_exp
+	//      proves the term was dropped, not wrapped. (Drop-vs-saturate is not
+	//      wire-observable under §5.6's finite-parent chain rule — both give the
+	//      caller cap here — so that half is pinned by go's unit
+	//      TestClampMintExpiry, "overflow request ttl drops out → nil".)
+	r.Run("request_ttl_zero_and_overflow", func() CheckOutcome {
+		if len(client.Grants()) == 0 {
+			return SkipCheck("no authenticated grants")
+		}
+		// 1. ttl_ms == 0 → expire immediately.
+		callerExp := uint64(time.Now().UnixMilli()) + 3_600_000
+		childCap, childSig, err := buildChildCapWithExpiry(client, capRequestGrant(), callerExp)
+		if err != nil {
+			return FailCheck("build child cap (zero): " + err.Error())
+		}
+		zero := uint64(0)
+		status, minted, err := requestPresentingCap(client, uri, childCap, childSig, []types.GrantEntry{capRequestGrant()}, &zero)
+		nowAfter := uint64(time.Now().UnixMilli())
+		if err != nil {
+			return FailCheck("ttl_ms:0 " + err.Error())
+		}
+		if status != 200 {
+			return FailCheck(fmt.Sprintf("ttl_ms:0 expected 200, got %d", status))
+		}
+		if minted.ExpiresAt == nil {
+			return FailCheck("ttl_ms:0 minted a token with nil expires_at — 0 must be a DEFINED ceiling (created_at), not the 'no bound' spelling (CAP-6 rule 2)")
+		}
+		if *minted.ExpiresAt >= callerExp {
+			return FailCheck(fmt.Sprintf("ttl_ms:0 minted expires_at=%d is NOT before the caller cap %d — 0 was treated as 'no bound' (clamped to caller) instead of expire-immediately (CAP-6 rule 2)", *minted.ExpiresAt, callerExp))
+		}
+		if *minted.ExpiresAt > nowAfter+300_000 {
+			return FailCheck(fmt.Sprintf("ttl_ms:0 minted expires_at=%d is far in the future — expected ≈ created_at (now)", *minted.ExpiresAt))
+		}
+		// 2. overflow term drops out.
+		callerExp2 := uint64(time.Now().UnixMilli()) + 3_600_000
+		childCap2, childSig2, err := buildChildCapWithExpiry(client, capRequestGrant(), callerExp2)
+		if err != nil {
+			return FailCheck("build child cap (overflow): " + err.Error())
+		}
+		overflow := ^uint64(0) - 10
+		status2, minted2, err := requestPresentingCap(client, uri, childCap2, childSig2, []types.GrantEntry{capRequestGrant()}, &overflow)
+		if err != nil {
+			return FailCheck("overflow " + err.Error())
+		}
+		if status2 != 200 {
+			return FailCheck(fmt.Sprintf("overflow ttl_ms expected 200, got %d", status2))
+		}
+		if minted2.ExpiresAt == nil {
+			return FailCheck("overflow: minted expires_at is nil — the finite caller cap MUST bind once the overflowing term drops")
+		}
+		if *minted2.ExpiresAt != callerExp2 {
+			return FailCheck(fmt.Sprintf("overflow: minted expires_at=%d, expected the caller cap %d — an overflowing created_at+ttl_ms MUST drop out (no wrap: a wrap yields an earlier value); CAP-6", *minted2.ExpiresAt, callerExp2))
+		}
+
+		// 3. overflow with NO other ceiling — the only wire condition that
+		//    distinguishes "term absent" (correct → nil) from a WRAP/SATURATE/
+		//    huge-finite encoding (e.g. an arbitrary-precision `created_at+ttl_ms`
+		//    that never overflows → a bounded, non-nil expires_at). Constructible
+		//    only when the caller cap has no finite expiry (else §5.6's null-child
+		//    rule forbids it); the §4.4 connection cap is nil-expiry, so present it
+		//    directly with an overflowing ttl and require the mint to carry NO
+		//    expiry at all.
+		strongProbe := ""
+		if connCap, cErr := types.CapabilityTokenDataFromEntity(client.CapEntity()); cErr == nil && connCap.ExpiresAt == nil {
+			grants := client.Grants()
+			if len(grants) > 0 {
+				params, pErr := types.CapabilityRequestData{Grants: grants[:1], TTLMs: &overflow}.ToEntity()
+				if pErr != nil {
+					return FailCheck("build no-ceiling overflow params: " + pErr.Error())
+				}
+				respEnv, _, sErr := client.SendExecute(ctx, uri, "request", params, nil)
+				if sErr != nil {
+					return FailCheck("no-ceiling overflow send: " + sErr.Error())
+				}
+				respData, dErr := types.ExecuteResponseDataFromEntity(respEnv.Root)
+				if dErr != nil {
+					return FailCheck("no-ceiling overflow decode response: " + dErr.Error())
+				}
+				if respData.Status == 200 {
+					var resultEnt entity.Entity
+					if err := ecf.Decode(respData.Result, &resultEnt); err != nil {
+						return FailCheck("no-ceiling overflow decode result: " + err.Error())
+					}
+					var grant types.CapabilityGrantData
+					if err := ecf.Decode(resultEnt.Data, &grant); err != nil {
+						return FailCheck("no-ceiling overflow decode grant: " + err.Error())
+					}
+					if tokenEnt, ok := respEnv.Included[grant.Token]; ok {
+						td, tErr := types.CapabilityTokenDataFromEntity(tokenEnt)
+						if tErr != nil {
+							// An expires_at that does not fit uint64 IS the CAP-6 defect,
+							// not a harness fault: the term was neither dropped nor
+							// bounded — an arbitrary-precision created_at+ttl_ms that
+							// never overflows. The minted token is not even wire-
+							// decodable by a uint64 implementation.
+							if strings.Contains(tErr.Error(), "overflow") || strings.Contains(tErr.Error(), "expires_at") {
+								return FailCheck("overflow with a no-expiry caller cap minted an expires_at that OVERFLOWS uint64 — the overflowing created_at+ttl_ms term MUST be ABSENT (nil), not an arbitrary-precision huge value; the token is not wire-decodable by a uint64 impl. CAP-6. (" + tErr.Error() + ")")
+							}
+							return FailCheck("no-ceiling overflow decode minted token: " + tErr.Error())
+						}
+						if td.ExpiresAt != nil {
+							return FailCheck(fmt.Sprintf("overflow with a no-expiry caller cap minted a BOUNDED expires_at=%d — the overflowing term MUST be ABSENT (nil), not wrapped, saturated, or a huge-finite value (e.g. arbitrary-precision created_at+ttl_ms). CAP-6", *td.ExpiresAt))
+						}
+						strongProbe = "; no-ceiling overflow minted NO expiry (term absent, not huge-finite/saturated)"
+					}
+				}
+				// A non-200 here (peer refuses to mint a never-expiring token) is
+				// not a CAP-6 violation — the absent-term property is then simply
+				// not wire-observable on this peer; the child-cap assertion above
+				// still pins no-wrap.
+			}
+		}
+		return PassCheck("ttl_ms:0 mints an immediately-expired token (created_at, before the caller cap) and an overflowing ttl_ms drops out leaving the caller-cap ceiling — CAP-6" + strongProbe)
+	})
+
+	// (v) CAP-7: partial prefixes are rejected in the Base58 encoding too — not
+	// just hex (configure_rejects_partial_prefix) and not just bare "*"
+	// (policy_dual_form.poldf_configure_wildcard_rejected). A truncated real
+	// peer-id with a trailing glob is a partial prefix in the Base58 form and
+	// MUST be rejected at 400, never treated as a prefix match. The accepted
+	// forms (hex, full Base58, "default") are covered by policy_dual_form.
+	r.Run("configure_rejects_base58_partial_prefix", func() CheckOutcome {
+		synthKP, _ := crypto.Generate()
+		full := string(synthKP.PeerID())
+		if len(full) < 12 {
+			return SkipCheck("generated peer-id too short to form a partial prefix")
+		}
+		partial := full[:len(full)-4] + "*"
+		policy := types.CapabilityPolicyEntryData{
+			PeerPattern: partial,
+			Grants: []types.GrantEntry{{
+				Handlers:   types.CapabilityScope{Include: []string{"system/tree"}},
+				Resources:  types.CapabilityScope{Include: []string{"system/type/*"}},
+				Operations: types.CapabilityScope{Include: []string{"get"}},
+			}},
+		}
+		params, err := policy.ToEntity()
+		if err != nil {
+			return FailCheck("build policy-entry: " + err.Error())
+		}
+		respEnv, _, err := client.SendExecute(ctx, uri, "configure", params, nil)
+		if err != nil {
+			return FailCheck("send: " + err.Error())
+		}
+		respData, err := types.ExecuteResponseDataFromEntity(respEnv.Root)
+		if err != nil {
+			return FailCheck("decode EXECUTE_RESPONSE: " + err.Error())
+		}
+		if respData.Status >= 200 && respData.Status < 300 {
+			return FailCheck("configure accepted a partial-prefix Base58 peer_pattern — CAP-7 rejects partial prefixes in EITHER encoding")
+		}
+		if respData.Status == 403 {
+			return SkipCheck("configure pattern check unreachable — validator identity refused at authz")
+		}
+		if respData.Status != 400 {
+			return WarnCheck(fmt.Sprintf("configure rejected Base58 partial-prefix with %d; expected 400 invalid_params", respData.Status))
+		}
+		return PassCheck("configure rejected a partial-prefix Base58 peer_pattern with 400 — CAP-7 (partial prefixes rejected in either encoding)")
+	})
+
+	// CAP-6a INGEST (0.8.1; rust's "CAP-6b" — decode side). CAP-6's "an
+	// unrepresentable temporal term MUST be absent" rule binds the MINTER; the
+	// READER is where it fails OPEN. If a peer collapses an undecodable temporal
+	// field to "no expiry" (a common decode-error → None path), a RECEIVED token
+	// whose value does not fit uint64 — e.g. py's pre-fix bignum mint — becomes a
+	// never-expiring capability on ingest. One token, two peers, two lifetimes;
+	// fixing the mint does not recall tokens already issued. Every other CAP-6
+	// check here is mint-side; this is the only one that drives the reader.
+	//
+	// CAP-6a (protocol d382d2c) binds ALL THREE temporal fields, not just
+	// expires_at: "A capability token whose expires_at, not_before, or created_at
+	// is not representable as primitive/uint — a bignum, a negative integer, or any
+	// value outside the range — is malformed. A verifier MUST refuse it and MUST
+	// NOT treat the unrepresentable field as absent." So this drives the full 3×2
+	// field×shape matrix; a peer that refuses a bignum expires_at but fail-opens on
+	// a bignum not_before/created_at would wrongly pass a single-field probe.
+	// Refusal MUST be the capability_denied disposition of §5.2, "not a decode-layer
+	// silent drop" — so the check tallies disposition (status-bearing refusal vs a
+	// transport-level drop) and reports it in its own PASS message rather than
+	// silently counting a transport timeout as a clean refusal. A present but
+	// unrepresentable field MUST be refused; an ABSENT (null) expires_at stays legal
+	// and is NOT exercised here.
+	r.Run("ingest_rejects_unrepresentable_expiry", func() CheckOutcome {
+		if len(client.Grants()) == 0 {
+			return SkipCheck("no authenticated grants")
+		}
+		// TEETH CONTROL (self-mutation): the same round-trip construction with a
+		// NORMAL, representable expiry (and normal not_before-absent / created_at)
+		// MUST be HONORED. This proves the token reaches the temporal validation as
+		// an otherwise-valid cap — so a refusal of the hostile variants below is
+		// attributable to the mutated field, not to a round-trip that corrupted the
+		// granter/grantee/chain (which any peer would reject, making the check a
+		// false pass). The three fields all decode through one
+		// CapabilityTokenDataFromEntity path, so a single honored control witnesses
+		// that path for every variant. If the control is not honored, the check
+		// cannot distinguish fail-open from fail-closed on this peer and SKIPs
+		// rather than passing. (py's pre-fix state is not directly testable from
+		// here — the git boundary forbids checking out a sibling — so the teeth are
+		// carried in-check.)
+		normal := uint64(time.Now().UnixMilli()) + 3_600_000
+		ctlTok, ctlSig, err := buildTokenWithRawTemporal(client, capRequestGrant(), "expires_at", normal)
+		if err != nil {
+			return FailCheck("build control token: " + err.Error())
+		}
+		ctlParams, err := types.CapabilityRequestData{Grants: []types.GrantEntry{capRequestGrant()}}.ToEntity()
+		if err != nil {
+			return FailCheck("build control params: " + err.Error())
+		}
+		ctlEnv, err := buildDelegatedExecute(client, ctlTok, ctlSig, uri, "request", ctlParams, nil)
+		if err != nil {
+			return FailCheck("build control execute: " + err.Error())
+		}
+		ctlResp, _, err := client.SendRawEnvelope(ctlEnv)
+		if err != nil {
+			return SkipCheck("control (round-tripped normal-temporal token) not deliverable — cannot attribute a hostile-token refusal to the mutated field: " + err.Error())
+		}
+		ctlData, err := types.ExecuteResponseDataFromEntity(ctlResp.Root)
+		if err != nil {
+			return FailCheck("decode control response: " + err.Error())
+		}
+		if !(ctlData.Status >= 200 && ctlData.Status < 300) {
+			return SkipCheck(fmt.Sprintf("control (round-tripped normal-temporal token) was refused with status %d — the construction does not reach temporal validation on this peer, so a hostile-token refusal is not attributable to the mutated field; the check has no teeth here", ctlData.Status))
+		}
+		// Full field×shape matrix. Two undecodable-as-uint64 shapes, both must be
+		// refused for EACH of the three CAP-6a temporal fields:
+		//   over  — a bignum above 2^64 (the exact shape py's pre-fix mint emitted)
+		//   under — a negative value (undecodable as uint64; "absent" would be
+		//           WRONG here — negative means already-past, not never-expiring)
+		over := new(big.Int).Add(new(big.Int).SetUint64(^uint64(0)), big.NewInt(1000))
+		under := big.NewInt(-1)
+		// Disposition tally (CAP-6a §5.2): a conformant refusal is the
+		// capability_denied disposition (a status-bearing 4xx response); a
+		// transport/decode-level drop is a refusal but NOT the required disposition
+		// — surfaced so a silent-drop peer is visible, not counted as clean.
+		denied, dropped := 0, 0
+		for _, field := range []string{"expires_at", "not_before", "created_at"} {
+			for _, tc := range []struct {
+				name string
+				raw  interface{}
+			}{
+				{">2^64 (bignum)", over},
+				{"negative", under},
+			} {
+				tok, sig, err := buildTokenWithRawTemporal(client, capRequestGrant(), field, tc.raw)
+				if err != nil {
+					return FailCheck(fmt.Sprintf("build %s=%s token: %v", field, tc.name, err))
+				}
+				params, err := types.CapabilityRequestData{Grants: []types.GrantEntry{capRequestGrant()}}.ToEntity()
+				if err != nil {
+					return FailCheck("build request params: " + err.Error())
+				}
+				env, err := buildDelegatedExecute(client, tok, sig, uri, "request", params, nil)
+				if err != nil {
+					return FailCheck(fmt.Sprintf("build execute with %s=%s token: %v", field, tc.name, err))
+				}
+				respEnv, _, err := client.SendRawEnvelope(env)
+				if err != nil {
+					// A transport/decode-level rejection IS a refusal — the peer
+					// declined to ingest the token — but it is not the §5.2
+					// capability_denied disposition CAP-6a requires. Counted, not
+					// treated as clean.
+					dropped++
+					continue
+				}
+				respData, derr := types.ExecuteResponseDataFromEntity(respEnv.Root)
+				if derr != nil {
+					return FailCheck(fmt.Sprintf("decode response (%s=%s): %v", field, tc.name, derr))
+				}
+				if respData.Status >= 200 && respData.Status < 300 {
+					return FailCheck(fmt.Sprintf("peer HONORED a presented cap whose %s is %s — status %d. The undecodable temporal field was collapsed to 'no expiry' (fail-open), making a hostile token a never-expiring capability. CAP-6a ingest requires REFUSAL.", field, tc.name, respData.Status))
+				}
+				denied++
+			}
+		}
+		disp := fmt.Sprintf("%d capability_denied, %d transport-drop", denied, dropped)
+		if dropped > 0 {
+			return WarnCheck(fmt.Sprintf("peer refused all 6 field×shape variants (expires_at/not_before/created_at × >2^64/negative) — CAP-6a ingest, not fail-open — but %s: a transport/decode drop is a refusal yet NOT the §5.2 capability_denied disposition CAP-6a mandates (\"not a decode-layer silent drop\")", disp))
+		}
+		return PassCheck(fmt.Sprintf("peer refused all 6 field×shape variants (expires_at/not_before/created_at × >2^64 bignum/negative) via the capability_denied disposition — CAP-6a ingest, not fail-open to never-expiring (%s)", disp))
+	})
+
 	return r.Results()
+}
+
+// buildTokenWithRawTemporal builds a client-signed child cap (chained to the
+// connection cap, granter=grantee=us) that is structurally valid EXCEPT that the
+// named temporal field (expires_at / not_before / created_at) carries a hostile,
+// non-uint64-representable value (a bignum above 2^64, or a negative). It
+// round-trips a valid token through a generic map and replaces only that one
+// field, so every other field stays valid and a refusal is attributable to the
+// mutated field rather than to a malformed granter/grantee/chain. Used by the
+// CAP-6a ingest check: a conformant reader must refuse such a token, not collapse
+// the undecodable field to "absent" (which, for expires_at, means never expires).
+// Passing a representable value (e.g. a normal expiry) builds the honored teeth
+// control.
+func buildTokenWithRawTemporal(client *PeerClient, grant types.GrantEntry, field string, rawValue interface{}) (entity.Entity, entity.Entity, error) {
+	kp := client.Keypair()
+	identity := client.IdentityEntity()
+	parentCap := client.CapEntity()
+	now := uint64(time.Now().UnixMilli())
+	normalExp := now + 3_600_000
+	base := types.CapabilityTokenData{
+		Grants:    []types.GrantEntry{grant},
+		Granter:   types.SingleSigGranter(identity.ContentHash),
+		Grantee:   identity.ContentHash,
+		Parent:    &parentCap.ContentHash,
+		CreatedAt: now,
+		ExpiresAt: &normalExp,
+	}
+	baseEnt, err := base.ToEntity()
+	if err != nil {
+		return entity.Entity{}, entity.Entity{}, err
+	}
+	var m map[string]interface{}
+	if err := ecf.Decode(baseEnt.Data, &m); err != nil {
+		return entity.Entity{}, entity.Entity{}, fmt.Errorf("decode base token to map: %w", err)
+	}
+	m[field] = rawValue
+	raw, err := ecf.Encode(m)
+	if err != nil {
+		return entity.Entity{}, entity.Entity{}, fmt.Errorf("re-encode hostile token: %w", err)
+	}
+	tokenEnt, err := entity.NewEntity(types.TypeCapToken, cbor.RawMessage(raw))
+	if err != nil {
+		return entity.Entity{}, entity.Entity{}, err
+	}
+	sigEnt, err := signEntity(tokenEnt.ContentHash, kp, identity)
+	if err != nil {
+		return entity.Entity{}, entity.Entity{}, err
+	}
+	return tokenEnt, sigEnt, nil
+}
+
+// capRequestGrant is the narrow grant used by the CAP-5/CAP-6 mint-ceiling
+// checks: authority over system/capability:request only. A client-built child
+// cap carrying it can both invoke `request` and be the attenuation floor for a
+// request asking for the same grant (a subset of itself).
+func capRequestGrant() types.GrantEntry {
+	return types.GrantEntry{
+		Handlers:   types.CapabilityScope{Include: []string{"system/capability"}},
+		Resources:  types.CapabilityScope{Include: []string{"*"}},
+		Operations: types.CapabilityScope{Include: []string{"request"}},
+	}
+}
+
+// buildChildCapWithExpiry builds a client-side attenuated child cap (chained to
+// the connection cap, granter=grantee=us, signed by us) carrying `grant` and an
+// explicit expires_at — the caller-cap expiry the request-mint temporal ceiling
+// (CAP-5/CAP-6) clamps against. Mirrors buildAttenuatedChildCap but lets the
+// caller pin the expiry. delegate is same-peer-only (a remote validator gets
+// 501), so the cap is constructed and signed client-side rather than minted by
+// the peer.
+func buildChildCapWithExpiry(client *PeerClient, grant types.GrantEntry, expiresAt uint64) (entity.Entity, entity.Entity, error) {
+	kp := client.Keypair()
+	identity := client.IdentityEntity()
+	parentCap := client.CapEntity()
+	now := uint64(time.Now().UnixMilli())
+	td := types.CapabilityTokenData{
+		Grants:    []types.GrantEntry{grant},
+		Granter:   types.SingleSigGranter(identity.ContentHash),
+		Grantee:   identity.ContentHash,
+		Parent:    &parentCap.ContentHash,
+		CreatedAt: now,
+		ExpiresAt: &expiresAt,
+	}
+	return createCapabilityToken(td, kp, identity)
+}
+
+// requestPresentingCap sends a system/capability:request presenting childCap as
+// the caller capability, asking for reqGrants with the given ttl_ms (nil omits
+// the field). On 200 it returns the decoded minted token pulled from
+// response.included — the CAP-5/CAP-6 checks must read the minted expires_at
+// exactly. On a non-200 it returns the status and a nil token (no error), so the
+// caller can distinguish a clamp-and-mint 200 from a reject 403.
+func requestPresentingCap(client *PeerClient, uri string, childCap, childSig entity.Entity, reqGrants []types.GrantEntry, ttlMs *uint64) (uint, *types.CapabilityTokenData, error) {
+	params, err := types.CapabilityRequestData{Grants: reqGrants, TTLMs: ttlMs}.ToEntity()
+	if err != nil {
+		return 0, nil, fmt.Errorf("build request params: %w", err)
+	}
+	env, err := buildDelegatedExecute(client, childCap, childSig, uri, "request", params, nil)
+	if err != nil {
+		return 0, nil, fmt.Errorf("build delegated request: %w", err)
+	}
+	respEnv, _, err := client.SendRawEnvelope(env)
+	if err != nil {
+		return 0, nil, fmt.Errorf("send: %w", err)
+	}
+	respData, err := types.ExecuteResponseDataFromEntity(respEnv.Root)
+	if err != nil {
+		return 0, nil, fmt.Errorf("decode EXECUTE_RESPONSE: %w", err)
+	}
+	if respData.Status != 200 {
+		return respData.Status, nil, nil
+	}
+	var resultEnt entity.Entity
+	if err := ecf.Decode(respData.Result, &resultEnt); err != nil {
+		return respData.Status, nil, fmt.Errorf("decode result entity: %w", err)
+	}
+	if resultEnt.Type != types.TypeCapGrant {
+		return respData.Status, nil, fmt.Errorf("expected result type %s, got %s", types.TypeCapGrant, resultEnt.Type)
+	}
+	var grant types.CapabilityGrantData
+	if err := ecf.Decode(resultEnt.Data, &grant); err != nil {
+		return respData.Status, nil, fmt.Errorf("decode grant: %w", err)
+	}
+	tokenEnt, ok := respEnv.Included[grant.Token]
+	if !ok {
+		return respData.Status, nil, fmt.Errorf("minted token %s not in response.included", grant.Token)
+	}
+	td, err := types.CapabilityTokenDataFromEntity(tokenEnt)
+	if err != nil {
+		return respData.Status, nil, fmt.Errorf("decode minted token: %w", err)
+	}
+	return respData.Status, &td, nil
 }
 
 // grantEntryCovers returns true if `parent` covers `child` — i.e. every

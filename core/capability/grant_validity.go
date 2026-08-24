@@ -169,7 +169,7 @@ func VerifyHandlerGrant(
 		return grantInvalid("grant_not_yet_valid",
 			fmt.Sprintf("not_before=%d, now=%d", *tok.NotBefore, now))
 	}
-	if tok.ExpiresAt != nil && *tok.ExpiresAt < now {
+	if Expired(tok.ExpiresAt, now) { // CAP-6: exclusive upper bound, expired when now >= expires_at
 		return grantInvalid("grant_expired",
 			fmt.Sprintf("expires_at=%d, now=%d", *tok.ExpiresAt, now))
 	}

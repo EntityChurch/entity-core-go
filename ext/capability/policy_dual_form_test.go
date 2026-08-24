@@ -24,6 +24,12 @@ func TestPOLDF6_ValidatePeerPattern_InvalidRejected(t *testing.T) {
 		{"short_garbage", "deadbeef", "neither valid hex"},
 		{"hex_wrong_length", strings.Repeat("a", 60), "neither valid hex"},
 		{"non_hex_at_hex_length", strings.Repeat("z", 66), "non-hex character"},
+		// RT-14: path segments are lowercase-hex-normative, so an uppercase
+		// A-F at hex length is NOT a canonical identity hash. Locks the
+		// isHexChar lowercase-only fix (arch F6 / ROUTING-2026-08-17-f §4);
+		// was accepted while isHexChar permitted A-F, disagreeing with
+		// isHexString in the same file.
+		{"uppercase_hex_at_hex_length", strings.Repeat("0A", 33), "non-hex character"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

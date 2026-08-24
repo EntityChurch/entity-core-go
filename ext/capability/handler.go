@@ -208,8 +208,11 @@ func (h *Handler) handleRequest(ctx context.Context, req *handler.Request) (*han
 	// Step 2: subset-validate against the matched policy entry (per-peer
 	// ceiling), if one exists. exact-match-or-`*`-fallback per §4. A
 	// missing policy entry just skips this ceiling (pure attenuation
-	// from the caller's cap still works without policy).
-	if policy, ok := h.lookupPolicy(hctx, hctx.AuthorHash, hctx.Author); ok {
+	// from the caller's cap still works without policy). The lookup is
+	// hoisted out of the guard so the entry's ttl_ms is available to the
+	// temporal ceiling below.
+	policy, policyOK := h.lookupPolicy(hctx, hctx.AuthorHash, hctx.Author)
+	if policyOK {
 		if err := requireAttenuation(rr.Grants, policy.Grants, hctx.LocalPeerID); err != nil {
 			return handler.NewErrorResponse(403, "scope_exceeds_authority",
 				"request grants exceed policy entry: "+err.Error())
@@ -217,11 +220,11 @@ func (h *Handler) handleRequest(ctx context.Context, req *handler.Request) (*han
 	}
 
 	createdAt := uint64(time.Now().UnixMilli())
-	var expiresAt *uint64
-	if rr.TTLMs != nil && *rr.TTLMs > 0 {
-		exp := createdAt + *rr.TTLMs
-		expiresAt = &exp
+	var policyTTL *uint64
+	if policyOK {
+		policyTTL = policy.TTLMs
 	}
+	expiresAt := clampMintExpiry(createdAt, parentCap.ExpiresAt, policyTTL, rr.TTLMs)
 
 	childData := types.CapabilityTokenData{
 		Grants:    rr.Grants,
@@ -328,18 +331,15 @@ func (h *Handler) handleDelegate(ctx context.Context, req *handler.Request) (*ha
 	}
 
 	createdAt := uint64(time.Now().UnixMilli())
-	var expiresAt *uint64
-	if dr.TTLMs != nil && *dr.TTLMs > 0 {
-		exp := createdAt + *dr.TTLMs
-		// MUST NOT exceed parent's remaining TTL.
-		if parentData.ExpiresAt != nil && exp > *parentData.ExpiresAt {
-			exp = *parentData.ExpiresAt
-		}
-		expiresAt = &exp
-	} else if parentData.ExpiresAt != nil {
-		exp := *parentData.ExpiresAt
-		expiresAt = &exp
-	}
+	// §5.6 attenuation ceiling: MIN_DEFINED(parent.expires_at, createdAt+request.ttl_ms).
+	// Reuse the mint-ceiling construction so both surfaces treat ttl_ms==0 as expire
+	// immediately (CAP-6 rule 2 → createdAt) and a term whose createdAt+ttl overflows as
+	// absent (dropped, never wrapped). The parent's expires_at is one of the MIN terms, so
+	// the child can never outlive the parent — the invariant the old raw `createdAt+ttl`
+	// (which could wrap) plus explicit parent-clamp expressed. This is the third ttl_ms==0
+	// surface beyond the two clampMintExpiry guards arch's ROUTING-2026-08-17-h §2 named;
+	// CAP-6 rule 2 is stated generally over the §5.6 construction, which delegation is.
+	expiresAt := clampMintExpiry(createdAt, parentData.ExpiresAt, nil, dr.TTLMs)
 
 	parentH := parentEnt.ContentHash
 	childData := types.CapabilityTokenData{
@@ -461,10 +461,18 @@ func (h *Handler) handleConfigure(ctx context.Context, req *handler.Request) (*h
 	if err := validatePeerPattern(pe.PeerPattern); err != nil {
 		return handler.NewErrorResponse(400, "invalid_params", err.Error())
 	}
-	if len(pe.Grants) == 0 {
-		return handler.NewErrorResponse(400, "invalid_params",
-			"policy-entry MUST specify at least one grant entry")
-	}
+	// An empty `grants` array is VALID and meaningful — the *withdrawal* form
+	// (PROPOSAL-CAPABILITY-EMPTY-GRANTS-AND-POLICY-WITHDRAWAL / arch ROUTING-2026-08-17-f
+	// D2). Because an exact-match entry suppresses the `default` fallback by existing,
+	// an empty entry means "this peer matches and is granted nothing": at `request` it
+	// is the per-peer ceiling, so every non-empty request fails subset-validation with
+	// 403 scope_exceeds_authority (see handleRequest step 2); at §4.4 authenticate it is
+	// a union term contributing nothing, so the peer still receives the SHOULD floor.
+	// It is a withdrawal, not a ban. `configure` MUST NOT reject `grants: []` — rejecting
+	// it (the prior behavior) left withdrawal expressible only via *removal*, which drops
+	// the peer through to `default` (public scope on a sharing deployment) — the
+	// conservative-looking guard producing the more permissive outcome. (Distinct from
+	// `request`/`delegate`, which mint tokens and still reject empty grants below.)
 
 	// v7.65 §3.6 rule 3 lazy-canonicalization: if the pattern is Base58
 	// (wire peer_id form, not hex content_hash), check whether we can
@@ -502,6 +510,57 @@ func (h *Handler) handleConfigure(ctx context.Context, req *handler.Request) (*h
 	}
 
 	return handler.NewResponse(200, types.TypeCapPolicyEntry, pe)
+}
+
+// clampMintExpiry computes a request-minted token's expires_at as the MIN of
+// every DEFINED temporal ceiling (§6.2 request step 4, the §5.6 construction
+// generalized from ROLE to `request` — PROPOSAL-CAPABILITY-MINT-TEMPORAL-CEILING):
+//
+//	MIN(callerExp, createdAt + policyTTLMs, createdAt + reqTTLMs)
+//
+// A request-minted token is a ROOT cap (parent:null), so §5.6's parent→child
+// expiry attenuation cannot reach it; without this clamp a caller could mint a
+// token that outlives the very capability that authorized it, or the ttl_ms the
+// policy that ceilinged it declared. Only defined values participate; callerExp
+// is absolute, the two ttl_ms values are relative to createdAt. Per CAP-6
+// (0.8.1, ENTITY-CORE-PROTOCOL §5.6 rule 2) a NIL ttl_ms is "not defined" (no
+// bound from that source), but a ttl_ms of 0 is DEFINED and means expire
+// immediately — its term is createdAt+0 = createdAt. nil is the only "no bound"
+// spelling; 0 is never it. If nothing is defined, the result is nil (no expiry).
+func clampMintExpiry(createdAt uint64, callerExp, policyTTLMs, reqTTLMs *uint64) *uint64 {
+	var out *uint64
+	clamp := func(candidate uint64) {
+		if out == nil || candidate < *out {
+			c := candidate
+			out = &c
+		}
+	}
+	// A ttl_ms so large that createdAt+ttl overflows uint64 is treated as
+	// "no bound from this source" — the term drops out (matching rust's
+	// `created_at.checked_add(ttl)` → None). Wrapping would mint a token born
+	// already-expired from a huge ttl, silently inverting the requester's
+	// intent; dropping the term leaves the other (real) ceilings to bind.
+	addTTL := func(ttl uint64) (uint64, bool) {
+		sum := createdAt + ttl
+		if sum < createdAt {
+			return 0, false // overflow
+		}
+		return sum, true
+	}
+	if callerExp != nil {
+		clamp(*callerExp)
+	}
+	if policyTTLMs != nil {
+		if v, ok := addTTL(*policyTTLMs); ok {
+			clamp(v)
+		}
+	}
+	if reqTTLMs != nil {
+		if v, ok := addTTL(*reqTTLMs); ok {
+			clamp(v)
+		}
+	}
+	return out
 }
 
 // isHexString reports whether s consists only of lowercase hex digits.
@@ -664,8 +723,16 @@ func validatePeerPattern(p string) error {
 		policyFallbackSegment, peerPatternHexLenSHA256, peerPatternHexLenSHA384, len(p))
 }
 
+// isHexChar reports whether c is a canonical (lowercase) hex digit. Path
+// segments are lowercase-hex-normative (ENTITY-CORE-PROTOCOL RT-14), so an
+// uppercase A-F in a peer_pattern is NOT a valid canonical hex identity hash
+// and must fall through to the Base58 branch (or be rejected). This was
+// `A-F`-permissive until 2026-08-17, disagreeing with isHexString four
+// functions up (lowercase-only) inside this same file — arch's F6 ruling
+// (ROUTING-2026-08-17-f §4) flagged the self-inconsistency; the cohort
+// (py capability.py, rust is_invariant_pointer_hex) is lowercase-only.
 func isHexChar(c rune) bool {
-	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
 }
 
 // mintAndReturn signs the supplied token data, persists token +

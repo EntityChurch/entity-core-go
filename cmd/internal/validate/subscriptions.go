@@ -112,6 +112,14 @@ func runSubscriptions(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("include_payload_field_persisted", "SUBSCRIPTION §2.1 v3.14")
 	r.Declare("include_payload_unauthorized", "SUBSCRIPTION §2.3 v3.13")
 
+	// The events-vocabulary delivery filter (§4 `if event_type in
+	// subscription.data.events` + §11 vocabulary created/updated/deleted): a
+	// subscription requesting only `created` MUST NOT be delivered `updated`
+	// events. Every OTHER delivery check here subscribes to the full default
+	// vocabulary, so a wrapper that forwards the wrong events list (or ignores the
+	// filter entirely) is unreachable by them.
+	r.Declare("events_vocabulary_filter", "SUBSCRIPTION §4 delivery filter (event_type ∈ subscription.events) + §11 event vocabulary")
+
 	// --- Step 1: Handler manifests ---
 
 	r.Run("subscription_handler_present", func() CheckOutcome {
@@ -960,6 +968,142 @@ func runSubscriptions(ctx context.Context, client *PeerClient) []CheckResult {
 			return PassCheck("subscribe with include_payload=true (no tree:get) rejected 403 payload_unauthorized")
 		}
 		return PassCheck(fmt.Sprintf("subscribe with include_payload=true (no tree:get) rejected 403 (code=%q; spec says payload_unauthorized)", errCode))
+	})
+
+	// --- Step 11: Events-vocabulary delivery filter ---
+	//
+	// SUBSCRIPTION §4 gates delivery on `if event_type in
+	// subscription.data.events`; §11 fixes the vocabulary (created = store at an
+	// unbound path, updated = replace at a bound path, deleted = remove). A
+	// subscription requesting ONLY `created` must be delivered the create and NOT
+	// the update. Every other delivery check subscribes to the full default
+	// vocabulary [created, updated, deleted], so none of them exercises the filter:
+	// a wrapper forwarding the wrong events list, or an engine ignoring the field,
+	// passes them all. This is the check arch flagged and py asked for directly
+	// (SA-PY-2).
+	//
+	// TEETH: the negative half ("no updated delivered") is meaningless if the
+	// delivery pipeline is simply dead. So the create MUST be delivered first
+	// (positive control proving the pipeline is live on the same subscription); an
+	// absent create degrades the check to SKIP, never a silent pass on the
+	// negative. An updated notification arriving at any point is the FAIL.
+	r.Run("events_vocabulary_filter", func() CheckOutcome {
+		if out, ok := r.Require("notification_delivered"); !ok {
+			return out
+		}
+		evInbox := "system/inbox/validate-events-filter"
+		evPattern := "system/validate/events-filter/*"
+		evPath := "system/validate/events-filter/entity-1"
+		notifPrefix := evInbox + "/"
+
+		// Clean any residue from a prior run so the tally starts empty.
+		if entries, _, err := client.TreeListing(ctx, notifPrefix); err == nil {
+			for key := range entries {
+				cleanupPath(notifPrefix+key, ctx, client)
+			}
+		}
+		cleanupPath(evPath, ctx, client)
+
+		token, tokenSig, err := client.CreateDeliveryToken(evInbox, "receive")
+		if err != nil {
+			return FailCheck("create delivery token: " + err.Error())
+		}
+		// Subscribe to ONLY `created` — the whole point of the check.
+		subID, _, _, err := client.Subscribe(ctx, evPattern, evInbox, "receive", token, tokenSig, []string{"created"}, nil)
+		if err != nil || subID == "" {
+			return FailCheck(fmt.Sprintf("subscribe events=[created]: %v", err))
+		}
+		defer func() {
+			client.Unsubscribe(ctx, subID)
+			cleanupPath(evPath, ctx, client)
+			if entries, _, err := client.TreeListing(ctx, notifPrefix); err == nil {
+				for key := range entries {
+					cleanupPath(notifPrefix+key, ctx, client)
+				}
+			}
+		}()
+
+		// countEvents lists the inbox and tallies delivered notifications by event
+		// type for our path, so the filter is read off the wire, not inferred.
+		countEvents := func() (created, updated, other int, err error) {
+			entries, _, lerr := client.TreeListing(ctx, notifPrefix)
+			if lerr != nil {
+				return 0, 0, 0, lerr
+			}
+			for key := range entries {
+				ent, _, gerr := client.TreeGet(ctx, notifPrefix+key)
+				if gerr != nil {
+					continue
+				}
+				nd, derr := types.SubscriptionNotificationDataFromEntity(ent)
+				if derr != nil || !matchesPattern(nd.URI, evPath, string(client.RemotePeerID())) {
+					continue
+				}
+				switch nd.Event {
+				case "created":
+					created++
+				case "updated":
+					updated++
+				default:
+					other++
+				}
+			}
+			return created, updated, 0, nil
+		}
+
+		// (1) Create: PUT to a fresh (unbound) path → a `created` event, which is
+		// in the subscription's vocabulary and MUST be delivered.
+		createData, _ := ecf.Encode(map[string]interface{}{"label": "events-filter", "seq": 1})
+		createEnt, err := entity.NewEntity("system/validate/events-filter-data", cbor.RawMessage(createData))
+		if err != nil {
+			return FailCheck("build create entity: " + err.Error())
+		}
+		if _, err := client.TreePut(ctx, evPath, createEnt); err != nil {
+			return FailCheck("put create entity: " + err.Error())
+		}
+		var created int
+		for attempt := 0; attempt < 12; attempt++ {
+			time.Sleep(200 * time.Millisecond)
+			c, _, _, cerr := countEvents()
+			if cerr == nil && c > 0 {
+				created = c
+				break
+			}
+		}
+		if created == 0 {
+			return SkipCheck("the `created` event was never delivered on an events=[created] subscription — the delivery pipeline is not proven live here, so the absence of an `updated` event cannot be attributed to the vocabulary filter (no teeth); not asserting the negative")
+		}
+
+		// (2) Update: PUT a DIFFERENT entity to the SAME (now bound) path → an
+		// `updated` event, which is NOT in the subscription's vocabulary and MUST
+		// NOT be delivered. Poll a comparable window: on the same live pipeline, an
+		// unfiltered update would arrive on the same timescale the create did.
+		updateData, _ := ecf.Encode(map[string]interface{}{"label": "events-filter", "seq": 2})
+		updateEnt, err := entity.NewEntity("system/validate/events-filter-data", cbor.RawMessage(updateData))
+		if err != nil {
+			return FailCheck("build update entity: " + err.Error())
+		}
+		if updateEnt.ContentHash == createEnt.ContentHash {
+			return FailCheck("update entity has same content hash as create — would be a no-op PUT, not an `updated` event")
+		}
+		if _, err := client.TreePut(ctx, evPath, updateEnt); err != nil {
+			return FailCheck("put update entity: " + err.Error())
+		}
+		updated := 0
+		for attempt := 0; attempt < 10; attempt++ {
+			time.Sleep(200 * time.Millisecond)
+			_, u, _, cerr := countEvents()
+			if cerr == nil {
+				updated = u
+				if u > 0 {
+					break
+				}
+			}
+		}
+		if updated > 0 {
+			return FailCheck(fmt.Sprintf("subscription requested events=[created] but the peer delivered %d `updated` notification(s) — the §4 delivery filter (`event_type in subscription.events`) is not honored; the events list is decorative", updated))
+		}
+		return PassCheck(fmt.Sprintf("events=[created] subscription received the create (%d `created` delivered) and was NOT delivered the update (0 `updated`) — §4 delivery filter honored across the §11 vocabulary", created))
 	})
 
 	return r.Results()

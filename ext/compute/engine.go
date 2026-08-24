@@ -366,7 +366,7 @@ func (e *Engine) reEvaluate(expressionURI, subgraphPath string, evt store.TreeCh
 			"Installation grant invalid", expressionURI, evt)
 		return
 	}
-	if capData.ExpiresAt != nil && *capData.ExpiresAt < uint64(time.Now().UnixMilli()) {
+	if capability.Expired(capData.ExpiresAt, uint64(time.Now().UnixMilli())) { // CAP-6: exclusive bound
 		e.freezeSubgraph(qualifiedSGPath, sgData, ErrInstallationGrantInvalid,
 			"Installation grant expired", expressionURI, evt)
 		return

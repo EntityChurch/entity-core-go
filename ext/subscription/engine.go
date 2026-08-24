@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.entitychurch.org/entity-core-go/core/capability"
 	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/store"
@@ -402,7 +403,7 @@ func (e *Engine) OnTreeChange(evt store.TreeChangeEvent) *store.ConsumerResult {
 			e.terminateSubscription(sub.data.SubscriptionID, "deliver_token_invalid")
 			continue
 		}
-		if capData.ExpiresAt != nil && *capData.ExpiresAt < uint64(time.Now().UnixMilli()) {
+		if capability.Expired(capData.ExpiresAt, uint64(time.Now().UnixMilli())) { // CAP-6: exclusive bound
 			e.debugf("delivery token expired for subscription %s", sub.data.SubscriptionID)
 			e.bindLostMarker(chainID, sub.data.SubscriptionID, "deliver_token_expired", sub.data.DeliverURI, 0, "")
 			e.terminateSubscription(sub.data.SubscriptionID, "deliver_token_expired")

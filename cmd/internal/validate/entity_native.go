@@ -39,6 +39,7 @@ func runEntityNative(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("multiple_operations", "PROPOSAL §2 (E1)")
 	r.Declare("hot_swap_expression", "PROPOSAL §1, §5")
 	r.Declare("dispatch_with_deliver_to", "V7 §6.6, PROPOSAL-DISPATCH-CONTRACT-SCOPE A.2")
+	r.Declare("empty_handler_grant_dispatches", "V7 §6.1/§6.8 CAP-1 (0.8.1) — a present, §6.8-valid handler grant with grants:[] dispatches (200), the deleted \"and non-empty\" clause")
 
 	peerID := string(client.RemotePeerID())
 	root := "app/validate/entity-native"
@@ -469,7 +470,98 @@ func runEntityNative(ctx context.Context, client *PeerClient) []CheckResult {
 		return PassCheck("entity-native + deliver_to returns 202 (uniform with compiled handlers)")
 	})
 
+	// empty_handler_grant_dispatches (CAP-1, §9 register check (s)): a pure-
+	// functional expression handler whose grant at
+	// system/capability/grants/{pattern} has grants:[] MUST dispatch — expect
+	// 200, NOT 403 permission_denied. §6.1 read "present AND non-empty" until
+	// the 0.8.1 fold; that clause contradicted §6.8 (an empty grants array is
+	// valid) and would fail-close a pure handler that needs no impure authority.
+	// This is the check whose absence let the two sections disagree unnoticed
+	// (arch ROUTING-2026-08-17-h §3). It exercises the register→dispatch path
+	// end-to-end: register with an explicitly empty internal scope (register
+	// signs a valid zero-authority grant, ext/handlers §6.2), then dispatch.
+	r.Run("empty_handler_grant_dispatches", func() CheckOutcome {
+		slot := root + "/emptygrant"
+		exprPath := slot + "/expr"
+
+		// A pure literal — needs zero impure authority, so an empty grant is
+		// sufficient for it to evaluate.
+		litEnt, _ := types.ComputeLiteralData{Value: uint64(7)}.ToEntity()
+		if _, err := client.TreePut(ctx, exprPath, litEnt); err != nil {
+			return FailCheck("put expression: " + err.Error())
+		}
+		if err := registerHandlerEmptyScope(ctx, client, peerID, slot, exprPath); err != nil {
+			return FailCheck("register empty-scope handler: " + err.Error())
+		}
+
+		respData, err := executeRaw(ctx, client, peerID, slot, "compute", nil)
+		if err != nil {
+			return FailCheck("dispatch: " + err.Error())
+		}
+		if respData.Status == 403 {
+			return FailCheck("empty handler grant dispatched 403 — CAP-1 requires a present, §6.8-valid grant with grants:[] to dispatch 200; the deleted §6.1 \"and non-empty\" clause is the regression this check pins")
+		}
+		if respData.Status != 200 {
+			return FailCheck(fmt.Sprintf("expected 200, got %d", respData.Status))
+		}
+		var resultEnt entity.Entity
+		if err := ecf.Decode(respData.Result, &resultEnt); err != nil {
+			return FailCheck("decode result: " + err.Error())
+		}
+		if resultEnt.Type == types.TypeComputeError {
+			return FailCheck("empty handler grant returned a compute/error — the pure expression should have evaluated to a value")
+		}
+		if val, err := callEntityNative(ctx, client, peerID, slot, "compute", nil); err == nil && !numEq(val, 7) {
+			return FailCheck(fmt.Sprintf("empty-grant handler dispatched but returned %v, expected 7", val))
+		}
+		return PassCheck("pure handler with a present, empty (grants:[]) grant dispatched 200 and evaluated — CAP-1 (§6.1 present-and-§6.8-valid; \"non-empty\" deleted)")
+	})
+
 	return r.Results()
+}
+
+// registerHandlerEmptyScope registers an entity-native handler with an explicitly
+// EMPTY internal scope (grants:[]) — the pure-functional, zero-impure-authority
+// form. Unlike registerHandler it does NOT assert the resulting grant is
+// non-empty: an empty grant is exactly what CAP-1 permits and
+// empty_handler_grant_dispatches verifies. Register's atomic install signs a
+// valid grant carrying an empty grants array (ext/handlers §6.2: "empty scope
+// permitted — produces a signed zero-authority grant for a pure-functional
+// handler").
+func registerHandlerEmptyScope(ctx context.Context, client *PeerClient, peerID, pattern, expressionPath string) error {
+	_ = unregisterHandler(ctx, client, peerID, pattern)
+
+	manifest := types.HandlerManifestData{
+		Pattern: pattern,
+		Name:    pattern,
+		Operations: map[string]types.HandlerOperationSpec{
+			"compute": {InputType: "primitive/any", OutputType: "primitive/any"},
+		},
+		ExpressionPath: expressionPath,
+		InternalScope:  []types.GrantEntry{}, // empty — zero impure authority
+	}
+	req := types.RegisterRequestData{
+		Manifest:       manifest,
+		RequestedScope: []types.GrantEntry{},
+	}
+	reqEnt, err := req.ToEntity()
+	if err != nil {
+		return fmt.Errorf("build register-request entity: %w", err)
+	}
+	uri := fmt.Sprintf("entity://%s/system/handler", peerID)
+	resource := &types.ResourceTarget{Targets: []string{"system/handler/" + pattern}}
+	env, _, err := client.SendExecute(ctx, uri, "register", reqEnt, resource)
+	if err != nil {
+		return fmt.Errorf("dispatch system/handler:register: %w", err)
+	}
+	respData, err := types.ExecuteResponseDataFromEntity(env.Root)
+	if err != nil {
+		return fmt.Errorf("decode register response: %w", err)
+	}
+	if respData.Status != 200 {
+		return fmt.Errorf("register returned status %d", respData.Status)
+	}
+	return nil
 }
 
 // --- Registration helpers ---
