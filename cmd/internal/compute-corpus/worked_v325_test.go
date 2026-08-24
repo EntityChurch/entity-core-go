@@ -10,17 +10,20 @@ import (
 	"go.entitychurch.org/entity-core-go/ext/compute"
 )
 
-// TestV325CornerOutcomes runs go's emit over the SEEDED corner vectors (all 16 CV
+// TestV325CornerOutcomes runs go's emit over the SEEDED corner vectors (all 19 CV
 // arms — CV-4a/CV-5 joined once COMPUTE v3.26 ruled the containment boundary
 // (spec-issue 2026-08-20-f); the three CV-7 collection-operand short-circuits
 // joined after core-rust/core-py caught go's resolveCollection type_mismatch; the
 // four CV-8 CLOSURE-RESULT arms joined on arch's C-8 ruling §6 — map CONTAINS a
 // closure error both minted (CV-8a) and value-form (CV-8b, the provenance pair),
 // filter SHORT-CIRCUITS its predicate result (CV-8c), fold CONTAINS/RECOVERS its
-// accumulator (CV-8d — a closure that ignores its accumulator recovers)) and asserts
-// go produces the outcomes GUIDE-CONFORMANCE §7c.6 rules. This is the go-emit half;
-// the three-way cross-bless of the 359 set is a fresh obligation on rust/py
-// (spec-issue 2026-08-21-b).
+// accumulator (CV-8d — a closure that ignores its accumulator recovers); the three
+// CV-9 EVAL-LIMIT arms joined on arch's §8 ruling (ROUTING-2026-08-21-h) — map
+// CONTAINS a depth_exceeded (CV-9a, element-local per §5.1), SHORT-CIRCUITS a minted
+// budget_exhausted (CV-9b) and a VALUE-FORM budget_exhausted (CV-9c, the §8.4/D6
+// provenance pair keyed on the code — the arm go's minted-only carve-out failed)) and
+// asserts go produces the outcomes the rulings require. This is the go-emit half; the
+// three-way cross-bless of the 362 set is a fresh obligation on rust/py.
 func TestV325CornerOutcomes(t *testing.T) {
 	vs, err := buildWorked(profileInproc)
 	if err != nil {
@@ -32,8 +35,8 @@ func TestV325CornerOutcomes(t *testing.T) {
 			byID[v.ID] = v
 		}
 	}
-	if len(byID) != 16 {
-		t.Fatalf("expected 16 seeded v325-corner vectors, got %d", len(byID))
+	if len(byID) != 19 {
+		t.Fatalf("expected 19 seeded v325-corner vectors, got %d", len(byID))
 	}
 
 	// error-outcome arms: the exact code is the boundary (§7c.3 code-only).
@@ -49,6 +52,11 @@ func TestV325CornerOutcomes(t *testing.T) {
 		// CV-8c: filter's predicate result is CONSUMED (read for truthiness) → the
 		// error short-circuits and IS the boundary.
 		"worked/v325-corner/cv8c-filter-predicate-error-shortcircuit": "seeded_error",
+		// CV-9b/CV-9c: budget_exhausted SHORT-CIRCUITS in map's contained position
+		// (§8.1), minted (real 24-op trip) and value-form (stored E) alike, keyed on
+		// the code (§8.4) — both reduce to the same error boundary.
+		"worked/v325-corner/cv9b-map-budget-exhausted-shortcircuits":           "budget_exhausted",
+		"worked/v325-corner/cv9c-map-valueform-budget-exhausted-shortcircuits": "budget_exhausted",
 	}
 	// value/entity-outcome arms: a materialized boundary, no error. CV-4a and
 	// CV-5 are the v3.26 CONTAINED half — the error is present IN the output
@@ -65,6 +73,10 @@ func TestV325CornerOutcomes(t *testing.T) {
 		"worked/v325-corner/cv8a-map-contains-minted-error",
 		"worked/v325-corner/cv8b-map-contains-valueform-error",
 		"worked/v325-corner/cv8d-fold-ignores-accumulator-recovers",
+		// CV-9a: depth_exceeded is element-local (§5.1 restored-on-unwind), so map
+		// CONTAINS it as an output element ([1, E, 1]) — a value/entity boundary, not
+		// a short-circuit. FAILS any seat short-circuiting depth_exceeded.
+		"worked/v325-corner/cv9a-map-depth-exceeded-contains",
 	}
 
 	for id, code := range wantErr {

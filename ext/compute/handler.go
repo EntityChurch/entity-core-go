@@ -7,7 +7,6 @@ import (
 	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/handler"
 	"go.entitychurch.org/entity-core-go/core/hash"
-	"go.entitychurch.org/entity-core-go/core/store"
 	"go.entitychurch.org/entity-core-go/core/types"
 )
 
@@ -207,15 +206,22 @@ func initBudget(hctx *handler.HandlerContext, params entity.Entity) *Budget {
 		ops = reqOps
 	}
 
-	// Check capability constraints for compute-specific limits.
-	if !hctx.CallerCapability.ContentHash.IsZero() {
-		capOps, capDepth := extractComputeConstraints(hctx.CallerCapability, hctx.Store)
-		if capOps > 0 && capOps < ops {
-			ops = capOps
-		}
-		if capDepth > 0 && capDepth < depth {
-			depth = capDepth
-		}
+	// Compute-specific limits come from the capability's grant-level constraints
+	// (ENTITY-CORE-PROTOCOL §5; EXTENSION-COMPUTE §5.2). The matching grant is the
+	// authorization-correct source — its constraints are what permitted THIS
+	// request. Fall back to scanning the token's grants when the matching grant is
+	// unavailable (an in-process dispatch may not populate MatchingGrant).
+	var capOps, capDepth int
+	if hctx.MatchingGrant != nil {
+		capOps, capDepth = computeConstraintsOfGrant(hctx.MatchingGrant)
+	} else if !hctx.CallerCapability.ContentHash.IsZero() {
+		capOps, capDepth = computeConstraintsOfToken(hctx.CallerCapability)
+	}
+	if capOps > 0 && capOps < ops {
+		ops = capOps
+	}
+	if capDepth > 0 && capDepth < depth {
+		depth = capDepth
 	}
 
 	return NewBudget(ops, depth)
@@ -249,27 +255,10 @@ func requestBudget(params entity.Entity) (int, bool) {
 	return n, true
 }
 
-// extractComputeConstraints reads compute resource limits from capability
-// constraints["system/compute"]. The constraints field is preserved as raw
-// CBOR on the entity (open type) — decode from entity data directly.
-func extractComputeConstraints(cap entity.Entity, cs store.ContentStore) (ops, depth int) {
-	var rawData map[string]interface{}
-	if err := ecf.Decode(cap.Data, &rawData); err != nil {
-		return 0, 0
-	}
-	constraints, ok := rawData["constraints"]
-	if !ok {
-		return 0, 0
-	}
-	constraintsMap := toStringMap(constraints)
-	if constraintsMap == nil {
-		return 0, 0
-	}
-	computeVal, ok := constraintsMap["system/compute"]
-	if !ok {
-		return 0, 0
-	}
-	computeMap := toStringMap(computeVal)
+// computeLimitsFrom reads max_compute_operations / max_compute_depth out of a
+// decoded constraints map's "system/compute" key. Returns (0,0) when absent.
+func computeLimitsFrom(constraints map[string]interface{}) (ops, depth int) {
+	computeMap := toStringMap(constraints["system/compute"])
 	if computeMap == nil {
 		return 0, 0
 	}
@@ -278,6 +267,53 @@ func extractComputeConstraints(cap entity.Entity, cs store.ContentStore) (ops, d
 	}
 	if v, ok := computeMap["max_compute_depth"]; ok {
 		depth = toIntValue(v)
+	}
+	return
+}
+
+// computeConstraintsOfGrant reads the compute resource limits from ONE grant
+// entry's `constraints` field.
+//
+// Per ENTITY-CORE-PROTOCOL §5, `constraints` is a GRANT-level, handler-
+// interpreted narrowing field — it lives at grants[].constraints, NOT at the
+// token level (CapabilityTokenData has no `constraints` field at all).
+// EXTENSION-COMPUTE §5.2 says the limits are "carried on capability tokens via
+// the existing `constraints` field (ENTITY-CORE-PROTOCOL §5)", so its pseudocode
+// shorthand `capability.data.constraints["system/compute"]` denotes this grant-
+// level field, not a literal top-level read. The prior implementation read the
+// token's top-level `constraints`, which no conformant capability ever carries,
+// so a compute depth/ops constraint reached the evaluator NOWHERE over the wire
+// (spec-issue 2026-08-22-a).
+func computeConstraintsOfGrant(g *types.GrantEntry) (ops, depth int) {
+	if g == nil || len(g.Constraints) == 0 {
+		return 0, 0
+	}
+	var constraints map[string]interface{}
+	if err := ecf.Decode(g.Constraints, &constraints); err != nil {
+		return 0, 0
+	}
+	return computeLimitsFrom(constraints)
+}
+
+// computeConstraintsOfToken finds the tightest compute limits across every grant
+// entry of a capability TOKEN. Used where the specific matching grant is not
+// available (the handler-grant ceiling and the reactive §7.4 path, which stores
+// only the installing token). Taking the min of positive values is safe because
+// a constraint can only narrow (§5.6), so the tightest any grant imposes is a
+// valid ceiling.
+func computeConstraintsOfToken(tokenEnt entity.Entity) (ops, depth int) {
+	td, err := types.CapabilityTokenDataFromEntity(tokenEnt)
+	if err != nil {
+		return 0, 0
+	}
+	for i := range td.Grants {
+		gOps, gDepth := computeConstraintsOfGrant(&td.Grants[i])
+		if gOps > 0 && (ops == 0 || gOps < ops) {
+			ops = gOps
+		}
+		if gDepth > 0 && (depth == 0 || gDepth < depth) {
+			depth = gDepth
+		}
 	}
 	return
 }
@@ -356,7 +392,7 @@ func (h *Handler) EvaluateAtPath(ctx context.Context, exprPath string, req *hand
 	// is bound separately for voluntary restriction (§3.2) and history
 	// attribution (§3.3).
 	budget := DefaultBudget()
-	capOps, capDepth := extractComputeConstraints(grant, hctx.Store)
+	capOps, capDepth := computeConstraintsOfToken(grant)
 	if capOps > 0 && capOps < budget.Operations {
 		budget.Operations = capOps
 	}

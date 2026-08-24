@@ -43,6 +43,7 @@ import (
 	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/types"
+	"go.entitychurch.org/entity-core-go/ext/compute"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -145,7 +146,25 @@ func (d *peerDriver) evalVectorOnPeer(ctx context.Context, v Vector) (Outcome, e
 
 	uri := fmt.Sprintf("entity://%s/system/compute", d.peerID)
 	resource := &types.ResourceTarget{Targets: []string{"/" + d.peerID + "/" + rootPath}}
-	env, _, err := d.client.SendExecuteWithIncluded(ctx, uri, "eval", params, resource, extras)
+
+	// §5.2 sources the operations budget from params.budget (above) but the DEPTH
+	// budget from the capability's grant-level constraints — never from params
+	// (ENTITY-CORE-PROTOCOL §5). A vector whose depth is below the peer default
+	// (the depth_exceeded corner CV-9a, the tail-recursion vector) therefore only
+	// reproduces on the wire through a constraint-bearing cap; without it the peer
+	// runs at its default depth and forks the boundary from the in-process eval —
+	// the divergence the 362-vector cross-bless surfaced. Vectors at the default
+	// depth take the unchanged connection-cap path.
+	var env entity.Envelope
+	if v.Budget.Depth > 0 && v.Budget.Depth < compute.DefaultMaxDepth {
+		capEnt, capSig, cerr := d.constrainedComputeCap(v.Budget)
+		if cerr != nil {
+			return Outcome{}, fmt.Errorf("mint depth-constrained cap: %w", cerr)
+		}
+		env, _, err = d.client.SendExecuteWithCap(ctx, uri, "eval", params, resource, capEnt, capSig, extras)
+	} else {
+		env, _, err = d.client.SendExecuteWithIncluded(ctx, uri, "eval", params, resource, extras)
+	}
 	if err != nil {
 		return Outcome{}, fmt.Errorf("eval: %w", err)
 	}
@@ -173,6 +192,44 @@ func (d *peerDriver) evalVectorOnPeer(ctx context.Context, v Vector) (Outcome, e
 	}
 
 	return outcomeFromEvalResponse(respData)
+}
+
+// constrainedComputeCap mints a self-cap — chained from the connection cap —
+// carrying the vector's frozen budget as grant-level constraints["system/compute"]
+// (ENTITY-CORE-PROTOCOL §5 / EXTENSION-COMPUTE §5.2). This is the only channel
+// through which a vector's DEPTH budget reaches a peer: §5.2 sources depth from
+// constraints["system/compute"]["max_compute_depth"], never from params.
+// Operations is carried too so the one cap reproduces the whole budget.
+//
+// The grant is broad but ABSOLUTE: the evaluator's internal sub-dispatches
+// (compute/lookup/tree over the closure's tree preconditions at /peer/corpus/…)
+// run under this same capability, so it must authorize every path the eval reads,
+// not just the root resource, or those lookups 403. Resources are qualified with
+// the SERVER peer id: §PR-8 canonicalizes each cap's resource patterns against
+// its OWN granter's namespace, and this self-cap's granter is the CLIENT — so a
+// bare "*" would canonicalize to the client namespace and fail to be covered by
+// the connection cap's server-namespaced grant. An absolute /server/* path
+// canonicalizes to itself and is covered by the parent's "*". Adding the compute
+// budget as a grant-level constraint is a valid attenuation (a constraint only
+// narrows, §5.6; grantCovers explicitly permits added keys).
+func (d *peerDriver) constrainedComputeCap(budget VecBudget) (entity.Entity, entity.Entity, error) {
+	limits := map[string]interface{}{
+		"max_compute_depth": uint64(budget.Depth),
+	}
+	if budget.Operations > 0 {
+		limits["max_compute_operations"] = uint64(budget.Operations)
+	}
+	rawConstraints, err := ecf.Encode(map[string]interface{}{"system/compute": limits})
+	if err != nil {
+		return entity.Entity{}, entity.Entity{}, err
+	}
+	grant := types.GrantEntry{
+		Handlers:    types.CapabilityScope{Include: []string{"*"}},
+		Resources:   types.CapabilityScope{Include: []string{"/" + d.peerID + "/*"}},
+		Operations:  types.CapabilityScope{Include: []string{"*"}},
+		Constraints: cbor.RawMessage(rawConstraints),
+	}
+	return d.client.CreateDispatchCapabilityWithGrants([]types.GrantEntry{grant})
 }
 
 // outcomeFromEvalResponse reduces an eval response to a boundary outcome.

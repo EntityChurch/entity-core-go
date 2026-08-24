@@ -1,4 +1,4 @@
-// Command v767-corpus-build produces the v7.67 corpus `.cbor` build artifact
+// Command agility-corpus-build produces the v7.67 corpus `.cbor` build artifact
 // from its `.diag` source, using the Go ECF encoder.
 //
 // WHY GO OWNS THIS. `SEEDS.md` §5 step 2 assigns it: *"produce
@@ -36,9 +36,9 @@
 //
 // Usage:
 //
-//	go run ./cmd/v767-corpus-build -verify-legacy <old.diag> <expected-sha>
-//	go run ./cmd/v767-corpus-build -both -n          # dry run: show shas, write nothing
-//	go run ./cmd/v767-corpus-build -both             # write both artifacts
+//	go run ./cmd/agility-corpus-build -verify-legacy <old.diag> <expected-sha>
+//	go run ./cmd/agility-corpus-build -both -n          # dry run: show shas, write nothing
+//	go run ./cmd/agility-corpus-build -both             # write both artifacts
 //
 // This tool WRITES INTO entity-core-protocol, which this repo does not
 // otherwise touch, and it writes the artifact ONLY — never a spec file, never a
@@ -68,16 +68,15 @@ type corpusCopy struct {
 	cbor string
 }
 
+// The corpus was de-versioned at core-protocol b4ea610 (ROUTING-2026-08-22-a):
+// the `v767/` copy is deleted and the crypto-agility files dropped their `-v1`
+// suffix. One corpus, one copy — so `-both`'s byte-identity enforcement no
+// longer has a second copy to compare and is a no-op here by construction.
 var copies = []corpusCopy{
 	{
-		name: "v767 (versioned)",
-		diag: "../entity-core-protocol/specs/test-vectors/v767/conformance-vectors-v1.diag",
-		cbor: "../entity-core-protocol/specs/test-vectors/v767/conformance-vectors-v1.cbor",
-	},
-	{
 		name: "crypto-agility (public release form)",
-		diag: "../entity-core-protocol/specs/test-vectors/crypto-agility/agility-vectors-v1.diag",
-		cbor: "../entity-core-protocol/specs/test-vectors/crypto-agility/agility-vectors-v1.cbor",
+		diag: "../entity-core-protocol/specs/test-vectors/crypto-agility/agility-vectors.diag",
+		cbor: "../entity-core-protocol/specs/test-vectors/crypto-agility/agility-vectors.cbor",
 	},
 }
 
@@ -137,7 +136,7 @@ func verifyLegacy(path, expect string) {
 // any gate, against a tree it does not own.
 //
 // THIS IS THE CHECK WHOSE ABSENCE CAUSED A-3, and it is worth naming precisely
-// because the existing verifier does NOT cover it. `v767-corpus-verify` asserts
+// because the existing verifier does NOT cover it. `agility-corpus-verify` asserts
 // the artifact against a pinned sha — it proves the artifact is the one we
 // expect, and says nothing about whether the SOURCE still produces it. That is
 // exactly the gap the corpus fell through: the F16 correction was applied to
@@ -249,7 +248,7 @@ func encodeFile(path string) []byte {
 // secret seeds (RFC 8032 SeedSize is 57), a 63-byte `experimental-test` public
 // key (v7.66 §4.2 pins 64), and Phase-2 `expected_*` fields carrying the text
 // placeholder "TBD-COHORT-ROUND-TRIP" instead of bytes. It was applied to the
-// `.cbor` — where `v767-corpus-verify` confirms 57 / 64 to this day — and
+// `.cbor` — where `agility-corpus-verify` confirms 57 / 64 to this day — and
 // **never folded back into the `.diag`**, which still carries 58 and 63.
 //
 // So the two files have been out of sync since June, in OPPOSITE directions,
@@ -264,7 +263,7 @@ func encodeFile(path string) []byte {
 // via tools/regen-v767-cbor.py" — which cannot be true of this file's bytes,
 // and is the clue that the June regen ran on a corrected input nobody saved.
 //
-// The invariants below are exactly the three `v767-corpus-verify` §1 asserts
+// The invariants below are exactly the three `agility-corpus-verify` §1 asserts
 // against the artifact. Checking them on the SOURCE before encoding is what
 // makes the two tools a closed loop instead of two opinions.
 func preflightF16(path string, arr []interface{}) {
@@ -326,7 +325,7 @@ func preflightF16(path string, arr []interface{}) {
 	if len(problems) == 0 {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "\nv767-corpus-build: REFUSING TO BUILD %s\n\n", path)
+	fmt.Fprintf(os.Stderr, "\nagility-corpus-build: REFUSING TO BUILD %s\n\n", path)
 	fmt.Fprintf(os.Stderr, "  The .diag carries input widths the F16 correction superseded. The shipped\n")
 	fmt.Fprintf(os.Stderr, "  .cbor already has them right, so encoding this source would REGRESS the\n")
 	fmt.Fprintf(os.Stderr, "  artifact while folding in the M3/M6 re-stamp — a net loss disguised as a\n")
@@ -374,6 +373,6 @@ func shaHex(b []byte) string {
 }
 
 func die(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "v767-corpus-build: "+format+"\n", args...)
+	fmt.Fprintf(os.Stderr, "agility-corpus-build: "+format+"\n", args...)
 	os.Exit(1)
 }

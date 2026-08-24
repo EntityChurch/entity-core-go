@@ -89,6 +89,22 @@ func RunConformance(ctx context.Context, corpusPath string, peers []ConformanceP
 	r := NewCheckRunner(catConformance)
 
 	// Metadata agreement (corpus_version, spec_version).
+	//
+	// Re-declared 2026-08-22 (ROUTING-2026-08-22-a C-4). GUIDE-CONFORMANCE §5.1 was
+	// REVISED (not retired): it no longer states a corpus-VERSION agreement rule —
+	// a corpus is now identified by (spec-version, corpus-name, artifact sha256).
+	// So the retired thing is the old §5.1 semantics these two checks leaned on,
+	// not the section, which still governs corpus identity. Both keep citing the
+	// live §5.1 and stay NON_NORMATIVE in the register:
+	//   - corpus_version_agreement asserts peers ran the SAME corpus. Under revised
+	//     §5.1 that identity is name + artifact sha256; the artifact-sha half is
+	//     gated statically in PASS 0 by `corpus-check` (the stronger gate). This
+	//     cross-peer field-agreement is retained for the still-versioned
+	//     ecf-conformance corpus, whose corpus-version rule lives normatively in
+	//     EXTENSION-CBOR-ENCODING §E.6 ("reports MUST cite the version of
+	//     conformance-vectors-v{N}.cbor"). ecf keeps its version — ROUTING §3.
+	//   - spec_version_agreement asserts element 1 of the §5.1 identity tuple.
+	// A re-declare, not new logic; not renamed, so the baseline key is stable.
 	r.Declare("corpus_version_agreement", "GUIDE-CONFORMANCE §5.1")
 	r.Declare("spec_version_agreement", "GUIDE-CONFORMANCE §5.1")
 

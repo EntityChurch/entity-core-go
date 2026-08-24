@@ -37,9 +37,9 @@
 /scan-probe
 /signaling-meet
 /signaling-punch
-/v767-corpus-build
-/v767-corpus-verify
-/v767-phase2-pins
+/agility-corpus-build
+/agility-corpus-verify
+/agility-phase2-pins
 /validate-peer
 /webrtc-vectors
 /wire-conformance

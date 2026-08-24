@@ -1,4 +1,4 @@
-// Command v767-corpus-verify decodes the v7.67 agility conformance corpus
+// Command agility-corpus-verify decodes the v7.67 agility conformance corpus
 // (`conformance-vectors-v1.cbor`) end-to-end and asserts:
 //
 //  1. File sha256 matches the F16 re-stamp 8e7c5232…f31f982e (or the value
@@ -16,7 +16,7 @@
 // artifact, not its sha256" — on the Go side. No impl code change is required;
 // the verifier is a pure consumer of the corpus.
 //
-// Reproduce: `go run ./cmd/v767-corpus-verify`. Add `-path <file>` to point at
+// Reproduce: `go run ./cmd/agility-corpus-verify`. Add `-path <file>` to point at
 // a different corpus copy. Add `-verbose` for a per-vector line.
 package main
 
@@ -89,15 +89,15 @@ const (
 	// constructor itself so it cannot recur (core/entity.NewEntityFormat).
 	// That assertion needs no field the re-stamp has yet to land, so it is
 	// green today; the vector's residual 0x01 pin is reported as a NOTE.
-	defaultPath = "../entity-core-protocol/specs/test-vectors/v767/conformance-vectors-v1.cbor"
+	defaultPath = "../entity-core-protocol/specs/test-vectors/crypto-agility/agility-vectors.cbor"
 
 	// MOVED 2026-08-12 — A-3 closed. Both blockers landed at core-protocol
 	// `8d38e62` (the F16 sweep-back into both sources, and the M3/M6
-	// description reconciliation), so `v767-corpus-build -both` ran for the
+	// description reconciliation), so `agility-corpus-build -both` ran for the
 	// first time and produced this digest from BOTH sources, byte-identical.
 	//
 	// 8e7c5232…e31f982e was the June artifact, and it is not gone: it remains
-	// the encoder's pinned self-check. `v767-corpus-build -verify-legacy`
+	// the encoder's pinned self-check. `agility-corpus-build -verify-legacy`
 	// re-encodes the `.diag` frozen at core-protocol `56d4de4` (with the six
 	// F16 input-width corrections applied) and asserts it reproduces
 	// 8e7c5232… exactly. That pair is FROZEN on purpose: it is the only
@@ -124,7 +124,7 @@ func expectedSHA() string {
 }
 
 var (
-	flagPath        = flag.String("path", defaultPath, "path to conformance-vectors-v1.cbor")
+	flagPath        = flag.String("path", defaultPath, "path to the crypto-agility agility-vectors.cbor")
 	flagExpectedSHA = flag.String("expected-sha", expectedSHA(), "expected file sha256 (hex)")
 	flagVerbose     = flag.Bool("verbose", false, "print a line per vector")
 	flagFullHashes  = flag.Bool("full-hashes", false, "print derived hashes in full rather than truncated — required when producing a re-stamp proposal, since a truncated value cannot be ratified")
@@ -790,6 +790,6 @@ func mustHash(raw []byte) hash.Hash {
 }
 
 func die(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "v767-corpus-verify: "+format+"\n", args...)
+	fmt.Fprintf(os.Stderr, "agility-corpus-verify: "+format+"\n", args...)
 	os.Exit(1)
 }

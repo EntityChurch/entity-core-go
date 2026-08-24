@@ -582,10 +582,21 @@ func (d ComputeGroupByArgsData) ToEntity() (entity.Entity, error) {
 	return entity.NewEntity(TypeComputeGroupByArgs, cbor.RawMessage(raw))
 }
 
-// ComputeConcatArgsData is `system/compute/concat-args`: collections is an
-// array of hashes of array expressions, joined order-preserving one level.
+// ComputeConcatArgsData is `system/compute/concat-args`: collections is a single
+// hash of an expression evaluating to an array of arrays, joined order-preserving
+// one level.
+//
+// D3 (EXTENSION-COMPUTE 3.27 §3.5, arch PROPOSAL-COMPUTE-CLOSURE-RESULT-POSITIONS
+// §3.2, landed 2026-08-22): the declaration is a SCALAR system/hash, matching what
+// builtinConcat already evaluates (a single hash resolving to an array of arrays)
+// and every sibling collection arg (map/filter/fold/group-by/assoc-args.collection).
+// The old []hash.Hash froze concat's arity at authoring time — a concat over a
+// computed number of collections was inexpressible. Reason is uniformity + arity;
+// the §7.1-walk derivation was retracted (§3.2). Declaration-only, nothing on the
+// wire moves. Transient cross-impl `type_system` FAIL until rust lands D3 (arch §9
+// order: go, then rust) — EXPECTED, carried labelled, NOT baselined.
 type ComputeConcatArgsData struct {
-	Collections []hash.Hash `cbor:"collections"`
+	Collections hash.Hash `cbor:"collections"`
 }
 
 func (d ComputeConcatArgsData) ToEntity() (entity.Entity, error) {

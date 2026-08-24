@@ -223,28 +223,30 @@ func TestMapClosureResultContains(t *testing.T) {
 	}
 }
 
-// TestMapClosureResultLimitCodePropagates locks the ONE carve-out: an
-// evaluation-limit code (budget_exhausted / depth_exceeded / cascade_limit) is
-// NOT contained — it aborts the whole map. A limit reached is not a value the
-// program computed, and containing budget_exhausted would fork the §5.1/§5.4
-// shared-budget stop-point cross-impl (go's lead call, spec-issue 2026-08-21-b).
-func TestMapClosureResultLimitCodePropagates(t *testing.T) {
-	// isEvalLimitCode classifies the set — the abort codes vs the contained ones.
-	for _, c := range []string{ErrBudgetExhausted, ErrDepthExceeded, ErrCascadeLimit} {
-		if !isEvalLimitCode(c) {
-			t.Errorf("isEvalLimitCode(%q) = false, want true (an eval-limit abort)", c)
+// TestShortCircuitLimitCodeClassification locks arch §8 (EXTENSION-COMPUTE 3.27
+// D5): the SHORT-CIRCUIT eval-limit set is EXACTLY {budget_exhausted, cascade_limit}
+// — the codes whose counter is NOT restored on unwind (§5.1), so a contained
+// result would fork cross-impl. depth_exceeded is NOT in it: its `depth` is restored
+// on unwind, so it is element-local and CONTAINS like any other error (§8.3). This
+// reverses go's prior 1-of-3 outlier reading (which short-circuited all three);
+// rust and py were right and the spec arbitrates against go (ruling h §2).
+func TestShortCircuitLimitCodeClassification(t *testing.T) {
+	for _, c := range []string{ErrBudgetExhausted, ErrCascadeLimit} {
+		if !isShortCircuitLimitCode(c) {
+			t.Errorf("isShortCircuitLimitCode(%q) = false, want true (counter not restored on unwind → short-circuits)", c)
 		}
 	}
-	for _, c := range []string{ErrDivisionByZero, ErrTypeMismatch, ErrIndexOutOfRange, ErrPermissionDenied, ErrScopeUnreachable, "operand_error"} {
-		if isEvalLimitCode(c) {
-			t.Errorf("isEvalLimitCode(%q) = true, want false (a produced value-error → contained)", c)
+	// depth_exceeded is the row that flipped: it CONTAINS now.
+	for _, c := range []string{ErrDepthExceeded, ErrDivisionByZero, ErrTypeMismatch, ErrIndexOutOfRange, ErrPermissionDenied, ErrScopeUnreachable, "operand_error"} {
+		if isShortCircuitLimitCode(c) {
+			t.Errorf("isShortCircuitLimitCode(%q) = true, want false (contained: element-local or a produced value-error)", c)
 		}
 	}
 
 	// End-to-end: a budget so small the loop exhausts → map returns the
-	// propagated budget_exhausted, NOT a contained array. (Whether it exhausts
-	// in setup or mid-loop, the invariant is the same: a limit code never yields
-	// a contained array — it aborts.)
+	// short-circuited budget_exhausted, NOT a contained array. Whether it exhausts
+	// in setup or mid-loop, a short-circuit limit code never yields a contained
+	// array — it aborts (§8.1, CV-9b).
 	ctx, cs := testCtx()
 	coll := mustPut(t, cs, mustE(types.ComputeLiteralData{Value: []interface{}{int64(1), int64(2), int64(3), int64(4), int64(5), int64(6), int64(7), int64(8)}}.ToEntity()))
 	body := mustPut(t, cs, mustE(types.ComputeLiteralData{Value: int64(0)}.ToEntity()))
@@ -253,10 +255,69 @@ func TestMapClosureResultLimitCodePropagates(t *testing.T) {
 		Args: map[string]hash.Hash{"collection": coll, "fn": fn}}.ToEntity())
 	v, err := Evaluate(apply, NewScope(), &Budget{Operations: 4, Depth: 64}, ctx)
 	if _, isArr := v.([]interface{}); isArr {
-		t.Fatalf("map with an exhausting budget returned a CONTAINED array %v — a limit code must abort, not be contained", v)
+		t.Fatalf("map with an exhausting budget returned a CONTAINED array %v — budget_exhausted must abort, not be contained", v)
 	}
 	ce, ok := err.(*ComputeError)
 	if !ok || ce.Code != ErrBudgetExhausted {
-		t.Fatalf("map with an exhausting budget: want propagated budget_exhausted, got v=%v err=%v", v, err)
+		t.Fatalf("map with an exhausting budget: want short-circuited budget_exhausted, got v=%v err=%v", v, err)
+	}
+}
+
+// TestMapValueFormShortCircuitLimitCodeShortCircuits is the CV-9c defect fix
+// (arch §8.4 / D6 / SA-PY-25): a VALUE-FORM budget_exhausted / cascade_limit
+// flowing out of a closure into map's contained output position MUST short-circuit
+// exactly as a minted one does — keyed on the CODE, never the variant. go's
+// minted-only carve-out used to CONTAIN a value-form budget_exhausted while
+// short-circuiting a minted one — the exact §2.4 provenance asymmetry Corner 1 was
+// opened to kill, reinstated inside the carve-out Corner 1 created. Mutation: with
+// the value-form arm removed this returns a contained array and fails.
+func TestMapValueFormShortCircuitLimitCodeShortCircuits(t *testing.T) {
+	ctx, cs := testCtx()
+	twoElem := mustPut(t, cs, mustE(types.ComputeLiteralData{Value: []interface{}{int64(1), int64(2)}}.ToEntity()))
+	for _, code := range []string{ErrBudgetExhausted, ErrCascadeLimit} {
+		t.Run(code, func(t *testing.T) {
+			// closure body IS a stored compute/error{code} → SA-1 value-form result.
+			errBody := storedErrorOperand(t, cs, code)
+			fn := mustPut(t, cs, mustE(types.ComputeClosureData{Params: []string{"x"}, Body: errBody}.ToEntity()))
+			apply := mustE(types.ComputeApplyData{Path: BuiltinMap, Operation: "eval",
+				Args: map[string]hash.Hash{"collection": twoElem, "fn": fn}}.ToEntity())
+			v, err := Evaluate(apply, NewScope(), DefaultBudget(), ctx)
+			if _, isArr := v.([]interface{}); isArr {
+				t.Fatalf("map(value-form %s): CONTAINED %v — a value-form short-circuit code must abort, keyed on the code (§8.4/D6)", code, v)
+			}
+			ce, ok := err.(*ComputeError)
+			if !ok || ce.Code != code {
+				t.Fatalf("map(value-form %s): want short-circuit to %q, got v=%v err=%v", code, code, v, err)
+			}
+		})
+	}
+}
+
+// TestMapDepthExceededContains locks §8.3: depth_exceeded CONTAINS in map's output
+// position, for BOTH representations. `depth` is restored on unwind, so element i
+// begins at the same depth every time — map(f,xs) exceeding depth on one element
+// yields [.., E, ..], the §1.5 NaN model, evaluated identically by every peer. This
+// is the CV-9a shape and the row that flipped from go's prior reading.
+func TestMapDepthExceededContains(t *testing.T) {
+	ctx, cs := testCtx()
+	twoElem := mustPut(t, cs, mustE(types.ComputeLiteralData{Value: []interface{}{int64(1), int64(2)}}.ToEntity()))
+	// value-form depth_exceeded flowing out of the closure body.
+	errBody := storedErrorOperand(t, cs, ErrDepthExceeded)
+	fn := mustPut(t, cs, mustE(types.ComputeClosureData{Params: []string{"x"}, Body: errBody}.ToEntity()))
+	apply := mustE(types.ComputeApplyData{Path: BuiltinMap, Operation: "eval",
+		Args: map[string]hash.Hash{"collection": twoElem, "fn": fn}}.ToEntity())
+	v, err := Evaluate(apply, NewScope(), DefaultBudget(), ctx)
+	if err != nil {
+		t.Fatalf("map(value-form depth_exceeded): CONTAINS, got short-circuit err=%v", err)
+	}
+	arr, ok := v.([]interface{})
+	if !ok || len(arr) != 2 {
+		t.Fatalf("map(value-form depth_exceeded): want a 2-element array (contained), got %T %v", v, v)
+	}
+	for i, e := range arr {
+		ce, isErr := computeErrorFromValue(e)
+		if !isErr || ce.Code != ErrDepthExceeded {
+			t.Fatalf("map(value-form depth_exceeded): element %d = %#v, want contained depth_exceeded", i, e)
+		}
 	}
 }

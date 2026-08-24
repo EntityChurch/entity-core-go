@@ -28,7 +28,16 @@ import (
 // CBOR data (a literal/binding round-trips it to a bare map), so every corner
 // that needs E injects it as an entity operand.
 func seededError(b *irBuilder) hash.Hash {
-	ent, err := (types.ComputeErrorData{Code: "seeded_error", Message: "corner-vector seed E"}).ToEntity()
+	return seededErrorCode(b, "seeded_error")
+}
+
+// seededErrorCode is seededError with an explicit code — used by the CV-9 pair to
+// inject a VALUE-FORM eval-limit error (§8.4/D6: a stored compute/error whose code
+// short-circuits behaves identically to a minted one, keyed on the code). §7.3
+// itself mandates a value-form eval-limit error's existence (it writes one to a
+// result_path on reactive budget exhaustion), so this is not a synthetic shape.
+func seededErrorCode(b *irBuilder, code string) hash.Hash {
+	ent, err := (types.ComputeErrorData{Code: code, Message: "corner-vector seed E"}).ToEntity()
 	if err != nil {
 		if b.err == nil {
 			b.err = err
@@ -278,6 +287,76 @@ var v325CornerVectors = []workedVector{
 			coll := b.lit([]interface{}{int64(1), int64(2)})
 			fn := b.lambda([]string{"acc", "x"}, b.lookupScope("x"))
 			return probe(b, b.foldB(coll, seededError(b), fn))
+		},
+	},
+	{
+		// CV-9a — map CONTAINS a MINTED depth_exceeded as an output element (arch
+		// §8.3 / D5, EXTENSION-COMPUTE 3.27): `depth` is restored on unwind (§5.1),
+		// so it is element-local — element i begins at the same depth every time,
+		// and whether it exceeds is a property of that element alone. map λx. f(x)
+		// where f is NON-TAIL recursion (add uses f's result → each level grows
+		// depth by 1, §4c) over [1, 60, 1] against Depth 24: f(1) recurses one level
+		// (well under), f(60) exceeds → depth_exceeded, f(1) again ok → [1, E, 1].
+		// FAILS any seat short-circuiting depth_exceeded (go's prior 1-of-3 reading).
+		// Depth 24 with a 60-level middle and single-level edges gives a wide margin
+		// both ways, so the trip point is deterministic cross-impl (depth semantics
+		// are pinned by §5.1, not impl-defined like memoization).
+		id:     "worked/v325-corner/cv9a-map-depth-exceeded-contains",
+		budget: VecBudget{Operations: 100000, Depth: 24},
+		build: func(b *irBuilder) hash.Hash {
+			b.feature("v325-corner", "closure", "map", "error-path", "depth")
+			const path = "corpus/fn/depth"
+			// f(k) = if k<=0 then 0 else 1 + f(k-1) — non-tail, so depth grows per level.
+			recur := b.arith("add", b.lit(int64(1)),
+				b.applyClosure(b.lookupTree(path), map[string]hash.Hash{
+					"k": b.arith("sub", b.lookupScope("k"), b.lit(int64(1))),
+				}))
+			guard := b.compare("lte", b.lookupScope("k"), b.lit(int64(0)))
+			f := b.lambda([]string{"k"}, b.ifE(guard, b.lit(int64(0)), &recur))
+			b.at(path, f)
+			mapFn := b.lambda([]string{"x"}, b.applyClosure(b.lookupTree(path),
+				map[string]hash.Hash{"k": b.lookupScope("x")}))
+			return probe(b, b.mapB(b.lit([]interface{}{int64(1), int64(60), int64(1)}), mapFn))
+		},
+	},
+	{
+		// CV-9b — map SHORT-CIRCUITS a MINTED budget_exhausted (arch §8.1 / D5):
+		// `operations` is decremented once per evaluate() and NEVER restored, so a
+		// contained result would fork at a peer-dependent element k (§10.4 memo is
+		// impl-defined). Short-circuited, every peer that exhausts answers the ONE
+		// code, no array. map λx. add-chain over a 32-element collection against a
+		// 24-operation budget cuts well inside the array → error{budget_exhausted}.
+		// The minted arm of the §8.4 provenance pair (CV-9c is the value-form arm).
+		id:     "worked/v325-corner/cv9b-map-budget-exhausted-shortcircuits",
+		budget: VecBudget{Operations: 24, Depth: 1024},
+		build: func(b *irBuilder) hash.Hash {
+			b.feature("v325-corner", "closure", "map", "error-path", "budget")
+			long := make([]interface{}, 32)
+			for i := range long {
+				long[i] = int64(i)
+			}
+			// a non-trivial closure so each element charges several operations.
+			fn := b.lambda([]string{"x"}, b.arith("add", b.lookupScope("x"), b.lit(int64(1))))
+			return probe(b, b.mapB(b.lit(long), fn))
+		},
+	},
+	{
+		// CV-9c — THE DISCRIMINATOR (arch §8.4 / D6 / SA-PY-25): map over a
+		// VALUE-FORM compute/error{code: budget_exhausted} MUST short-circuit
+		// byte-identically to the minted CV-9b — keyed on the CODE, never the
+		// variant. This is the arm go's minted-only carve-out failed: it contained
+		// a value-form budget_exhausted while short-circuiting a minted one, the
+		// exact §2.4 provenance asymmetry Corner 1 was opened to kill, reinstated
+		// inside the carve-out Corner 1 created. §7.3 mandates the value form exists
+		// (reactive budget exhaustion writes a compute/error to result_path). No
+		// existing vector reaches this arm.
+		id:       "worked/v325-corner/cv9c-map-valueform-budget-exhausted-shortcircuits",
+		bindings: map[string]interface{}{},
+		build: func(b *irBuilder) hash.Hash {
+			b.feature("v325-corner", "closure", "map", "error-value", "budget")
+			coll := b.lit([]interface{}{int64(1), int64(2)})
+			fn := b.lambda([]string{"x"}, seededErrorCode(b, "budget_exhausted"))
+			return probe(b, b.mapB(coll, fn))
 		},
 	},
 }

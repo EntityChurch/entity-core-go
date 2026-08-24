@@ -182,6 +182,17 @@ respect, because every impl can check it from the artifact with no instrumentati
   over the wire will show the same symptom if it has the same gap: the budget vector returns a value
   where the in-process run returns `budget_exhausted`. Check that before filing it as a semantic
   divergence.
+- **The DEPTH budget is a capability constraint, NOT a param — the harness had the sibling gap (fixed
+  2026-08-22).** §5.2 sources `depth` only from `constraints["system/compute"]["max_compute_depth"]` on
+  the matching GRANT (ENTITY-CORE-PROTOCOL §5), never from `params`. The wire driver sent only
+  `params.budget` (operations), so every depth-sensitive vector (`cv9a-map-depth-exceeded-contains`,
+  `recurse/tail-sum`) ran at the peer default depth (1024) and forked the boundary — exactly the
+  `params.budget` gap one axis over, and the reason the 362-vector cross-bless did not lock. The driver
+  now mints a cap whose grant carries the vector's `max_compute_depth` (`constrainedComputeCap`, gated
+  on `depth < DefaultMaxDepth`), and go-in-process vs go-over-wire LOCKS 362/362. **The same silence
+  hits any peer that reads §5.2's `capability.data.constraints` as a token-top-level lookup instead of
+  the grant's constraints — see spec-issue `2026-08-22-a`; a depth vector that returns the full array
+  where the in-process run returns `depth_exceeded` is that gap, not a semantic divergence.**
 - **Two spec questions, both RESOLVED 2026-07-23** (arch, `ARCH-RESPONSE-COMPUTE-CORPUS-FIRST-RUN`):
   a **materialized `compute/error` is content-hashed over `code` alone** (§2.4), so comparing `code`
   strictly IS the materialized-boundary comparison — not a deviation from §7c.3 but its resolution;
@@ -216,7 +227,7 @@ Now pinned:
 
 **Honest scope of this freeze — read before treating it as complete:**
 
-- Pinned state: **352 vectors, SHA `7d09f108…`, `spec_version 3.20`.**
+- Pinned state: **362 vectors, SHA `8d2f55c8…`, `spec_version 3.20`** (see `testdata/compute-corpus-v1.cbor.MANIFEST` — the manifest is the source of truth for these numbers, not this prose).
 - **The v3.25/v3.26 corner vectors CV-1…CV-6 (C-5) are FULLY seeded:** **all 9 arms** are in the
   corpus (`worked/v325-corner/*`) and verified against arch's §7c.6 outcomes (`TestV325CornerOutcomes`).
   **CV-4a and CV-5 joined** once COMPUTE v3.26 ruled the contained-error boundary (**spec-issue

@@ -436,7 +436,7 @@ func (p *diagParser) parseNumber() (interface{}, error) {
 // never is ("…/validation/"). Cheap, and correct for every comment in both
 // copies of the corpus — which is checked, not asserted: the encoder must
 // reproduce the pre-re-stamp artifact byte-for-byte
-// (`v767-corpus-build -verify-legacy`), and a mis-stripped comment cannot
+// (`agility-corpus-build -verify-legacy`), and a mis-stripped comment cannot
 // survive that.
 func closesSpanComment(trimmed string) bool {
 	if !strings.HasSuffix(trimmed, "/") {

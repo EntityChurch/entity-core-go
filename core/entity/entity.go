@@ -73,7 +73,7 @@ const floorPinnedAlgorithm = hash.AlgorithmSHA256
 // pinned constructors — crypto.Keypair.IdentityEntity and types.PeerData.ToEntity
 // — already hard-code the floor, but they were the only thing enforcing 1a, and
 // a rule enforced only by the constructors that happen to obey it is a rule any
-// direct call can route around. Two callers already did: cmd/v767-corpus-verify
+// direct call can route around. Two callers already did: cmd/agility-corpus-verify
 // hand-built a `system/peer` under 0x01 and asserted the resulting hash, and the
 // crypto_agility hash_format_sha_384_1 check authored one to prove SHA-384 works
 // — both green, both certifying a construction the spec forbids. Architecture

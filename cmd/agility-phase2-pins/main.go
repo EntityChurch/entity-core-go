@@ -1,4 +1,4 @@
-// Command v767-phase2-pins derives the V7.67 Phase-2 matrix vector byte
+// Command agility-phase2-pins derives the V7.67 Phase-2 matrix vector byte
 // tuples (M2/M3/M6) from the seeds + cap-token convention pinned in
 // architecture's SEEDS.md §2 (v767/SEEDS.md). Output is the §2.6 tuple
 // shape — pubkeys, peer_ids, home-format peer content_hashes, root_cap
@@ -96,7 +96,7 @@ func main() {
 
 	out := map[string]any{
 		"corpus":            "v7.67 Phase-2 matrix vectors",
-		"seeds_source":      "core-protocol-domain/specs/test-vectors/v767/SEEDS.md §2",
+		"seeds_source":      "core-protocol-domain/specs/test-vectors/crypto-agility/SEEDS.md §2",
 		"active_format_all": "SHA-256 (per SEEDS.md §2.2)",
 		"phase1_substrate_check": map[string]string{
 			"vector": "KEY-TYPE-ED448-1 (reused as M2-A identity)",
@@ -223,6 +223,6 @@ func mustHash(hexStr string) hash.Hash {
 }
 
 func die(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "v767-phase2-pins: "+format+"\n", args...)
+	fmt.Fprintf(os.Stderr, "agility-phase2-pins: "+format+"\n", args...)
 	os.Exit(1)
 }

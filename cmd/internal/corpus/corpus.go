@@ -35,7 +35,7 @@
 // owner (SEEDS.md §4: arch sets fields, the encoder settles bytes, arch commits);
 // a gate that could rewrite the thing it is checking would launder a drift into a
 // pass. It also carries no corpus-specific depth — the crypto re-derivation of the
-// agility vectors lives in `v767-corpus-verify`, layered on top of this floor.
+// agility vectors lives in `agility-corpus-verify`, layered on top of this floor.
 package corpus
 
 import (
@@ -71,16 +71,19 @@ type Corpus struct {
 	Subject string
 
 	// ExpectedSHA is the sha256 of the committed artifact. THE SINGLE HOME for
-	// this fact — `v767-corpus-verify` reads it from here rather than carrying
+	// this fact — `agility-corpus-verify` reads it from here rather than carrying
 	// its own copy, because a pin that exists twice is a pin that will
 	// eventually exist at two values.
 	ExpectedSHA string
 
 	// Copies is every committed location. More than one means the byte-identity
-	// invariant applies (arch 3042bd8). When arch's de-version proposal collapses
-	// the crypto-agility pair, that entry loses a copy and the invariant
-	// disappears with it — which is the point: the invariant exists because the
-	// second copy does.
+	// invariant applies (arch 3042bd8). Arch's de-version proposal
+	// (PROPOSAL-DEVERSION-TEST-VECTOR-CORPUS) collapsed the crypto-agility pair at
+	// entity-core-protocol b4ea610: `v767/` is deleted and the versioned copy
+	// retired, so this corpus now has ONE copy and the AGREE invariant retires
+	// with the second copy — deliberately (ROUTING-2026-08-22-a §4). What replaces
+	// it is §5.1b's source-produces-artifact gate (CHECK below): the second copy
+	// was never protection, it was the thing protected against.
 	Copies []Copy
 }
 
@@ -101,14 +104,13 @@ func All() []Corpus {
 			// `6d0f4a94…` -> 10874 B `b5484e84…`.
 			//
 			// Step 2 (ours) ran the encoder self-check FIRST, against the
-			// frozen legacy pair now in `cmd/v767-corpus-build/testdata/` —
+			// frozen legacy pair now in `cmd/agility-corpus-build/testdata/` —
 			// it still reproduces the June artifact `8e7c5232…` at 9236 B.
 			// Re-pinning on the output of an unproven encoder is how a build
 			// tool mints its own oracle.
 			ExpectedSHA: "b5484e84dd2cddfa7d3cc8a041deba92cb29615aedb2180e31d8b6910ac5b648",
 			Copies: []Copy{
-				{"v767 (versioned)", Root + "/v767/conformance-vectors-v1.diag", Root + "/v767/conformance-vectors-v1.cbor"},
-				{"crypto-agility (public release form)", Root + "/crypto-agility/agility-vectors-v1.diag", Root + "/crypto-agility/agility-vectors-v1.cbor"},
+				{"crypto-agility (public release form)", Root + "/crypto-agility/agility-vectors.diag", Root + "/crypto-agility/agility-vectors.cbor"},
 			},
 		},
 		{

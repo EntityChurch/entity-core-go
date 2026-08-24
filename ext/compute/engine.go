@@ -407,7 +407,7 @@ func (e *Engine) reEvaluate(expressionURI, subgraphPath string, evt store.TreeCh
 		SubgraphRoot:         sgData.RootExpressionPath,
 	}
 
-	budget := reactiveBudget(grantEnt, e.store)
+	budget := reactiveBudget(grantEnt)
 	scope := NewScope()
 
 	result, evalErr := Evaluate(expression, scope, budget, evalCtx)
@@ -1005,11 +1005,13 @@ func deterministicID(rootPath string) string {
 	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest[:]))
 }
 
-// reactiveBudget creates a budget for reactive re-evaluation per §7.4.
-func reactiveBudget(installationGrant entity.Entity, cs store.ContentStore) *Budget {
+// reactiveBudget creates a budget for reactive re-evaluation per §7.4. The
+// installation token is the cap under which the continuation was installed; its
+// grant-level compute constraints (ENTITY-CORE-PROTOCOL §5) bound the re-eval.
+func reactiveBudget(installationToken entity.Entity) *Budget {
 	ops := DefaultMaxOps
 	depth := DefaultMaxDepth
-	capOps, capDepth := extractComputeConstraints(installationGrant, cs)
+	capOps, capDepth := computeConstraintsOfToken(installationToken)
 	if capOps > 0 && capOps < ops {
 		ops = capOps
 	}

@@ -270,58 +270,55 @@ func invokeClosure(closureEnt entity.Entity, args []interface{}, scope *Scope, b
 	return Evaluate(bodyTarget, newScope, budget, ctx)
 }
 
-// isEvalLimitCode reports whether a compute/error code is an EVALUATION-LIMIT
-// abort — the evaluator hitting a resource ceiling — as distinct from a
-// value-error the program computed. The limit codes PROPAGATE everywhere,
-// including map's otherwise-contained closure-result position (below):
+// isShortCircuitLimitCode reports whether a compute/error code SHORT-CIRCUITS
+// even in an otherwise-contained closure-result position — map's output element,
+// fold's accumulator. The discriminator (arch §8, PROPOSAL-COMPUTE-CLOSURE-RESULT-
+// POSITIONS §8.1–§8.3, EXTENSION-COMPUTE 3.27 D5) is NOT "limit-ness" and NOT the
+// two-against-one vote — it is one sentence of §5.1: a counter that is NOT restored
+// on unwind makes element i's outcome a function of elements 1…i−1, which a
+// contained result would fork across peers:
 //
-//   - a limit reached is not "a poisoned value OF the element type" (§1.5's NaN
-//     analogy describes a computed value like division_by_zero, not a resource
-//     ceiling the evaluator signalled about the whole computation); and
-//   - budget_exhausted specifically FORKS cross-impl if contained — Evaluate
-//     decrements the shared, cumulative Operations budget once per call
-//     (eval.go:60, never restored), so a map that contains it and keeps looping
-//     yields [be, be, …] at a shifted final budget, where one that propagates
-//     yields a single be. That is exactly the §5.1/§5.4 budget-determinism
-//     boundary two conformant peers must agree on.
+//   - budget_exhausted (§8.1): `operations` is decremented once per evaluate()
+//     and NEVER restored, and §10.4 makes memoization impl-defined, so two
+//     conformant peers with identical IR/inputs/budget can exhaust at a different
+//     element. Contained, that yields [v₁…v_{k−1}, E, E, …] with a different k
+//     per peer — different boundary bytes for one program (§8.1 determinism MUST,
+//     AE-1). And a well-formed array of contained budget_exhausted is a
+//     successful-looking result for an evaluation the peer ABORTED. SHORT-CIRCUITS.
+//   - cascade_limit (§8.2): the §7.3 counter is shared across the entire causal
+//     chain (chain_id, cross-peer) and reaching it FREEZES the subgraph; a
+//     well-formed array reporting element-wise cascade_limit values for a
+//     structurally-halted computation is exactly what §7.3 refuses. SHORT-CIRCUITS.
 //
-// go's lead call (spec-issue 2026-08-21-b): the three limit codes propagate,
-// every other code — the produced value-errors, incl. permission_denied and
-// scope_unreachable, which §685/N8 already rule are error VALUES — contains. If
-// a sibling or arch reads the limit set differently, that is the next round, a
-// named divergence, not a silent one.
-func isEvalLimitCode(code string) bool {
+// depth_exceeded is NOT here (§8.3): `depth` is restored on unwind (§5.1's own
+// parenthetical), so it is element-local — map(f,xs) where f recurses too deep on
+// element 2 yields [a, E, c], the §1.5 NaN model. It CONTAINS like any other error
+// and needs no carve-out at all. rust and py were right and go was the 1-of-3
+// outlier; the spec arbitrates against go here (§8.3, ruling h §2).
+func isShortCircuitLimitCode(code string) bool {
 	switch code {
-	case ErrBudgetExhausted, ErrDepthExceeded, ErrCascadeLimit:
+	case ErrBudgetExhausted, ErrCascadeLimit:
 		return true
 	}
 	return false
 }
 
 // containOrPropagate implements the §2.4 provenance-independence boundary (arch
-// C-8 ruling 172589e) at a CONTAINED closure-result position — map's output
-// element and fold's accumulator, the two places a primitive PLACES a closure
-// result without reading it. A MINTED *ComputeError (the closure body raised)
-// must produce the same contained bytes as a value-form compute/error that flowed
-// in on the success path, so it is converted to its entity form and returned as a
-// value with a nil error. The ONE exception is an eval-limit abort
-// (isEvalLimitCode — budget/depth/cascade): a resource ceiling the evaluator
-// signalled about the whole computation is not a value of the element type, so it
-// PROPAGATES. A non-*ComputeError infra failure (corrupt/unresolvable closure)
-// also propagates.
+// C-8 ruling 172589e) for the MINTED arm of a CONTAINED closure-result position —
+// map's output element and fold's accumulator, the two places a primitive PLACES a
+// closure result without reading it. A MINTED *ComputeError (the closure body
+// raised) must produce the same contained bytes as a value-form compute/error that
+// flowed in on the success path, so it is converted to its entity form and returned
+// as a value with a nil error. The ONE exception is a short-circuit eval-limit code
+// (isShortCircuitLimitCode — budget_exhausted / cascade_limit, §8.1/§8.2): those
+// short-circuit even here. depth_exceeded contains like any other error (§8.3). A
+// non-*ComputeError infra failure (corrupt/unresolvable closure) also propagates.
 //
-// Callers pass a NON-NIL err from invokeClosure/Evaluate and branch:
-//
-//	contained, perr := containOrPropagate(err)
-//	if perr != nil { return nil, perr }   // eval-limit abort or infra failure
-//	v = contained                          // minted error → contained value
-//
-// This is the single implementation of a boundary-hash-determining rule shared by
-// map and fold; keep it that way (charter: a hash-determining concept implemented
-// in more than one place MUST share the implementation).
+// Prefer containClosureResult, which unifies BOTH arms; call this directly only
+// where the value form cannot occur.
 func containOrPropagate(err error) (interface{}, error) {
 	ce, ok := err.(*ComputeError)
-	if !ok || isEvalLimitCode(ce.Code) {
+	if !ok || isShortCircuitLimitCode(ce.Code) {
 		return nil, err
 	}
 	errEnt, eerr := ce.ToEntity()
@@ -329,6 +326,35 @@ func containOrPropagate(err error) (interface{}, error) {
 		return nil, eerr
 	}
 	return errEnt, nil
+}
+
+// containClosureResult is the SINGLE boundary-hash-determining rule for a contained
+// closure-result position, covering BOTH arms symmetrically (arch §8.4 / D6 /
+// SA-PY-25: the disposition is keyed on the CODE, never the variant — a value-form
+// budget_exhausted short-circuits exactly as a minted one does, because §2.4 makes
+// "two errors with the same code the same materialized entity"). Callers pass the
+// (value, err) pair a closure/Evaluate returned:
+//
+//		contained, perr := containClosureResult(v, err)
+//		if perr != nil { return nil, perr }   // short-circuit (limit code) or infra failure
+//		v = contained                          // ordinary error contained, or plain value
+//
+//	  - err != nil (MINTED arm): delegate to containOrPropagate.
+//	  - err == nil, v is a value-form compute/error whose code short-circuits
+//	    (§8.4): short-circuit it, returning the *ComputeError so map/fold abort.
+//	  - otherwise: the value is contained unchanged (an ordinary value, or an
+//	    ordinary/ depth_exceeded compute/error placed as-is per the NaN model).
+//
+// Keep this the ONE implementation shared by map and fold (charter: a
+// hash-determining concept implemented in more than one place MUST share it).
+func containClosureResult(v interface{}, err error) (interface{}, error) {
+	if err != nil {
+		return containOrPropagate(err)
+	}
+	if ce, isErr := computeErrorFromValue(v); isErr && isShortCircuitLimitCode(ce.Code) {
+		return nil, ce
+	}
+	return v, nil
 }
 
 // builtinMap applies fn to each element of collection in index order, returns
@@ -358,16 +384,17 @@ func builtinMap(d types.ComputeApplyData, scope *Scope, budget *Budget, ctx *Eva
 	out := make([]interface{}, 0, len(arr))
 	for _, elt := range arr {
 		v, err := invokeClosure(fn, []interface{}{elt}, scope, budget, ctx)
-		if err != nil {
-			// A minted produced-error is contained as the output element; only an
-			// eval-limit abort (or a non-*ComputeError infra failure) propagates.
-			contained, perr := containOrPropagate(err)
-			if perr != nil {
-				return nil, perr
-			}
-			v = contained
+		// Both arms through the ONE boundary rule: a minted OR value-form error is
+		// contained as the output element (§1.5 NaN model), EXCEPT a short-circuit
+		// eval-limit code (budget_exhausted / cascade_limit) which aborts the whole
+		// map — keyed on the code, not on whether it was minted (§8.4/D6). A
+		// value-form budget_exhausted contained-here was the §2.4 provenance
+		// asymmetry the minted-only carve-out reinstated (CV-9c).
+		contained, perr := containClosureResult(v, err)
+		if perr != nil {
+			return nil, perr
 		}
-		out = append(out, v)
+		out = append(out, contained)
 	}
 	return out, nil
 }
@@ -437,26 +464,23 @@ func builtinFold(d types.ComputeApplyData, scope *Scope, budget *Budget, ctx *Ev
 	//
 	// `initial` is bound (contained), not consumed: a value-form error initial
 	// arrives as a value from Evaluate (err==nil); a minted one is contained the
-	// same way map's output element is (containOrPropagate). Only an eval-limit
-	// abort propagates. `collection`, by contrast, is CONSUMED — resolveCollection
-	// short-circuits a value-form error collection (§7.2), unchanged.
-	acc, err := Evaluate(initialTarget, scope, budget, ctx)
+	// same way map's output element is. Both arms go through containClosureResult,
+	// so an ordinary or depth_exceeded error is contained and a short-circuit
+	// eval-limit code (budget/cascade) aborts, keyed on the code (§8.4/D6).
+	// `collection`, by contrast, is CONSUMED — resolveCollection short-circuits a
+	// value-form error collection (§7.2), unchanged.
+	acc, err := containClosureResult(Evaluate(initialTarget, scope, budget, ctx))
 	if err != nil {
-		acc, err = containOrPropagate(err)
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 	for _, elt := range arr {
-		next, ierr := invokeClosure(fn, []interface{}{acc, elt}, scope, budget, ctx)
+		// Minted OR value-form closure result contained as the new accumulator
+		// (map's rule); only a short-circuit eval-limit code aborts. No short-circuit
+		// on an ordinary error acc — the closure may ignore it next iteration and
+		// recover (CV-8d).
+		next, ierr := containClosureResult(invokeClosure(fn, []interface{}{acc, elt}, scope, budget, ctx))
 		if ierr != nil {
-			// Minted closure result contained as the new accumulator (map's rule);
-			// an eval-limit abort propagates. No short-circuit on an error acc — the
-			// closure may ignore it on the next iteration and recover.
-			next, ierr = containOrPropagate(ierr)
-			if ierr != nil {
-				return nil, ierr
-			}
+			return nil, ierr
 		}
 		acc = next
 	}

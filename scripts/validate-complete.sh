@@ -180,7 +180,7 @@ else
     echo "    REG-PEERISSUED-* vectors will skip rather than fail an unbuilt surface."
 fi
 
-# PASS 0 — the v767 conformance corpus, before any peer starts.
+# PASS 0 — the conformance corpora, before any peer starts.
 #
 # A-3, closed 2026-08-12. This is a STATIC artifact check: it decodes the
 # corpus, re-derives every crypto vector, and asserts the file sha. It needs no
@@ -208,7 +208,11 @@ fi
 # STANDARD.md §2.
 echo "==> PASS 0 — the conformance corpora (static; no peer)"
 RC0=0
-if [ -d "../entity-core-protocol/specs/test-vectors/v767" ]; then
+# Guard on the spec repo's test-vectors dir, NOT a single corpus subdir. The
+# crypto-agility corpus was de-versioned (v767/ deleted at core-protocol
+# b4ea610, ROUTING-2026-08-22-a); guarding on the parent covers both registered
+# corpora and cannot go silently stale when one corpus's dir name changes again.
+if [ -d "../entity-core-protocol/specs/test-vectors" ]; then
     set +e
     # ONE CONTRACT, EVERY CORPUS. `corpus-check` holds each registered corpus to
     # the same three assertions — artifact-is-expected (pinned sha),
@@ -229,7 +233,7 @@ if [ -d "../entity-core-protocol/specs/test-vectors/v767" ]; then
         # the agility corpus and re-derives all 13 vectors' hashes, signatures
         # and key material. Corpus-specific by nature — the contract is the
         # floor every corpus meets, this is the depth one corpus has.
-        go run ./cmd/v767-corpus-verify
+        go run ./cmd/agility-corpus-verify
         RC0=$?
     fi
     set -e

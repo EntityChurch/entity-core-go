@@ -44,7 +44,7 @@ import (
 // contested cross-impl), held until ruled.
 // A fresh SHA is a fresh cross-bless obligation: the 359 set has not yet been
 // three-way'd (rust/py locked the 352 set; 355/358 were never three-way'd either).
-const goldenCorpusSHA256 = "1844d231ffe52447afa5443336c11b56bd42d3ace02e7fb3e1f1ed0768799927"
+const goldenCorpusSHA256 = "8d2f55c80b0990d4fd94a99d21810b5c31568d38d6562f11188520c03a6dd5c0"
 
 const frozenCorpusPath = "testdata/compute-corpus-v1.cbor"
 
