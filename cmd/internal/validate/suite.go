@@ -32,6 +32,15 @@ type ValidationSuite struct {
 	identityName  string // if set, use named identity from ~/.entity/identities/
 	verbose       bool   // if set, trace wire exchanges to stderr
 	pollURL       string // if set, run serving_mode tests against this HTTP poll URL
+
+	// peerIssuedBundle is a `-wire` fixture bundle directory from
+	// cmd/peerissued-fixtures. When set, the peer_issued category serves it
+	// as a static registry on peerIssuedAddr and drives the six vectors
+	// against the target — which MUST have been started with
+	// `--peer-issued-registry <registry_pid>@http://<peerIssuedAddr>`.
+	// Empty makes the category SKIP.
+	peerIssuedBundle string
+	peerIssuedAddr   string
 	profile       string // V7 v7.72 §9.0 conformance profile: "core" or "full"; default "full" (back-compat)
 	httpPeers     []string // if set in convergence mode, HTTP listener URLs paired by index with peer addresses; enables the R1 cross-peer-subscription-over-HTTP gate
 	wsPeers       []string // if set in convergence mode, WebSocket-live URLs paired by index with peer addresses; Thread F substrate gate for §6.5.2b. When wsPeers[i] is set it preempts httpPeers[i] in transportProfileForPeer (lex-sort puts ws after http after tcp).
@@ -162,6 +171,26 @@ func (s *ValidationSuite) effectiveDeclaredMaxChainDepth() int {
 func (s *ValidationSuite) SetPollURL(url string) {
 	s.pollURL = url
 }
+
+// SetPeerIssuedFixture arms the peer_issued category with a `-wire` fixture
+// bundle to serve as a pinned registry, and the address to serve it on.
+//
+// The address is not discovered — it is agreed in advance, because the
+// TARGET peer has to be started with the registry already pinned. That is
+// possible only because the registry's peer-id is a deterministic constant
+// of the bundle generator's fixed seed, so both sides can name it before
+// either exists. Default addr when empty: 127.0.0.1:9401.
+func (s *ValidationSuite) SetPeerIssuedFixture(bundleDir, addr string) {
+	s.peerIssuedBundle = bundleDir
+	s.peerIssuedAddr = addr
+	if s.peerIssuedAddr == "" {
+		s.peerIssuedAddr = defaultPeerIssuedFixtureAddr
+	}
+}
+
+// defaultPeerIssuedFixtureAddr is the agreed default the validator serves
+// the fixture registry on and validate-complete.sh pins the target to.
+const defaultPeerIssuedFixtureAddr = "127.0.0.1:9401"
 
 // newClient creates a PeerClient using the suite's identity setting.
 func (s *ValidationSuite) newClient() (*PeerClient, error) {
@@ -615,14 +644,14 @@ func (s *ValidationSuite) Run(ctx context.Context) (*Report, error) {
 
 	// Category 39: PROPOSAL-PEER-ISSUED-REGISTRY-BACKEND §6 — six vectors
 	// covering the peer-issued backend's resolve / verify / revocation /
-	// expiry / precede / offline-not-found paths. v1 vectors all SKIP with
-	// explicit reasoning — the Backend itself is unit-tested in
-	// ext/registry/peerissued (8 vectors); wire-level vectors against an
-	// external peer need fixture orchestration (start the target with
-	// --peer-issued-registry pinning a registry identity the validator
-	// also controls). Wire vectors land in the Keystone leg per
-	// HANDOFF-PEER-ISSUED-REGISTRY-BACKEND-IMPL §7.
-	runCat(catPeerIssued, func() []CheckResult { return runPeerIssued() })
+	// expiry / precede / offline-not-found paths, driven over the WIRE
+	// against the live target. The validator serves the fixture registry
+	// itself (peer_issued_fixture.go) and the target is started with
+	// --peer-issued-registry pinning it; -peer-issued-bundle arms the pair.
+	// Unarmed, the vectors SKIP with the exact invocation needed.
+	runCat(catPeerIssued, func() []CheckResult {
+		return runPeerIssued(ctx, client, s.peerIssuedBundle, s.peerIssuedAddr)
+	})
 
 	// Category 40: EXTENSION-ENCRYPTION v1.0 — 10 vectors covering self/peer/
 	// group encrypt-decrypt round-trips, the F2-1 group key-commitment
@@ -893,7 +922,7 @@ func (s *ValidationSuite) RunCategory(ctx context.Context, category string) (*Re
 	case catPublishFetchHTTPPoll:
 		report.AddAll(runPublishFetchHTTPPoll(ctx))
 	case catPeerIssued:
-		report.AddAll(runPeerIssued())
+		report.AddAll(runPeerIssued(ctx, client, s.peerIssuedBundle, s.peerIssuedAddr))
 	case catEncryption:
 		report.AddAll(runEncryption(ctx, client))
 	case catConvergentMirror:

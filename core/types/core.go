@@ -611,13 +611,19 @@ func RegisterCoreTypes(r *TypeRegistry) {
 	r.OverrideField(TypeTypeCompatibleRequest, "type_b", FieldSpec{TypeRef: TypeTreePath})
 	r.OverrideField(TypeTypeCompatibilityReport, "type_a_path", FieldSpec{TypeRef: TypeTreePath})
 	r.OverrideField(TypeTypeCompatibilityReport, "type_b_path", FieldSpec{TypeRef: TypeTreePath})
-	r.OverrideField(TypeTypeConvergeRequest, "type_paths",
-		FieldSpec{ArrayOf: &FieldSpec{TypeRef: TypeTreePath}})
+	// NOTE: converge-request.type_paths and reconcile-request.type_paths are
+	// deliberately NOT re-overridden here. Both were already set above with the
+	// same element type PLUS their §4 min_count(2) constraint, and OverrideField
+	// REPLACES the whole FieldSpec — so a second, constraint-less override
+	// silently dropped the constraint from the published descriptor. Go declared
+	// the constraint and then advertised a descriptor without it; the divergence
+	// was invisible because the type-descriptor differ compared shape only and
+	// blamed the resulting hash mismatch on "a CBOR encoding edge". Found
+	// 2026-08-07 by fixing that differ and noticing entity-core-py published the
+	// constraint Go did not.
 	r.OverrideField(TypeTypeAdoptRequest, "source_path", FieldSpec{TypeRef: TypeTreePath})
 	r.OverrideField(TypeTypeAdoptRequest, "local_name",
 		FieldSpec{TypeRef: TypeTypeName, Optional: true})
-	r.OverrideField(TypeTypeReconcileRequest, "type_paths",
-		FieldSpec{ArrayOf: &FieldSpec{TypeRef: TypeTreePath}})
 	r.OverrideField(TypeTypeReconcileResult, "reconciled_type", FieldSpec{TypeRef: TypeCoreEntity})
 	r.OverrideField(TypeTypeReconcileResult, "sources",
 		FieldSpec{ArrayOf: &FieldSpec{TypeRef: TypeTreePath}})

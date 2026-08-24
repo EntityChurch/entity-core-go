@@ -32,10 +32,26 @@ func main() {
 	listCategories := flag.Bool("list-categories", false, "print every validation category, one per line, and exit")
 	reference := flag.String("reference-peer", "", "known-good reference peer (host:port) for origination (A-role) tests; single-peer mode cannot catch outbound-dispatch bugs without it")
 	pollURL := flag.String("poll-url", "", "HTTP poll URL prefix (e.g. http://127.0.0.1:9201) — enables the serving_mode category; peer must be started with --http-poll-addr and --serve-namespace system/content/public")
+	peerIssuedBundle := flag.String("peer-issued-bundle", "", "PROPOSAL-PEER-ISSUED-REGISTRY-BACKEND §6 — directory of a `-wire` fixture bundle (`go run ./cmd/peerissued-fixtures -wire -out <dir>`). The validator serves it as a static peer-issued registry on -peer-issued-addr and drives the six REG-PEERISSUED-* vectors against the target, which MUST have been started with `--peer-issued-registry <registry_pid>@http://<peer-issued-addr>`. The registry peer-id is a deterministic constant printed in the bundle's MANIFEST.json, so the target can be pinned before this server exists. Empty makes the peer_issued category SKIP.")
+	peerIssuedAddr := flag.String("peer-issued-addr", "127.0.0.1:9401", "address the -peer-issued-bundle fixture registry listens on. Must match the URL the target peer was pinned to via --peer-issued-registry.")
 	verbose := flag.Bool("verbose", false, "show wire request/response traces on stderr")
-	timeout := flag.Duration("timeout", 60*time.Second, "overall timeout")
+	// 10 minutes, not 60s. The old default was SMALLER THAN A FULL RUN TAKES: a
+	// fully-configured Go run is ~59s and a python run ~30–60s, so the budget
+	// expired mid-suite and every remaining category was recorded as
+	// "budget_exhausted" — silently untested while the run still printed a
+	// number. That is the whole explanation for the run-to-run instability we
+	// chased as peer degradation on 2026-08-07 (totals wandering 1542 / 1494 /
+	// 1443 / 1297 against the same peer, and python's 1429 → 1309 → 1136): a
+	// slower peer pushed more categories past the window, so the suite tested
+	// LESS and said so only in a per-category skip nobody was reading.
+	//
+	// The timeout does not need to double as a performance gate — RuntimeBudgetMs
+	// already warns on a slow run without dropping coverage. Its only job is to
+	// stop a hung peer hanging the suite forever, and 10 minutes does that while
+	// leaving every category room to run.
+	timeout := flag.Duration("timeout", 10*time.Minute, "overall timeout — must exceed the whole run; categories past it are recorded as untested, never silently dropped")
 	failuresOnly := flag.Bool("failures-only", false, "show only failed/skipped/warned checks (suppresses passing checks)")
-	exclude := flag.String("exclude", "", "comma-separated categories to exclude from output (e.g., local_files,origination)")
+	exclude := flag.String("exclude", "", "comma-separated selectors to exclude from output — either a whole category (local_files) or a single check (serving_mode.content_get_out_of_scope_404). Prefer the check form: excluding a category to silence a handful of checks stops scoring every other check in it, which is how a peer failing all of closure-scope serving still reported 0 failures.")
 	allowSkip := flag.String("allow-skip", "", "comma-separated check names that are allowed to skip without failing the PASS/FAIL gate. Use when a skip is intentional (test requires a setup the current run isn't exercising). Default: every skip is treated as a FAIL.")
 	corpus := flag.String("corpus", "", "ECF conformance corpus path (.cbor produced by wire-conformance build-fixture). Required when -category=conformance.")
 	hashFormat := flag.String("hash-format", "", "preferred content_hash_format for the hello advertisement (sha256 or sha384). When unset, advertises only sha256 (matches v7.66 default). Set to sha384 when probing a peer started with --hash-type sha384 so negotiation lands on sha384 and locally-authored test entities (delivery tokens, comparison blobs, hash-gate constants) match the peer's substrate format.")
@@ -193,6 +209,9 @@ func main() {
 		if *pollURL != "" {
 			suite.SetPollURL(*pollURL)
 		}
+		if *peerIssuedBundle != "" {
+			suite.SetPeerIssuedFixture(*peerIssuedBundle, *peerIssuedAddr)
+		}
 		suite.SetProfile(*profile)
 		suite.SetDeclaredMaxPayload(*declaredMaxPayload)
 		suite.SetDeclaredMaxChainDepth(*declaredMaxChainDepth)
@@ -211,11 +230,11 @@ func main() {
 
 	// Apply output filters.
 	if *exclude != "" {
-		excludeCats := make(map[string]bool)
-		for _, cat := range strings.Split(*exclude, ",") {
-			excludeCats[strings.TrimSpace(cat)] = true
+		excludeSel := make(map[string]bool)
+		for _, sel := range strings.Split(*exclude, ",") {
+			excludeSel[strings.TrimSpace(sel)] = true
 		}
-		report.ExcludeCategories(excludeCats)
+		report.ExcludeCategories(excludeSel)
 	}
 
 	report.Finalize()

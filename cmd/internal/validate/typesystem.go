@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"go.entitychurch.org/entity-core-go/core/ecf"
+	"go.entitychurch.org/entity-core-go/core/entity"
+	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/types"
 )
 
@@ -79,7 +81,12 @@ func runTypeSystem(ctx context.Context, client *PeerClient) []CheckResult {
 		// core floor are treated as provisional (matched-if-present,
 		// not-a-FAIL-if-absent). Same precedent shape as the
 		// system/substitute/* family — see isProvisionalType.
-		provisional := isProvisionalType(localDef.Name) ||
+		// §6.7 is OPTIONAL as a whole (§12.3) and, per the 2026-08-07 ruling
+		// (arch `c78b3dc`, MUST), a peer that declines it does not owe its
+		// types. Same carve-out shape, different reason: these are ratified,
+		// not proposal-stage.
+		optionalSection := section67TypesOnly([]string{localDef.Name})
+		provisional := isProvisionalType(localDef.Name) || optionalSection ||
 			(coreOnly && !inCoreTypeFloor(localDef.Name))
 
 		r.Run(prefix+"_fetch", func() CheckOutcome {
@@ -94,6 +101,15 @@ func runTypeSystem(ctx context.Context, client *PeerClient) []CheckResult {
 				if provisional {
 					provisionalMissing = append(provisionalMissing, localDef.Name)
 					reason := "provisional (proposal-stage) type — conformant; not part of ratified-core floor (R1)"
+					if optionalSection {
+						// NOTE the limit of this check: it cannot see whether the
+						// peer actually OFFERS §6.7. A peer that ships the
+						// operations but omits their types is under-reported here.
+						// The operations themselves are scored by the
+						// `reachability` category, which is where offering-without-
+						// vocabulary would surface.
+						reason = "EXTENSION-NETWORK §6.7 (reachability facts) is OPTIONAL as a whole (§12.3), and a peer that declines the section does not owe its types — ruled 2026-08-07 (arch c78b3dc, MUST): a type is owed by the surface that uses it. Absence here is conformant, not a gap"
+					}
 					if coreOnly && !inCoreTypeFloor(localDef.Name) {
 						reason = "outside V7 v7.72 §9.5 Core Type Floor — matched-if-present under --profile core, not-a-FAIL-if-absent"
 					}
@@ -170,6 +186,27 @@ func runTypeSystem(ctx context.Context, client *PeerClient) []CheckResult {
 		if len(missingNames) == 0 {
 			return PassCheck(fmt.Sprintf("all %d %s types fetchable from remote%s", presentCount, floorTag, note))
 		}
+		// RULED 2026-08-07 (arch `c78b3dc`, NETWORK §12.3, MUST): **a type is owed
+		// by the surface that uses it.** A peer that declines an OPTIONAL section
+		// installs none of its operations and therefore does NOT owe that
+		// section's types — declining §6.7 declines `system/network/candidate`,
+		// `check-reachability-result` and `observe-address-result` with it. This
+		// follows core §9.5 ("absence of extension handlers means absence of their
+		// types") one level down, at the section.
+		//
+		// This was a FAIL while the question was open — deliberately, since
+		// over-reporting is the safe direction pending a ruling. It is now settled
+		// the other way, so it PASSes: charging a conformance penalty for
+		// exercising an option §12.3 explicitly grants would make "offering
+		// neither is fully conformant" false. This withdrew 7 failures against
+		// entity-core-py with no code change on their side.
+		//
+		// Consumer half of the same ruling, enforced elsewhere: support is
+		// discovered from the OPERATION'S RESPONSE (403-or-unimplemented → try
+		// another reflector), never from the presence or absence of these types.
+		if declined := section67TypesOnly(missingNames); declined {
+			return PassCheck(fmt.Sprintf("all %d %s types fetchable from remote%s — the %d absent type(s) %v are EXTENSION-NETWORK §6.7's, and this peer declines §6.7, which per the 2026-08-07 §12.3 ruling declines its types with it (not owed, not a gap)", presentCount, floorTag, note, len(missingNames), missingNames))
+		}
 		return FailCheck(fmt.Sprintf("%d %s types missing from remote: %v%s", len(missingNames), floorTag, missingNames, note))
 	})
 
@@ -230,6 +267,25 @@ func compareTypeDefsOutcome(local, remote types.TypeDefinition) CheckOutcome {
 	failIssues = append(failIssues, f...)
 	warnIssues = append(warnIssues, w...)
 
+	// §3.3 field constraints are part of the descriptor and therefore part of
+	// its content hash, but they are NOT part of the shape comparison above —
+	// fieldSpecsEqual deliberately compares only the shape (type_ref, optional,
+	// array/map/union, byte_size). Without this pass a descriptor that differs
+	// ONLY in its constraints hashes differently and reports zero structural
+	// differences, which this function then attributed to "likely a CBOR
+	// encoding edge" — sending every reader of the report hunting an encoder
+	// determinism bug that does not exist. That misdiagnosis was live against
+	// both siblings on exactly the five built-ins where Go publishes the spec's
+	// constraints (arch Q4 / v7.78: spec-defined built-ins SHOULD reflect with
+	// their spec constraints), so the false signal was reproducible and
+	// cohort-wide.
+	//
+	// Severity stays WARN regardless of the field's optionality: reflecting
+	// spec constraints on built-ins is a SHOULD, and user-defined types are
+	// divergence-tolerant per §1.5 Invariant 5. This pass changes what the
+	// report SAYS, never how hard it bites.
+	warnIssues = append(warnIssues, compareFieldConstraints(local.Fields, remote.Fields)...)
+
 	if len(failIssues) > 0 {
 		return FailCheck(fmt.Sprintf("%d interop-breaking issue(s): %v (warn-level diffs also: %v)",
 			len(failIssues), failIssues, warnIssues))
@@ -240,6 +296,65 @@ func compareTypeDefsOutcome(local, remote types.TypeDefinition) CheckOutcome {
 	}
 	return WarnCheck(fmt.Sprintf("content hash mismatch with no structural differences detected — likely a CBOR encoding edge (local: %s, remote: %s)",
 		localEnt.ContentHash, remoteEnt.ContentHash))
+}
+
+// compareFieldConstraints reports per-field EXTENSION-TYPE §3.3 constraint
+// divergence. Constraints are compared as a multiset of constraint entities
+// keyed by content hash — order is not significant — and reported by their type
+// URI, because "the one_of is missing" is the actionable sentence and a bare
+// hash is not.
+func compareFieldConstraints(local, remote map[string]types.FieldSpec) []string {
+	names := make([]string, 0, len(local))
+	for name := range local {
+		names = append(names, name)
+	}
+	for name := range remote {
+		if _, both := local[name]; !both {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+
+	var issues []string
+	for _, name := range names {
+		missing, extra := constraintSetDiff(local[name].Constraints, remote[name].Constraints)
+		switch {
+		case len(missing) > 0 && len(extra) > 0:
+			issues = append(issues, fmt.Sprintf("field %q: constraints differ — local-only %v, remote-only %v", name, missing, extra))
+		case len(missing) > 0:
+			issues = append(issues, fmt.Sprintf("field %q: constraint(s) %v present locally, absent remotely", name, missing))
+		case len(extra) > 0:
+			issues = append(issues, fmt.Sprintf("field %q: constraint(s) %v present remotely, absent locally", name, extra))
+		}
+	}
+	return issues
+}
+
+// constraintSetDiff returns the constraint types present only in a and only in
+// b, matching on content hash so a semantically identical constraint declared in
+// a different position is not reported as a difference.
+func constraintSetDiff(a, b []entity.Entity) (onlyA, onlyB []string) {
+	index := func(set []entity.Entity) map[hash.Hash]string {
+		m := make(map[hash.Hash]string, len(set))
+		for _, c := range set {
+			m[c.ContentHash] = c.Type
+		}
+		return m
+	}
+	ai, bi := index(a), index(b)
+	for h, typ := range ai {
+		if _, ok := bi[h]; !ok {
+			onlyA = append(onlyA, typ)
+		}
+	}
+	for h, typ := range bi {
+		if _, ok := ai[h]; !ok {
+			onlyB = append(onlyB, typ)
+		}
+	}
+	sort.Strings(onlyA)
+	sort.Strings(onlyB)
+	return onlyA, onlyB
 }
 
 // compareFieldDiffs compares field maps and partitions the differences:
@@ -377,4 +492,27 @@ func sanitizeName(name string) string {
 		}
 	}
 	return string(result)
+}
+
+// section67TypesOnly reports whether every missing type belongs to
+// EXTENSION-NETWORK §6.7 — the optional reachability-facts section.
+//
+// Since the 2026-08-07 §12.3 ruling (arch `c78b3dc`) this SUPPRESSES the
+// failure rather than merely annotating it: an OPTIONAL section's types are
+// owed only if the section is offered.
+func section67TypesOnly(missing []string) bool {
+	if len(missing) == 0 {
+		return false
+	}
+	section67 := map[string]bool{
+		"system/network/candidate":                 true,
+		"system/network/check-reachability-result": true,
+		"system/network/observe-address-result":    true,
+	}
+	for _, name := range missing {
+		if !section67[name] {
+			return false
+		}
+	}
+	return true
 }

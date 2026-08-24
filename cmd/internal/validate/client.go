@@ -1393,6 +1393,30 @@ func (c *PeerClient) TreePut(ctx context.Context, path string, ent entity.Entity
 	return ent.ContentHash, nil
 }
 
+// TreeRemove unbinds a tree path. The wire form is a `tree:put` carrying no
+// entity — V7 §3.9 / core/tree.CreatePutRequest(path, nil) — which the
+// handler treats as a removal. Returns the response status so a caller can
+// distinguish "removed" (200) from "was not bound" (404); both are fine when
+// clearing state that may or may not be present.
+func (c *PeerClient) TreeRemove(ctx context.Context, path string) (uint, error) {
+	params, resource, err := tree.CreatePutRequest(path, nil)
+	if err != nil {
+		return 0, fmt.Errorf("create remove request: %w", err)
+	}
+
+	uri := fmt.Sprintf("entity://%s/system/tree", c.remotePeerID)
+	env, _, err := c.SendExecute(ctx, uri, "put", params, resource)
+	if err != nil {
+		return 0, err
+	}
+
+	respData, err := types.ExecuteResponseDataFromEntity(env.Root)
+	if err != nil {
+		return 0, fmt.Errorf("decode response: %w", err)
+	}
+	return respData.Status, nil
+}
+
 // TreePutCAS stores an entity at the given tree path conditionally on the
 // current binding matching expectedHash (V7 §3.9). Returns the response status
 // (200 success, 409 mismatch, others on protocol error) so callers can assert

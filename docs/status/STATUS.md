@@ -1,6 +1,6 @@
 # entity-core-go — status
 
-_Updated: 2026-08-05 · public: v0.8.0 (master)_
+_Updated: 2026-08-07 · public: v0.8.0 (master)_
 
 ## Where it is
 
@@ -234,6 +234,176 @@ browser leg is one box and it is `entity-browser-rust`'s.
 The v1.x protocol cycle (Tier-2 dispatch-fallback to the byte-identical-envelope
 bar, paired with the encrypted-relay boundary) is queued behind this and
 unstarted.
+
+### 2026-08-07 — obligation 5, and two bugs that were ours
+
+**NETWORK §10.3 obligation 5 (single-flight establishment per peer) is built —
+and it was NOT the no-op it was routed to us as.** `entity-browser-rust` found
+the fan-in gap on the WebRTC leg (~470 deposits/side → 4) and arch folded it as a
+general MUST; the baton note asked us to "confirm `EnsureConnected` is
+single-flight, likely no-op." **Go had no fan-in gate at all.**
+`getRemoteConnection` double-checked the pool only *after* dialing, and the §10.3
+seam was consulted from three separate call sites downstream of it — so N
+concurrent dispatches to one unpooled peer meant N coordination exchanges against
+the shared node, each individually obligation-4-conformant. The exposure was
+never about ICE; it is a property of the connection pool, not the transport.
+
+Landed at `2c56da9`: one funnel (`establishRemote`) with the gate spanning **pool
+check → dial → seam**, because gating only the dial leaves N callers to fan into
+the seam the instant it fails. Waiters take the leader's result rather than
+re-establishing; the leader drops the map entry on publish, so the gate is
+bounded with no refcount. A pooled hit and §6.11 reentry reuse stay **outside**
+the gate deliberately — reentry establishes nothing, and its bounded §6.5 (b)
+grant wait would otherwise serialize concurrent originations. Six vectors in
+`core/peer/single_flight_test.go`, all `-race` clean, including the
+per-peer-not-global one that deadlocks if the gate is ever made global.
+
+**The §11.5 deposit-bound teeth are adopted** (the cohort S5 item browser-rust
+left to Go). `signaling_punch` counts offer deposits per side and FAILs above a
+fixed O(1) bound of 8 **even when a channel opened**. Go measures **2/1 per
+side** (node log corroborates: 3 `op=offer` total for one establishment) — below
+browser-rust's ~4/side because TCP simultaneous-open has no ICE restart or glare
+rollback. Fail path proven by driving the bound to 0.
+
+**Then the cross-impl sweep found two bugs, both Go's** (`72001f5`). Four
+descriptors had been reporting *"content hash mismatch with no structural
+differences — likely a CBOR encoding edge"* against both siblings. There is no
+encoding edge: `validate-peer`'s differ compared field **shape** only and never
+compared `FieldSpec.Constraints`, which are part of the descriptor and its hash.
+Our own oracle was telling the cohort to hunt an encoder bug that does not exist.
+Fixing the differ then exposed the second: `OverrideField` replaces the whole
+`FieldSpec`, and converge-request/reconcile-request `.type_paths` were registered
+with `min_count(2)` and then re-overridden constraint-free — **Go declared a
+constraint and published a descriptor without it.** Bug 2 hid bug 1, and no
+Go-only run could have caught either; it took **py publishing the constraint Go
+did not**. Two cross-impl divergences with py closed on our side; one *new*
+warning against rust appeared because Go's bug had been masking rust's identical
+gap.
+
+**Cross-impl state, all figures from freshly-started peers:**
+
+| Peer | Full profile | Excl. the Go-only signaling-node role |
+|---|---|---|
+| Go `72001f5` | **1406 P / 7 W / 0 F / 16 S** (baseline held) | — |
+| rust `e17c2ad` | 1381 P / 19 W / 13 F / 16 S | **6 F** — all §6.7 `check-reachability` + its 2 descriptors |
+| py `68c2faa` | 1376 P / 15 W / 22 F / 16 S | **15 F** — §6.7 both halves + 3 descriptors, and QUERY §5.5 grant narrowing |
+
+Reports: `docs/validation/reports/2026-08-07-{obligation-5-single-flight-go-confirmed-and-gate-teeth,crossimpl-full-suite-rust,crossimpl-full-suite-py}.md`.
+**py is not "unstarted" or far behind** — it trails rust by two well-defined
+additive features, neither touching the wire core. V3 Go↔Rust carriage re-crossed
+**6/6 cells both directions, reach 200**, against a `signaling-punch` rebuilt
+from rust's own `dev` (the on-disk binary predated their `f227df8`).
+
+**A harness finding worth acting on:** repeat validation runs against one live
+peer degrade it. On py the **test count itself shrinks** (1429 → 1309 → 1136) as
+categories bail; on Go elapsed climbs 8 s → 43 s over eight runs. A fresh peer
+restores it exactly. **Every published figure must come from a freshly-started
+peer** — every figure above does. One transient Go failure (run 4 of 8, `1405 P /
+1 F`) was not captured before it stopped reproducing; recorded rather than
+rounded away.
+
+### 2026-08-07 (b) — core-rust reviewed the above and 16 of those failures were ours
+
+**The sibling numbers in the section above are wrong and are superseded.**
+core-rust caught `reachability_dialback_posture` asserting "nothing else is
+conformant" besides 200/403 when **NETWORK §12.3 says a peer MAY offer
+`observe-address`, `check-reachability`, both, or neither, and an unimplemented
+response is fully conformant.** They were right, and checking whether it was one
+check or a class found the larger instance: **SIGNALING §2.1 — "the server role
+is OPTIONAL for a conformant implementation; the client role is the conformance
+surface"** — while `signaling_authority` FAILed on 404 and cascaded 6 dependents.
+Our own report called the node role optional *in prose while the tool emitted
+FAIL*; the prose does not travel, the number does.
+
+Fixed at `26c4332`: a §6.7 decline and a missing node role are now **SKIP** (not
+Pass — nothing was exercised, and a 200 → 501 regression must not read as green);
+every §6.7 MUST still binds a peer that answers (§12.1).
+
+| Peer | Published | Corrected | Whose |
+|---|---|---|---|
+| rust | 13 F | **0 F** (`1393 P / 13 W / 0 F / 23 S`) | 7 ours, 6 rust's real gaps — **which rust closed** |
+| py (tree unchanged — a pure oracle A/B) | 22 F | **13 F** (`1376 P / 15 W / 13 F / 25 S`) | all 9 ours |
+
+**35 failures published, 16 of them this validator.** rust's `check-reachability`
+now passes **on merit**, their six field constraints are adopted, and
+`durability/result.handle` matches at `system/tree/path?` — we were right, they
+corrected it. py's only *undisputed* remaining gap is the QUERY §5.5 grant
+narrowing (6); the other 7 are the §6.7 type descriptors, pending the ruling
+rust routed and we seconded at
+`docs/validation/spec-issues/2026-08-07-are-optional-section-types-owed.md` — if
+types follow their section, py drops to 6 F with no code change.
+
+**The bias, named so it recurs less.** This validator encodes *Go's* reading, Go
+implements both §6.7 ops and the node role, and a check written from a feature
+you already have quietly promotes "I implement this" into "you must" — invisible
+from our own seat because we pass it. Third oracle defect this cycle, and **all
+three were found by a sibling disagreeing with us**, not by our tests. Rule going
+forward: **a check may FAIL only on a MUST** — a SHOULD is a WARN, a MAY is a
+PASS or SKIP — and a FAIL against a surface Go implements must cite the MUST in
+its declaration string.
+
+Correction report:
+`docs/validation/reports/2026-08-07-b-correction-sixteen-of-those-failures-were-ours.md`.
+
+### 2026-08-07 (c) — the suite was not validating the full system
+
+Operator ruling, and it resets the bar: **this project implements everything.
+There is no luxury of a MAY.** An unimplemented surface is an untested surface,
+so optional-surface absence must never be waved through — it is a gap to close,
+not an exemption to take. The `-allow-skip` invitations the (b) cycle put into
+those messages are removed; the skips stay skips (honest: not exercised) and
+still count toward the FAIL gate.
+
+Auditing for other leaks found a much bigger one, and then its root cause.
+
+**1. The default invocation never ran ~113 checks.** `validate-peer -addr <a>`
+exercises **1429**; a fully-configured run exercises **1542**. The difference is
+whole surfaces — the LOCAL-FILES round-trip and frame-budget chunking, the
+published-root / manifest / HTTP-poll face, origination (the peer *dispatching*),
+§7a concurrent-reentry, and the §5.4/§4.1 liveness+reconnect vectors — each gated
+on a peer flag *and* a matching validator flag. Landed
+**`scripts/validate-complete.sh`**, which configures every surface in one command,
+plus a **COVERAGE** roll-up in the summary naming each unexercised surface and the
+switch that closes it. The per-check gate was already honest; nothing told you
+*what* never ran.
+
+**2. Root cause of the "instability" — and (b)'s harness finding was misdiagnosed.**
+`-timeout` defaulted to **60 s, less than a full run takes**. Past the window every
+remaining category was recorded `budget_exhausted` and skipped, so a slower peer
+tested *less* and printed a smaller total. That is the whole explanation for the
+totals wandering (1542 / 1494 / 1443 / 1297) and for py's 1429 → 1309 → 1136 — **not**
+peer state accumulation, which is what the (b) cycle published. Default raised to
+10 minutes; `RuntimeBudgetMs` still warns on a slow run without dropping coverage.
+Totals are now bit-stable across repeat runs. The py report's §5 carries the
+correction.
+
+**3. Two configuration findings the newly-run checks caught immediately.**
+`--serve-namespace` alongside `--publish-root` is **non-conformant** — §6.5.6
+Amendment 10 makes the closure of the signed root the serving floor once
+`signed_pointer` is advertised, and trie nodes are hash-linked not path-bound
+(V7 §1.7), so `v5_outbound_dial` and `v7_trie_closure_content_get` 404. And
+Amendment 10 and the §6.5.6 **T4 out-of-scope** checks cannot both be satisfied by
+one peer: closure scope leaves nothing out of scope to probe. That is a property
+of the spec surfaces, not a Go defect — so the script runs **two passes**
+(everything under `--serve-closure-root`, then `serving_mode` against a
+namespace-scoped peer) and every check runs where it means something.
+
+**Standing full-coverage result, reproducible and bit-stable:**
+
+| Pass | Result |
+|---|---|
+| 1 — all surfaces, closure scope | **1489 total — 1480 P / 3 W / 0 F / 6 S** |
+| 2 — `serving_mode`, namespace scope | **53 total — 53 P / 0 W / 0 F / 0 S** |
+| **Union** | **1542 checks, 0 failures** |
+
+The 7 registry failures seen mid-investigation were budget-exhaustion cascade, not
+defects — they pass under the corrected timeout. **The one real remaining gap is
+the 6 `peer_issued` wire vectors**, which need a fixture-pinned registry
+(`--peer-issued-registry <pid>@<url>`); the backend is unit-tested in
+`ext/registry/peerissued` (8 vectors) but the fixture wiring is the deferred
+Keystone leg. That is now the only thing standing between us and a run that
+exercises every surface — and it is named in COVERAGE on every run rather than
+sitting silent.
 
 ## Backlog
 

@@ -66,11 +66,16 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 		return pollURL + "/" + pid + "/" + path + servingModeListingSuffix
 	}
 
+	// Baseline the signed root BEFORE seeding, so `seed_republished` can tell a
+	// republish-since-the-bind from a root that was already sitting there.
+	baselineSeq, baselineRoot, baselineRootOK := fetchPublishedRoot(ctx, urlManifest())
+
 	// Declare every check up-front so anything we don't reach surfaces as
 	// FAIL rather than silently disappearing.
 
 	// seed
 	r.Declare("seed_in_scope", "Amendment 5 §6.4.2 — seed: in-scope binding via tree:put")
+	r.Declare("seed_republished", "Amendment 10 §6.5.6 timing ruling (arch c78b3dc, 2026-08-07) — the served closure tracks the CURRENT published-root.root_hash; the trigger is the root republishing, not the bare tree:put")
 	r.Declare("seed_out_of_scope", "Amendment 5 — seed: out-of-scope binding (not under served namespace)")
 
 	// CONTENT_GET — unchanged in Amendment 5
@@ -189,10 +194,65 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 		return PassCheck(fmt.Sprintf("seeded out-of-scope at %s", oosPath))
 	})
 
+	// --- the republish precondition (§6.5.6 Amendment 10 timing ruling) ---
+	//
+	// The served closure is the closure of `published-root.root_hash` AS IT
+	// STANDS NOW, and entities bound since the last publish become servable
+	// **at the republish** — arch ruling 2026-08-07 (`c78b3dc`), MUST.
+	//
+	// The trigger is the ROOT REPUBLISHING, not the bare `tree:put`. An entity
+	// written into the local trie but not yet carried into a re-signed
+	// published-root is outside the closure under BOTH readings that were live.
+	// So a bind-then-probe with no intervening republish asserts something the
+	// rule does not grant whichever way it went — which is exactly what this
+	// category used to do, and why its 42 cross-impl failures could not be
+	// trusted until re-run.
+	//
+	// If the peer never republishes, the in-scope closure surface is genuinely
+	// UNEXERCISED — so this SKIPs and the dependent probes propagate the skip,
+	// rather than FAILing peers for a precondition our harness never met. Not a
+	// spec violation, and not evidence the peer serves correctly either; both
+	// facts get stated.
+	r.Run("seed_republished", func() CheckOutcome {
+		if out, ok := r.Require("seed_in_scope"); !ok {
+			return out
+		}
+		deadline := time.Now().Add(servingModeRepublishWait)
+		sawAnyRoot := baselineRootOK
+		for {
+			seq, root, ok := fetchPublishedRoot(ctx, urlManifest())
+			if ok {
+				sawAnyRoot = true
+				if !baselineRootOK || seq > baselineSeq || root != baselineRoot {
+					return PassCheck(fmt.Sprintf(
+						"published-root republished after the bind (seq %d→%d, root %s…) — the seeded entity is inside the CURRENT root's closure, so the in-scope probes below test what §6.5.6 actually requires",
+						baselineSeq, seq, root.String()[:16]))
+				}
+			}
+			if time.Now().After(deadline) {
+				// No signed root at all → this peer serves the PATH-BOUND shape,
+				// not closure-of-signed-root. The timing ruling carves that out
+				// explicitly: "no timing rule is needed for the non-signed_pointer
+				// path-bound shape — path-binding is checked per request and is
+				// live by construction." So there is nothing to wait for and the
+				// in-scope probes are meaningful immediately. (This is the
+				// namespace-scoped configuration validate-complete.sh pass 2 uses.)
+				if !sawAnyRoot {
+					return PassCheck(
+						"peer advertises no signed published-root — it serves the path-bound shape, where §6.5.6's closure-timing rule does not apply (path-binding is checked per request and is live by construction). The in-scope probes below are evaluated directly.")
+				}
+				return SkipCheck(fmt.Sprintf(
+					"peer advertises a signed root but did not republish it within %s of the bind (still seq %d). Per the §6.5.6 Amendment 10 timing ruling the served closure tracks published-root.root_hash and an entity becomes servable AT the republish — so the in-scope closure probes cannot be evaluated here: a 404 would be conformant and a 200 would not prove recomputation. UNEXERCISED, not passing.",
+					servingModeRepublishWait, baselineSeq))
+			}
+			time.Sleep(servingModeRepublishPoll)
+		}
+	})
+
 	// --- CONTENT_GET in-scope ---
 
 	r.Run("content_get_in_scope_status", func() CheckOutcome {
-		if out, ok := r.Require("seed_in_scope"); !ok {
+		if out, ok := r.Require("seed_in_scope", "seed_republished"); !ok {
 			return out
 		}
 		hx := r.Load("in_scope_hash_hex").(string)
@@ -451,7 +511,7 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 	// --- TREE_GET entity (.bin) ---
 
 	r.Run("tree_entity_status", func() CheckOutcome {
-		if out, ok := r.Require("seed_in_scope"); !ok {
+		if out, ok := r.Require("seed_in_scope", "seed_republished"); !ok {
 			return out
 		}
 		bindingPath := r.Load("in_scope_binding_path").(string)
@@ -672,7 +732,7 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 	// --- TREE_GET listing (.list) ---
 
 	r.Run("tree_listing_status", func() CheckOutcome {
-		if out, ok := r.Require("seed_in_scope"); !ok {
+		if out, ok := r.Require("seed_in_scope", "seed_republished"); !ok {
 			return out
 		}
 		// List the served namespace itself — the §6.4.2 namespace where
@@ -796,7 +856,7 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 	// --- root + peers listings ---
 
 	r.Run("peer_root_listing_status", func() CheckOutcome {
-		if out, ok := r.Require("seed_in_scope"); !ok {
+		if out, ok := r.Require("seed_in_scope", "seed_republished"); !ok {
 			return out
 		}
 		resp, _, err := httpGet(ctx, urlPeerRoot(peerID))
@@ -826,6 +886,15 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 	})
 
 	r.Run("peers_list_status", func() CheckOutcome {
+		// peers.list is the universal-tree-root listing, so under closure scope
+		// it is only populated once the seeded bind is carried into the current
+		// signed root — same §6.5.6 timing precondition as the other in-scope
+		// probes. Without this gate a peer that simply has not republished 404s
+		// here and gets reported as a peers.list defect, which is the artifact
+		// the timing ruling exists to stop us manufacturing.
+		if out, ok := r.Require("seed_in_scope", "seed_republished"); !ok {
+			return out
+		}
 		resp, _, err := httpGet(ctx, urlPeersList())
 		if err != nil {
 			return FailCheck("GET peers.list: " + err.Error())
@@ -858,7 +927,7 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 	})
 
 	r.Run("peers_list_contains_peer", func() CheckOutcome {
-		if out, ok := r.Require("seed_in_scope", "peers_list_is_listing_type"); !ok {
+		if out, ok := r.Require("seed_in_scope", "seed_republished", "peers_list_is_listing_type"); !ok {
 			return out
 		}
 		ld := r.Load("peers_list_decoded").(types.ListingData)
@@ -908,7 +977,7 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 	})
 
 	r.Run("peers_list_surfaces_other_peer", func() CheckOutcome {
-		if out, ok := r.Require("multi_peer_publish_via_tree_put"); !ok {
+		if out, ok := r.Require("seed_republished", "multi_peer_publish_via_tree_put"); !ok {
 			return out
 		}
 		other := r.Load("other_peer_id").(string)
@@ -1029,6 +1098,34 @@ func runServingMode(ctx context.Context, client *PeerClient, pollURL string) []C
 }
 
 // storedResponse + httpGet + httpDo + preview reused from earlier impl.
+
+// How long to wait for the peer to carry a fresh bind into a re-signed
+// published-root. Generous: publishers debounce, and the cost of being too
+// impatient is a false SKIP that hides a real serving result.
+const (
+	servingModeRepublishWait = 10 * time.Second
+	servingModeRepublishPoll = 250 * time.Millisecond
+)
+
+// fetchPublishedRoot reads the peer's signed published-root off the Amendment 5
+// /manifest route and returns its seq + committed root hash. ok=false when the
+// peer publishes no root at all (404 is conformant there), which the caller
+// treats as "no baseline" rather than as an error.
+func fetchPublishedRoot(ctx context.Context, manifestURL string) (seq uint64, root hash.Hash, ok bool) {
+	resp, _, err := httpGet(ctx, manifestURL)
+	if err != nil || resp.StatusCode != http.StatusOK || len(resp.Body) == 0 {
+		return 0, hash.Hash{}, false
+	}
+	var ent entity.Entity
+	if err := ecf.Decode(resp.Body, &ent); err != nil {
+		return 0, hash.Hash{}, false
+	}
+	var pr types.PublishedRootData
+	if err := ecf.Decode(ent.Data, &pr); err != nil {
+		return 0, hash.Hash{}, false
+	}
+	return pr.Seq, pr.RootHash, true
+}
 
 type storedResponse struct {
 	StatusCode int

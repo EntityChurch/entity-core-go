@@ -83,9 +83,35 @@ const (
 	NegativeTTL    uint64 = 30_000
 )
 
-// fixedName — the same NFC name across every vector, so the cross-impl
+// cohortName — the same NFC name across every vector, so the cross-impl
 // gate has a single normalized-form pin.
-const fixedName = "billslab.com"
+const cohortName = "billslab.com"
+
+// wireMode makes every vector resolve a DISTINCT name.
+//
+// The cohort bundle deliberately puts all six vectors on one name so the
+// byte-equality gate has a single normalized-form pin. That is exactly wrong
+// for driving the vectors over the wire against one long-lived peer: the
+// peer-issued Backend runs `cacheOnResolve: true`, so RESOLVE-1 warms the
+// by-name cache and REVOKED-1 / EXPIRED-1 then resolve from that cache instead
+// of the wire — each vector silently measuring the previous one's leftovers.
+//
+// Distinct names let all six be served simultaneously from one fixture registry
+// and resolved in any order. PRECEDE-1 stays honest: it WANTS a warm cache, and
+// gets one by resolving its own name twice.
+//
+// The cohort bundle is unaffected — `-wire` is opt-in and the default output is
+// byte-identical to what it always was.
+var wireMode bool
+
+// nameFor returns the name a vector binds. One shared name in cohort mode; a
+// per-vector name in wire mode.
+func nameFor(vectorID string) string {
+	if !wireMode {
+		return cohortName
+	}
+	return strings.ToLower(vectorID) + "." + cohortName
+}
 
 type vectorOutcome struct {
 	Status      string  `json:"status"`
@@ -130,7 +156,9 @@ type manifest struct {
 
 func main() {
 	outDir := flag.String("out", "", "output directory (required)")
+	wire := flag.Bool("wire", false, "emit the WIRE-VECTOR bundle: one distinct name per vector, so all six can be served at once from a single fixture registry and driven against a live peer without cacheOnResolve contamination. Default (off) emits the cohort byte-equality bundle, where every vector shares one name as the NFC pin.")
 	flag.Parse()
+	wireMode = *wire
 	if *outDir == "" {
 		fmt.Fprintln(os.Stderr, "missing -out <dir>")
 		os.Exit(2)
@@ -192,7 +220,7 @@ func run(outDir string) error {
 	// RESOLVE-1 — happy path live-fetch.
 	{
 		body := types.BindingData{
-			Name:         fixedName,
+			Name:         nameFor("RESOLVE-1"),
 			Kind:         types.BindingKindPeerIssued,
 			TargetPeerID: fixTargetPeerID,
 			IssuedAt:     ClockIssuedAt,
@@ -217,7 +245,7 @@ func run(outDir string) error {
 			Mode:          "live",
 			Description:   "happy path — by-name → binding → verify against pinned key → resolved",
 			ClockMs:       ClockNowResolve,
-			Name:          fixedName,
+			Name:          nameFor("RESOLVE-1"),
 			BindingHash:   bh,
 			SignatureHash: hex.EncodeToString(sig.ContentHash.Bytes()),
 			ExpectedResult: vectorOutcome{
@@ -240,7 +268,7 @@ func run(outDir string) error {
 	// VERIFY-FAIL-1 — non-pinned signer.
 	{
 		body := types.BindingData{
-			Name:         fixedName,
+			Name:         nameFor("VERIFY-FAIL-1"),
 			Kind:         types.BindingKindPeerIssued,
 			TargetPeerID: "2KAttackerForgedTargetPeerID111111111111111111",
 			IssuedAt:     ClockIssuedAt,
@@ -264,7 +292,7 @@ func run(outDir string) error {
 			Mode:          "live",
 			Description:   "binding signed by non-pinned key → rejected, chain advances (NOT downgraded to pin)",
 			ClockMs:       ClockNowResolve,
-			Name:          fixedName,
+			Name:          nameFor("VERIFY-FAIL-1"),
 			BindingHash:   hex.EncodeToString(bind.ContentHash.Bytes()),
 			SignatureHash: hex.EncodeToString(sig.ContentHash.Bytes()),
 			ExpectedResult: vectorOutcome{
@@ -284,7 +312,7 @@ func run(outDir string) error {
 	// REVOKED-1 — valid binding + verifying revocation.
 	{
 		body := types.BindingData{
-			Name:         fixedName,
+			Name:         nameFor("REVOKED-1"),
 			Kind:         types.BindingKindPeerIssued,
 			TargetPeerID: fixTargetPeerID,
 			IssuedAt:     ClockIssuedAt,
@@ -318,7 +346,7 @@ func run(outDir string) error {
 			Mode:             "live",
 			Description:      "valid binding + verifying revocation at by-target index → rejected, chain advances",
 			ClockMs:          ClockNowResolve,
-			Name:             fixedName,
+			Name:             nameFor("REVOKED-1"),
 			BindingHash:      hex.EncodeToString(bind.ContentHash.Bytes()),
 			SignatureHash:    hex.EncodeToString(sig.ContentHash.Bytes()),
 			RevocationHash:   hex.EncodeToString(rev.ContentHash.Bytes()),
@@ -341,7 +369,7 @@ func run(outDir string) error {
 	{
 		ttl := ClockTTLShort
 		body := types.BindingData{
-			Name:         fixedName,
+			Name:         nameFor("EXPIRED-1"),
 			Kind:         types.BindingKindPeerIssued,
 			TargetPeerID: fixTargetPeerID,
 			IssuedAt:     ClockIssuedAt,
@@ -366,7 +394,7 @@ func run(outDir string) error {
 			Mode:          "live",
 			Description:   "binding's issued_at + ttl is in the past → rejected, chain advances",
 			ClockMs:       ClockNowExpired,
-			Name:          fixedName,
+			Name:          nameFor("EXPIRED-1"),
 			BindingHash:   hex.EncodeToString(bind.ContentHash.Bytes()),
 			SignatureHash: hex.EncodeToString(sig.ContentHash.Bytes()),
 			ExpectedResult: vectorOutcome{
@@ -387,7 +415,7 @@ func run(outDir string) error {
 	// PRECEDE-1 — offline cached binding, identical verify as live.
 	{
 		body := types.BindingData{
-			Name:         fixedName,
+			Name:         nameFor("PRECEDE-1"),
 			Kind:         types.BindingKindPeerIssued,
 			TargetPeerID: fixTargetPeerID,
 			IssuedAt:     ClockIssuedAt,
@@ -412,7 +440,7 @@ func run(outDir string) error {
 			Mode:          "offline",
 			Description:   "binding pre-cached locally — offline verify identical to live-fetch",
 			ClockMs:       ClockNowResolve,
-			Name:          fixedName,
+			Name:          nameFor("PRECEDE-1"),
 			BindingHash:   bh,
 			SignatureHash: hex.EncodeToString(sig.ContentHash.Bytes()),
 			ExpectedResult: vectorOutcome{
@@ -424,7 +452,7 @@ func run(outDir string) error {
 			},
 			Files: []string{"binding.cbor", "signature.cbor"},
 			OfflinePreseed: map[string]string{
-				types.PeerIssuedByNamePath(fixedName):       bh,
+				types.PeerIssuedByNamePath(nameFor("PRECEDE-1")):       bh,
 				types.LocalSignaturePath(bind.ContentHash):  hex.EncodeToString(sig.ContentHash.Bytes()),
 			},
 		}
@@ -433,7 +461,7 @@ func run(outDir string) error {
 			"Pre-seed (writes the impl MUST make before Resolve):",
 			fmt.Sprintf("  ContentStore.Put(binding) — content_hash=%s", bh),
 			fmt.Sprintf("  ContentStore.Put(signature) — content_hash=%s", hex.EncodeToString(sig.ContentHash.Bytes())),
-			fmt.Sprintf("  LocationIndex.Bind(%q → binding_hash)", types.PeerIssuedByNamePath(fixedName)),
+			fmt.Sprintf("  LocationIndex.Bind(%q → binding_hash)", types.PeerIssuedByNamePath(nameFor("PRECEDE-1"))),
 			fmt.Sprintf("  LocationIndex.Bind(%q → signature_hash)", types.LocalSignaturePath(bind.ContentHash)),
 			"Gate: Reader.TreeGet for system/registry/binding/by-name/* MUST NOT be called; same for ContentGet on the binding/signature hashes. Resolve outcome MUST match RESOLVE-1's result.",
 		)
@@ -671,10 +699,10 @@ func verifyAll(registryKey crypto.Keypair, registryEnt entity.Entity, registryPI
 
 func verifyResolve(registryKey crypto.Keypair, registryEnt entity.Entity, registryPID string, v vectorEntry) error {
 	reader := newMemReader()
-	body := types.BindingData{Name: fixedName, Kind: types.BindingKindPeerIssued,
+	body := types.BindingData{Name: v.Name, Kind: types.BindingKindPeerIssued,
 		TargetPeerID: fixTargetPeerID, IssuedAt: ClockIssuedAt}
 	bind, sig, _ := buildBindingPair(registryKey, body)
-	reader.tree[types.PeerIssuedByNamePath(fixedName)] = bind.ContentHash
+	reader.tree[types.PeerIssuedByNamePath(v.Name)] = bind.ContentHash
 	reader.tree[types.LocalSignaturePath(bind.ContentHash)] = sig.ContentHash
 	reader.content[bind.ContentHash] = bind
 	reader.content[sig.ContentHash] = sig
@@ -683,7 +711,7 @@ func verifyResolve(registryKey crypto.Keypair, registryEnt entity.Entity, regist
 	if err != nil {
 		return err
 	}
-	r, err := be.Resolve(newHctx(), fixedName)
+	r, err := be.Resolve(newHctx(), v.Name)
 	if err != nil {
 		return fmt.Errorf("unexpected error: %w", err)
 	}
@@ -705,16 +733,16 @@ func verifyResolve(registryKey crypto.Keypair, registryEnt entity.Entity, regist
 
 func verifyVerifyFail(attackerKey crypto.Keypair, registryEnt entity.Entity, registryPID string, v vectorEntry) error {
 	reader := newMemReader()
-	body := types.BindingData{Name: fixedName, Kind: types.BindingKindPeerIssued,
+	body := types.BindingData{Name: v.Name, Kind: types.BindingKindPeerIssued,
 		TargetPeerID: "2KAttackerForgedTargetPeerID111111111111111111", IssuedAt: ClockIssuedAt}
 	bind, sig, _ := buildBindingPair(attackerKey, body)
-	reader.tree[types.PeerIssuedByNamePath(fixedName)] = bind.ContentHash
+	reader.tree[types.PeerIssuedByNamePath(v.Name)] = bind.ContentHash
 	reader.tree[types.LocalSignaturePath(bind.ContentHash)] = sig.ContentHash
 	reader.content[bind.ContentHash] = bind
 	reader.content[sig.ContentHash] = sig
 	be, _ := peerissued.New(registryEnt, registryPID, reader,
 		peerissued.WithClock(func() uint64 { return v.ClockMs }))
-	_, err := be.Resolve(newHctx(), fixedName)
+	_, err := be.Resolve(newHctx(), v.Name)
 	if err == nil {
 		return errors.New("expected verify-fail error, got nil")
 	}
@@ -723,11 +751,11 @@ func verifyVerifyFail(attackerKey crypto.Keypair, registryEnt entity.Entity, reg
 
 func verifyRevoked(registryKey crypto.Keypair, registryEnt entity.Entity, registryPID string, v vectorEntry) error {
 	reader := newMemReader()
-	body := types.BindingData{Name: fixedName, Kind: types.BindingKindPeerIssued,
+	body := types.BindingData{Name: v.Name, Kind: types.BindingKindPeerIssued,
 		TargetPeerID: fixTargetPeerID, IssuedAt: ClockIssuedAt}
 	bind, sig, _ := buildBindingPair(registryKey, body)
 	rev, revSig, _ := buildRevocationPair(registryKey, bind.ContentHash, ClockIssuedAt+500_000)
-	reader.tree[types.PeerIssuedByNamePath(fixedName)] = bind.ContentHash
+	reader.tree[types.PeerIssuedByNamePath(v.Name)] = bind.ContentHash
 	reader.tree[types.LocalSignaturePath(bind.ContentHash)] = sig.ContentHash
 	reader.tree[types.PeerIssuedRevocationByTargetPath(bind.ContentHash)] = rev.ContentHash
 	reader.tree[types.LocalSignaturePath(rev.ContentHash)] = revSig.ContentHash
@@ -737,7 +765,7 @@ func verifyRevoked(registryKey crypto.Keypair, registryEnt entity.Entity, regist
 	reader.content[revSig.ContentHash] = revSig
 	be, _ := peerissued.New(registryEnt, registryPID, reader,
 		peerissued.WithClock(func() uint64 { return v.ClockMs }))
-	_, err := be.Resolve(newHctx(), fixedName)
+	_, err := be.Resolve(newHctx(), v.Name)
 	if err == nil {
 		return errors.New("expected revoked error, got nil")
 	}
@@ -750,16 +778,16 @@ func verifyRevoked(registryKey crypto.Keypair, registryEnt entity.Entity, regist
 func verifyExpired(registryKey crypto.Keypair, registryEnt entity.Entity, registryPID string, v vectorEntry) error {
 	reader := newMemReader()
 	ttl := ClockTTLShort
-	body := types.BindingData{Name: fixedName, Kind: types.BindingKindPeerIssued,
+	body := types.BindingData{Name: v.Name, Kind: types.BindingKindPeerIssued,
 		TargetPeerID: fixTargetPeerID, IssuedAt: ClockIssuedAt, TTL: &ttl}
 	bind, sig, _ := buildBindingPair(registryKey, body)
-	reader.tree[types.PeerIssuedByNamePath(fixedName)] = bind.ContentHash
+	reader.tree[types.PeerIssuedByNamePath(v.Name)] = bind.ContentHash
 	reader.tree[types.LocalSignaturePath(bind.ContentHash)] = sig.ContentHash
 	reader.content[bind.ContentHash] = bind
 	reader.content[sig.ContentHash] = sig
 	be, _ := peerissued.New(registryEnt, registryPID, reader,
 		peerissued.WithClock(func() uint64 { return v.ClockMs }))
-	_, err := be.Resolve(newHctx(), fixedName)
+	_, err := be.Resolve(newHctx(), v.Name)
 	if err == nil {
 		return errors.New("expected expired error, got nil")
 	}
@@ -771,7 +799,7 @@ func verifyExpired(registryKey crypto.Keypair, registryEnt entity.Entity, regist
 
 func verifyPrecede(registryKey crypto.Keypair, registryEnt entity.Entity, registryPID string, v vectorEntry) error {
 	reader := newMemReader() // empty — must not be touched for binding/signature
-	body := types.BindingData{Name: fixedName, Kind: types.BindingKindPeerIssued,
+	body := types.BindingData{Name: v.Name, Kind: types.BindingKindPeerIssued,
 		TargetPeerID: fixTargetPeerID, IssuedAt: ClockIssuedAt}
 	bind, sig, _ := buildBindingPair(registryKey, body)
 	hctx := newHctx()
@@ -781,7 +809,7 @@ func verifyPrecede(registryKey crypto.Keypair, registryEnt entity.Entity, regist
 	if _, err := hctx.Store.Put(sig); err != nil {
 		return err
 	}
-	if _, err := hctx.TreeSet(types.PeerIssuedByNamePath(fixedName), bind.ContentHash, "preseed"); err != nil {
+	if _, err := hctx.TreeSet(types.PeerIssuedByNamePath(v.Name), bind.ContentHash, "preseed"); err != nil {
 		return err
 	}
 	if _, err := hctx.TreeSet(types.LocalSignaturePath(bind.ContentHash), sig.ContentHash, "preseed"); err != nil {
@@ -789,7 +817,7 @@ func verifyPrecede(registryKey crypto.Keypair, registryEnt entity.Entity, regist
 	}
 	be, _ := peerissued.New(registryEnt, registryPID, reader,
 		peerissued.WithClock(func() uint64 { return v.ClockMs }))
-	r, err := be.Resolve(hctx, fixedName)
+	r, err := be.Resolve(hctx, v.Name)
 	if err != nil {
 		return fmt.Errorf("offline resolve failed: %w", err)
 	}
@@ -799,7 +827,7 @@ func verifyPrecede(registryKey crypto.Keypair, registryEnt entity.Entity, regist
 	// The revocation by-target lookup MAY hit the reader (one TreeGet
 	// that misses → not_found). Binding / signature lookups MUST NOT.
 	for _, c := range reader.calls {
-		if strings.HasPrefix(c, "tree:"+types.PeerIssuedByNamePath(fixedName)) {
+		if strings.HasPrefix(c, "tree:"+types.PeerIssuedByNamePath(v.Name)) {
 			return fmt.Errorf("offline path hit wire for binding by-name: %s", c)
 		}
 		if strings.HasPrefix(c, "content:") {

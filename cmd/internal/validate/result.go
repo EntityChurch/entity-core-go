@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -204,11 +205,21 @@ func (r *Report) SetAllowedSkips(names []string) {
 	}
 }
 
-// ExcludeCategories removes all checks in the given categories and recalculates the summary.
-func (r *Report) ExcludeCategories(cats map[string]bool) {
+// ExcludeCategories removes checks matching the given selectors and recalculates
+// the summary. A selector is either a bare category ("serving_mode") or a single
+// check ("serving_mode.content_get_out_of_scope_404").
+//
+// Check-level selectors exist because a whole-category exclude is a blunt
+// instrument that hides real failures. `validate-complete.sh` pass 1 excluded
+// all of serving_mode to dodge four T4 checks that are genuinely unsatisfiable
+// under closure-of-signed-root scope (if everything is in scope, nothing is out
+// of scope) — and in doing so it stopped scoring 49 checks that ARE meaningful
+// there. That masked a peer failing every in-scope serve under closure scope
+// while the run still reported 0 failures. Exclude the four, not the category.
+func (r *Report) ExcludeCategories(sel map[string]bool) {
 	var filtered []CheckResult
 	for _, c := range r.Checks {
-		if !cats[c.Category] {
+		if !sel[c.Category] && !sel[c.Category+"."+c.Name] {
 			filtered = append(filtered, c)
 		}
 	}
@@ -368,7 +379,7 @@ func (r *Report) WriteText(w io.Writer, failuresOnly bool) {
 		(time.Duration(r.Summary.ElapsedMs) * time.Millisecond).Truncate(time.Millisecond))
 
 	if unallowedSkip > 0 {
-		fmt.Fprintf(w, "         %d skip(s) count as FAIL (use -allow-skip name1,name2,... to exempt intentional skips)\n", unallowedSkip)
+		fmt.Fprintf(w, "         %d skip(s) count as FAIL — an unexercised surface is an UNTESTED surface\n", unallowedSkip)
 	}
 	if profileSkip > 0 {
 		fmt.Fprintf(w, "         %d skip(s) auto-allowlisted by V7 v7.72 §9.0 profile carve-out — exempt from the FAIL gate\n", profileSkip)
@@ -378,6 +389,30 @@ func (r *Report) WriteText(w io.Writer, failuresOnly bool) {
 	}
 	if allowedSkip > 0 {
 		fmt.Fprintf(w, "         %d skip(s) allowlisted via -allow-skip — exempt from the FAIL gate\n", allowedSkip)
+	}
+
+	// COVERAGE — the roll-up this suite was missing, and the reason a run could
+	// look green while whole surfaces went untested.
+	//
+	// The per-check gate was already honest (a harness skip does count as FAIL),
+	// but nothing told the reader WHAT never ran or HOW to make it run. A default
+	// invocation exercises ~1429 checks; a fully-configured one exercises ~1500+,
+	// and the difference is not noise — it is the local-files round-trip, the
+	// published-root/manifest face, origination, concurrent-reentry, and the
+	// liveness/reconnect vectors, several of which fail the first time they are
+	// actually run. A number that omits them is not a smaller number, it is a
+	// different claim.
+	//
+	// So: name every unexercised surface, grouped, with the switch that closes
+	// it. This project implements everything, which means the target is zero.
+	if unexercised := r.unexercisedSurfaces(); len(unexercised) > 0 {
+		fmt.Fprintf(w, "\nCOVERAGE: %d check(s) did not run, across %d surface(s). An unexercised surface is an\n", unallowedSkip+allowedSkip, len(unexercised))
+		fmt.Fprintln(w, "          UNTESTED surface — this run does NOT prove the full system works.")
+		fmt.Fprintln(w, "          Close each; do not allowlist:")
+		for _, line := range unexercised {
+			fmt.Fprintf(w, "          - %s\n", line)
+		}
+		fmt.Fprintln(w, "          scripts/validate-complete.sh configures every surface in one command.")
 	}
 
 	if r.BudgetWarning != "" {
@@ -565,4 +600,71 @@ func mustCreateEntity(typeName string, data interface{}) entity.Entity {
 		panic(fmt.Sprintf("create test entity: %v", err))
 	}
 	return ent
+}
+
+// surfaceSwitch maps a recognisable phrase in a skip message to the concrete
+// switch that turns the surface on. Keyed on the guidance the checks already
+// emit, so a new skip that reuses the vocabulary is picked up for free.
+var surfaceSwitches = []struct {
+	match, surface, how string
+}{
+	{"budget_exhausted", "!! WHOLE CATEGORIES NEVER RAN — the -timeout window expired mid-suite",
+		"raise -timeout (default 10m); this is coverage loss, not a slow peer"},
+	{"-reference-peer", "origination (A-role: the peer DISPATCHES, not just answers)",
+		"-reference-peer <go-peer-addr>"},
+	{"--validate", "§7a concurrent-reentry attestation",
+		"start the target with --validate"},
+	{"-poll-url", "published-root / manifest / HTTP-poll serving face",
+		"start with --publish-root --http-poll-addr <a> --serve-namespace system/content/public, pass -poll-url http://<a>"},
+	{"local/files root", "LOCAL-FILES read/write/list/delete round-trip + frame-budget chunking",
+		"start with --files <name>:/dir:local/files/<name>/"},
+	{"publish_descriptors", "LOCAL-FILES §10.5 V3 descriptor publication",
+		"configure a root with publish_descriptors=true"},
+	{"-keepalive-envelope-ms", "§5.4 keepalive escalation + §4.1 reconnect/retry vectors",
+		"start with --keepalive 2000,1000,2 and pass -keepalive-envelope-ms 6000"},
+	{"--peer-issued-registry", "peer-issued registry wire vectors",
+		"start with --peer-issued-registry <pid>@<url> (fixture wiring — the deferred Keystone leg)"},
+	{"rendezvous node", "SIGNALING §4/§5 node role — the whole punch-carrier surface",
+		"IMPLEMENT IT (§2.1 server role); Go: start with --signaling-node"},
+	{"NOT OFFERED", "NETWORK §6.7 reachability facts",
+		"IMPLEMENT IT (observe-address + check-reachability)"},
+}
+
+// unexercisedSurfaces returns one human line per skipped check that represents a
+// surface which did not run, annotated with how to make it run. Profile-keyed
+// and explicitly-allowlisted skips are excluded — those are deliberate scope
+// decisions, not silent gaps.
+func (r *Report) unexercisedSurfaces() []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, c := range r.Checks {
+		if c.Severity != Skip || r.allowedSkips[c.Name] || isProfileKeyedSkip(c) {
+			continue
+		}
+		surface, how := "unclassified", "read the check's message"
+		for _, s := range surfaceSwitches {
+			if strings.Contains(c.Message, s.match) {
+				surface, how = s.surface, s.how
+				break
+			}
+		}
+		// Budget exhaustion is reported per category, not deduped to one line:
+		// "4 categories never ran" is the fact, and which four is the actionable
+		// part. Every other surface dedups, since ten skips from one missing
+		// flag are one gap.
+		key := surface
+		if strings.Contains(c.Message, "budget_exhausted") {
+			key = surface + "|" + c.Category
+			out = append(out, fmt.Sprintf("%s [%s] → %s", surface, c.Category, how))
+			seen[key] = true
+			continue
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, fmt.Sprintf("%s → %s", surface, how))
+	}
+	sort.Strings(out)
+	return out
 }

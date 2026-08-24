@@ -43,8 +43,9 @@ func cmdStart(args []string) {
 	inboxRelayRegistry := fs.String("inbox-relay-registry", "", "EXTENSION-RELAY §3.5 REGISTRY-served inbox-relay decl chain (Go-only initially): comma-separated peer-names of registries to consult (in order). The names are translated to peer-ids from state. Forwarded as --inbox-relay-registry to entity-peer.")
 	validate := fs.Bool("validate", false, "GUIDE-CONFORMANCE §7a: enable system/validate/echo + system/validate/dispatch-outbound test handlers (unblocks concurrency.t1_2_concurrent_reentry). MUST NOT be on in production. Honored by all three impls.")
 	signalingNode := fs.Bool("signaling-node", false, "EXTENSION-SIGNALING §4/§5: serve the system/signaling rendezvous node (offer/collect/advertise) for the punch gate. Go-only; forwarded as -signaling-node to entity-peer. Pairs with the default --open-access so the caller's grant covers system/signaling.")
-	publishRoot := fs.Bool("publish-root", false, "PROPOSAL-PEER-MANIFEST §4: mint signed system/peer/published-root on every tree-root change + serve via http-poll. Pair with --http-poll-addr to expose the manifest on the wire. Honored by all three impls.")
+	publishRoot := fs.Bool("publish-root", false, "PROPOSAL-PEER-MANIFEST §4: mint signed system/peer/published-root on every tree-root change + serve via http-poll. Pair with --http-poll-addr to expose the manifest on the wire. Accepted by all three impls, but only Go REPUBLISHES on a root change: Rust + Python mint once at startup and hold seq=0 (measured 2026-08-07 over 6 min, docs/validation/reports/2026-08-07-f-publish-root-republish-contract-rust-py.md). Under §6.5.6 Amendment 10 that freezes their served closure at boot, so serving_mode.seed_republished SKIPs against them.")
 	serveClosureRoot := fs.Bool("serve-closure-root", false, "EXTENSION-NETWORK §6.5.6 Amendment 10: scope served set to the transitive trie-node closure reachable from system/peer/published-root. Pair with --publish-root so a consumer's signed-root hash-chain walk does not 404 on a CHAMP interior node. Mutually exclusive with --serve-namespace / --serve-scope-whole-store. Honored by Go + Python (Rust impl pending).")
+	peerIssuedRegistry := fs.String("peer-issued-registry", "", "PROPOSAL-PEER-ISSUED-REGISTRY-BACKEND §2: pin one or more peer-issued registries (comma-separated `peer_id@tree_url_prefix`). Pair with validate-peer -peer-issued-bundle, which serves the fixture registry at that URL. An http:// prefix implies --substitute-allow-http (fixture registries are loopback-only). Forwarded as --peer-issued-registry to entity-peer; Go-only, Rust + Python impl pending.")
 	publishDescriptors := fs.Bool("publish-descriptors", false, "DOMAIN-LOCAL-FILES v1.3 §10.5 V3: configure the --files root with publish_descriptors=true so file reads write `system/content/descriptor/{hash}` entities into the tree. Arms local_files.v3_descriptor_publish_exercised. Honored by Go; Rust + Python impl pending.")
 	keepalive := fs.String("keepalive", "", "EXTENSION-NETWORK §2.3 keepalive override as interval_ms,timeout_ms,max_missed (e.g. 1500,800,2) so the §5.4 escalation is observable in seconds — pair with validate-peer -keepalive-envelope-ms for the liveness harness. A field may be empty to keep its spec default. Honored by all three impls: Go (-keepalive-*-ms), Python (--keepalive-*-ms, 0a0eb48), Rust (--keepalive-*-ms, 99ff398).")
 	fs.Parse(args)
@@ -88,6 +89,8 @@ func cmdStart(args []string) {
 		signalingNode:      *signalingNode,
 		publishRoot:        *publishRoot,
 		publishDescriptors: *publishDescriptors,
+		peerIssuedRegistry: *peerIssuedRegistry,
+		substituteAllowHTTP: *peerIssuedRegistry != "" && strings.Contains(*peerIssuedRegistry, "http://"),
 	}
 
 	// Resolve --inbox-relay-registry peer-names → peer-ids from state.
@@ -176,6 +179,12 @@ type chunkEFlags struct {
 	signalingNode      bool
 	publishRoot        bool
 	publishDescriptors bool
+	// peerIssuedRegistry is the PROPOSAL-PEER-ISSUED-REGISTRY-BACKEND §2
+	// pin spec, `peer_id@url_prefix`. Forwarded verbatim; the peer-id is a
+	// registry identity, not a peer-manager-managed peer, so unlike
+	// --inbox-relay-registry there is no name→id translation to do.
+	peerIssuedRegistry string
+	substituteAllowHTTP bool
 }
 
 // enabled reports whether serving-mode was requested.
@@ -320,6 +329,12 @@ func startGoPeer(name, addr string, debug, openAccess bool, files, history, stor
 	}
 	if poll.publishDescriptors {
 		cmdArgs = append(cmdArgs, "-publish-descriptors")
+	}
+	if poll.peerIssuedRegistry != "" {
+		cmdArgs = append(cmdArgs, "-peer-issued-registry", poll.peerIssuedRegistry)
+		if poll.substituteAllowHTTP {
+			cmdArgs = append(cmdArgs, "-substitute-allow-http")
+		}
 	}
 	if inboxRelayRegistry != "" {
 		cmdArgs = append(cmdArgs, "-inbox-relay-registry", inboxRelayRegistry)

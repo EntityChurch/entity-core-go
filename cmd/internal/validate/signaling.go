@@ -103,8 +103,36 @@ func runSignaling(ctx context.Context, clientA *PeerClient, addr string) []Check
 		if status == 403 {
 			return SkipCheck("node returned 403 (capability_denied) on advertise — the caller's connection grant does not cover system/signaling. A public introducer must seed it on connect; the standalone entity-signaling-node binary installs no seed policy (main.rs omits .with_seed_policy — only the Rust live tests' wildcard_seed grants it). Start the node with a seed policy covering system/signaling:{offer,collect,advertise} and re-run. See docs/validation/reports/2026-07-30-signaling-go-client-vs-rust-node.md.")
 		}
+		// §2.1 / §11.3: "The server role is OPTIONAL for a conformant
+		// implementation. The client role is the conformance surface." SIGNALING
+		// deliberately departs from the RELAY precedent here — signaling is
+		// deployed infrastructure with a non-entity hot path, and requiring three
+		// server implementations is work with no consumer. So a peer that does
+		// not serve the rendezvous node is NOT failing anything, and this whole
+		// category (which needs the target itself to be the carrier) simply has
+		// nothing to exercise.
+		//
+		// Skip rather than Pass, and Skip rather than Fail: Require() propagates
+		// a skipped prerequisite as a skip, so the six dependent checks below
+		// report "prerequisite skipped" instead of "blocked by a failure."
+		//
+		// Skip is NOT a pass here. This project implements everything, so an
+		// unimplemented surface is an UNTESTED surface: the skip still counts
+		// toward the run's FAIL gate (it is neither profile-keyed nor an
+		// environment skip), and the way to close it is to build the node role —
+		// not to allowlist it. The two severities carry different facts and both
+		// are true at once: "not a spec violation" (§2.1) and "not exercised, so
+		// this run does not prove the system works" (our bar).
+		//
+		// This check FAILed here until 2026-08-07, which put 7 spurious failures
+		// on core-rust's and core-py's scorecards in the same sweep whose prose
+		// correctly called the node role optional. A red that means less than it
+		// looks like is the same disease as a green that does (ADR-0012).
+		if status == 404 {
+			return SkipCheck("target does not serve the §4/§5 rendezvous node (advertise → 404). Per §2.1 the SERVER ROLE IS OPTIONAL and the client role is the conformance surface, so this is NOT a conformance failure — the whole signaling category needs the target to BE the carrier and has nothing to exercise. Validate the peer's signaling CLIENT through a real crossing (cmd/signaling-punch against a node) instead.  THIS PROJECT IMPLEMENTS EVERYTHING: the node role unimplemented means §4/§5 and the whole punch-carrier surface go UNTESTED for this peer, so this counts toward the run's FAIL gate — do NOT wave it through with -allow-skip. §2.1 even names the cost of a single-server cohort: \"underspecification stays invisible — one implementation cannot disagree with itself.\"")
+		}
 		if status != 200 {
-			return FailCheck(fmt.Sprintf("advertise returned %d, want 200", status))
+			return FailCheck(fmt.Sprintf("advertise returned %d, want 200 (or 404 if this peer does not serve the §2.1 server role)", status))
 		}
 		if adv.Endpoint == "" {
 			return FailCheck("advertise returned an empty endpoint")

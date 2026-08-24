@@ -91,7 +91,42 @@ type remoteState struct {
 	// once the peer is reachable again. Local optimization only — it is a MAY and
 	// affects nothing on the wire.
 	preferRelay map[crypto.PeerID]bool
+	// dialing is the NETWORK §10.3 obligation-5 single-flight gate: the
+	// establishment currently in flight for each target peer, if any. Guarded by
+	// the same mu as conns so "pool miss" and "become the leader" are one atomic
+	// decision — the check-then-act race is exactly what would let two
+	// establishments start. Entries are removed by the leader when it publishes
+	// its result, so the map is bounded by the number of concurrently-dialing
+	// peers; waiters hold the *dialGate directly and need no entry to read it.
+	dialing map[crypto.PeerID]*dialGate
 }
+
+// dialGate is one in-flight establishment. The leader fills conn/err and then
+// closes done; every waiter reads them only after done is closed, so the close
+// is the happens-before edge and no lock is needed on the result fields.
+type dialGate struct {
+	done chan struct{}
+	conn remoteEndpoint
+	err  error
+}
+
+// establishMode selects which §10.3 step-3b behavior the establishment funnel
+// applies when the ordinary profile dial fails.
+type establishMode int
+
+const (
+	// establishPoolOnly resolves and dials only — no §10.3 seam. Used by the
+	// RELAY raw-frame path, which delivers over a transport the caller already
+	// expects to exist.
+	establishPoolOnly establishMode = iota
+	// establishDispatch consults the §10.3 seam under the caller's own context
+	// (§10 step 3b, before §10.2's store-and-forward).
+	establishDispatch
+	// establishReconnect is the §4.1 maintain-peer/reconnect path: the seam runs
+	// CALLER-OWNED (its exchange budget must not nest with §4.1's backoff,
+	// obligation 4) and the prefer-relay memo is consulted and maintained.
+	establishReconnect
+)
 
 // transportTarget is the resolution result for a remote peer's
 // transport profile. typeURI is the entity type URI of the chosen
@@ -554,16 +589,7 @@ func (p *Peer) remoteExecute(ctx context.Context, uri, operation string, params 
 	}
 	peerID := crypto.PeerID(parsed.PeerID)
 
-	conn, err := p.getRemoteConnection(ctx, peerID)
-	if err != nil {
-		// §10.3 step 3b — live-establishment seam, consulted BEFORE §10.2's
-		// dispatch_fallback (the normative "live first, store-and-forward last"
-		// ordering). On success the connection is pooled and the ladder
-		// re-enters ordinary dispatch through it.
-		if live := p.tryEstablishLive(ctx, peerID); live != nil {
-			conn, err = live, nil
-		}
-	}
+	conn, err := p.establishRemote(ctx, peerID, establishDispatch)
 	if err != nil {
 		if p.dispatchFallback != nil {
 			if resp, ok, ferr := p.dispatchFallback(ctx, peerID, uri, operation, params, resource); ok {
@@ -609,7 +635,7 @@ func (p *Peer) remoteExecute(ctx context.Context, uri, operation string, params 
 // semantic ("deliver verbatim"), never the substrate — Go follows whichever
 // transport the destination's published §6.5 profile resolved to.
 func (p *Peer) SendRawFrameTo(ctx context.Context, peerID crypto.PeerID, frame []byte) error {
-	conn, err := p.getRemoteConnection(ctx, peerID)
+	conn, err := p.establishRemote(ctx, peerID, establishPoolOnly)
 	if err != nil {
 		return fmt.Errorf("remote connection to %s: %w", peerID, err)
 	}
@@ -650,13 +676,7 @@ func (p *Peer) RemoteExecuteWithIncluded(ctx context.Context, uri, operation str
 	}
 	peerID := crypto.PeerID(parsed.PeerID)
 
-	conn, err := p.getRemoteConnection(ctx, peerID)
-	if err != nil {
-		// §10.3 step 3b — live-establishment BEFORE §10.2 dispatch_fallback.
-		if live := p.tryEstablishLive(ctx, peerID); live != nil {
-			conn, err = live, nil
-		}
-	}
+	conn, err := p.establishRemote(ctx, peerID, establishDispatch)
 	if err != nil {
 		if p.dispatchFallback != nil {
 			if resp, ok, ferr := p.dispatchFallback(ctx, peerID, uri, operation, params, resource); ok {
@@ -691,6 +711,184 @@ func (p *Peer) RemoteExecuteWithIncluded(ctx context.Context, uri, operation str
 	}
 }
 
+// reentryEndpoint is the V7 §6.11 reentry fallback (GUIDE-CONFORMANCE §7a.2a):
+// when transport-profile resolution misses, check whether a server-side
+// connection from the same peer-id is registered. If so, reuse it for outbound
+// dispatch — the inbound conn IS the outbound seam (the validator-as-B /
+// no-listener case §10.2 verifies). Returns nil when there is none.
+//
+// It establishes nothing — it hands back a connection the COUNTERPART dialed —
+// which is why establishRemote probes it outside the obligation-5 gate: its
+// bounded grant wait below would otherwise serialize concurrent originations to
+// the same peer for no third-party-load benefit at all.
+func (p *Peer) reentryEndpoint(ctx context.Context, peerID crypto.PeerID) *Connection {
+	inbound := p.inboundForReentry(peerID)
+	if inbound == nil {
+		return nil
+	}
+	p.debugf("remote: §6.11 reentry to %s reuses inbound connection (no published transport profile)", peerID)
+	// EXTENSION-SIGNALING §6.5 (b) "Delivery + timing": on a symmetric
+	// rendezvous establishment our originating authority is the reciprocal
+	// grant, and it lands ≈1 round trip after the channel opens. Originating in
+	// that window would dispatch under the cap we minted for THEM —
+	// `grantee != author`, a guaranteed 401. So gate on grant-received,
+	// bounded: on expiry we fall through and let the dispatch fail closed
+	// rather than block. A counterpart that never adopts the grant therefore
+	// degrades to one-directional, not to a hang.
+	//
+	// Only on a rendezvous establishment: an ordinary dial-by-address acceptor
+	// is asymmetric, expects no grant, and must not pay the wait.
+	if inbound.EstablishedViaRendezvousKey() {
+		if !inbound.AwaitOriginatingCapability(ctx, reciprocalGrantWait) {
+			p.debugf("remote: §6.5 (b) reciprocal grant from %s not in hand within %s — originating fails closed", peerID, reciprocalGrantWait)
+		}
+	}
+	return inbound
+}
+
+// pooledRemote returns the pooled outbound endpoint for peerID, or nil.
+func (p *Peer) pooledRemote(peerID crypto.PeerID) remoteEndpoint {
+	p.remote.mu.Lock()
+	defer p.remote.mu.Unlock()
+	return p.remote.conns[peerID]
+}
+
+// enterDialGate makes the §10.3 obligation-5 leader/waiter decision atomically
+// with the §10-step-1 pool check. Exactly one of the three results is non-zero:
+// a pooled connection (someone finished while we were arriving), the in-flight
+// gate to await (we are a waiter), or leader=true with the gate we must publish.
+func (p *Peer) enterDialGate(peerID crypto.PeerID) (remoteEndpoint, *dialGate, bool) {
+	p.remote.mu.Lock()
+	defer p.remote.mu.Unlock()
+	if conn, ok := p.remote.conns[peerID]; ok {
+		return conn, nil, false
+	}
+	if g, ok := p.remote.dialing[peerID]; ok {
+		return nil, g, false
+	}
+	if p.remote.dialing == nil {
+		p.remote.dialing = make(map[crypto.PeerID]*dialGate)
+	}
+	g := &dialGate{done: make(chan struct{})}
+	p.remote.dialing[peerID] = g
+	return nil, g, true
+}
+
+// leaveDialGate publishes the leader's result to every waiter and drops the map
+// entry, so the gate is held for exactly one establishment and the map stays
+// bounded by the number of peers being dialed right now.
+func (p *Peer) leaveDialGate(peerID crypto.PeerID, g *dialGate, conn remoteEndpoint, err error) {
+	p.remote.mu.Lock()
+	if p.remote.dialing[peerID] == g {
+		delete(p.remote.dialing, peerID)
+	}
+	p.remote.mu.Unlock()
+	g.conn, g.err = conn, err
+	close(g.done)
+}
+
+// establishRemote is the single funnel through which every §10-step-1 pool miss
+// reaches a dial or the §10.3 step-3b seam, and it is where NETWORK §10.3
+// obligation 5 — SINGLE-FLIGHT ESTABLISHMENT PER PEER — is enforced.
+//
+// At most one establishment to a given peer is in flight at a time; concurrent
+// triggers coalesce onto it and await its result rather than each spawning a
+// fresh one. Obligation 4 does not cover this: it bounds the RETRY axis and
+// explicitly grants each standalone §10 dispatch its own budget, so N concurrent
+// dispatches are N individually-conformant establishments whose SUM is the
+// multiplicative third-party load the discipline exists to prevent. This is the
+// FAN-IN face of the same invariant. (Found by entity-browser-rust on the WebRTC
+// leg — ~470 deposits/side vs 4 — and folded as a general MUST every impl
+// inherits; Go's crossing is TCP simultaneous-open, but the deposits the
+// obligation counts land on the SAME shared rendezvous node either way.)
+//
+// Two things stay deliberately outside the gate because they establish nothing:
+// a pooled hit, and the §6.11 reentry reuse (whose bounded grant wait would
+// otherwise serialize concurrent originations). What is inside is the dial, the
+// handshake, and the seam.
+//
+// Re-entrancy: the seam negotiates through the signaling node and reflector —
+// different peers, hence different gates, and in Go through the coordinator's
+// own client rather than this pool at all (peerwiring.Coordinator.Establish
+// never re-enters getRemoteConnection). So single-flight-per-peer cannot
+// deadlock its own establishment.
+//
+// A waiter takes the leader's outcome verbatim, including its mode: a waiter
+// that wanted the seam and coalesced onto an establishPoolOnly leader gets that
+// leader's failure without a seam attempt of its own. That is the obligation
+// working as written — the next trigger after the gate clears is free to
+// establish — not a missed escalation.
+func (p *Peer) establishRemote(ctx context.Context, peerID crypto.PeerID, mode establishMode) (remoteEndpoint, error) {
+	if conn := p.pooledRemote(peerID); conn != nil {
+		return conn, nil
+	}
+	if _, terr := p.resolveTransportTarget(peerID); terr != nil {
+		if inbound := p.reentryEndpoint(ctx, peerID); inbound != nil {
+			return inbound, nil
+		}
+	}
+
+	conn, gate, leader := p.enterDialGate(peerID)
+	if conn != nil {
+		return conn, nil
+	}
+	if !leader {
+		p.debugf("remote: §10.3 obligation 5 — coalescing onto the in-flight establishment to %s", peerID)
+		select {
+		case <-gate.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if gate.conn != nil {
+			return gate.conn, nil
+		}
+		return nil, gate.err
+	}
+
+	conn, err := p.dialOrEstablish(ctx, peerID, mode)
+	p.leaveDialGate(peerID, gate, conn, err)
+	return conn, err
+}
+
+// dialOrEstablish is the leader's body: the ordinary profile dial, then the
+// §10.3 step-3b seam per mode. Split out so the gate in establishRemote wraps it
+// whole — gating only the dial would leave N callers to fan into the seam the
+// moment the dial failed, which is precisely the shape obligation 5 forbids.
+func (p *Peer) dialOrEstablish(ctx context.Context, peerID crypto.PeerID, mode establishMode) (remoteEndpoint, error) {
+	conn, err := p.getRemoteConnection(ctx, peerID)
+	if err == nil {
+		if mode == establishReconnect {
+			p.clearPreferRelay(peerID)
+		}
+		return conn, nil
+	}
+	switch mode {
+	case establishDispatch:
+		// §10.3 step 3b — live-establishment seam, consulted BEFORE §10.2's
+		// dispatch_fallback (the normative "live first, store-and-forward last"
+		// ordering). On success the connection is pooled and the ladder
+		// re-enters ordinary dispatch through it.
+		if live := p.tryEstablishLive(ctx, peerID); live != nil {
+			return live, nil
+		}
+	case establishReconnect:
+		// No seam registered, or this peer is memoed prefer-relay: preserve the
+		// plain-dial error and fall through to the caller's backoff.
+		if p.establishLive == nil || p.prefersRelay(peerID) {
+			return nil, err
+		}
+		if live := p.tryEstablishLive(WithCallerOwnedRetry(ctx), peerID); live != nil {
+			p.clearPreferRelay(peerID)
+			return live, nil
+		}
+		// One punch attempt failed; §4.1's backoff owns the next try. Memo
+		// prefer-relay so subsequent reconnects skip a punch that just proved
+		// untraversable.
+		p.markPreferRelay(peerID)
+	}
+	return nil, err
+}
+
 // getRemoteConnection returns a cached outbound endpoint or creates one.
 // Branches on the resolved transport type — TCP dials a net.Conn through
 // p.Connect; HTTP builds an HTTPConnection bound to the profile's URL.
@@ -706,32 +904,7 @@ func (p *Peer) getRemoteConnection(ctx context.Context, peerID crypto.PeerID) (r
 
 	target, err := p.resolveTransportTarget(peerID)
 	if err != nil {
-		// V7 §6.11 reentry fallback (GUIDE-CONFORMANCE §7a.2a): when
-		// transport-profile resolution misses, check whether a server-
-		// side connection from the same peer-id is registered. If so,
-		// reuse it for outbound dispatch — the inbound conn IS the
-		// outbound seam (the validator-as-B / no-listener case §10.2
-		// verifies).
-		if inbound := p.inboundForReentry(peerID); inbound != nil {
-			p.debugf("remote: §6.11 reentry to %s reuses inbound connection (no published transport profile)", peerID)
-			// EXTENSION-SIGNALING §6.5 (b) "Delivery + timing": on a symmetric
-			// rendezvous establishment our originating authority is the
-			// reciprocal grant, and it lands ≈1 round trip after the channel
-			// opens. Originating in that window would dispatch under the cap
-			// we minted for THEM — `grantee != author`, a guaranteed 401. So
-			// gate on grant-received, bounded: on expiry we fall through and
-			// let the dispatch fail closed rather than block. A counterpart
-			// that never adopts the grant therefore degrades to
-			// one-directional, not to a hang.
-			//
-			// Only on a rendezvous establishment: an ordinary dial-by-address
-			// acceptor is asymmetric, expects no grant, and must not pay the
-			// wait.
-			if inbound.EstablishedViaRendezvousKey() {
-				if !inbound.AwaitOriginatingCapability(ctx, reciprocalGrantWait) {
-					p.debugf("remote: §6.5 (b) reciprocal grant from %s not in hand within %s — originating fails closed", peerID, reciprocalGrantWait)
-				}
-			}
+		if inbound := p.reentryEndpoint(ctx, peerID); inbound != nil {
 			return inbound, nil
 		}
 		return nil, err
@@ -821,24 +994,13 @@ func (p *Peer) removeRemoteConnection(peerID crypto.PeerID) {
 // failed this session, so the loop stops re-punching an untraversable (e.g.
 // symmetric-NAT) peer and lets relay carry it; the memo clears the moment the
 // peer is reachable again.
+//
+// It is single-flight per peer (§10.3 obligation 5): concurrent maintain-peer
+// continuations and dispatches racing to the same unpooled peer coalesce onto
+// one establishment via establishRemote rather than each spending a coordination
+// exchange against the shared node.
 func (p *Peer) EnsureConnected(ctx context.Context, peerID crypto.PeerID) error {
-	_, err := p.getRemoteConnection(ctx, peerID)
-	if err == nil {
-		p.clearPreferRelay(peerID)
-		return nil
-	}
-	// No live-establishment seam registered, or this peer is memoed prefer-relay:
-	// preserve the plain-dial error and fall through to the caller's backoff.
-	if p.establishLive == nil || p.prefersRelay(peerID) {
-		return err
-	}
-	if live := p.tryEstablishLive(WithCallerOwnedRetry(ctx), peerID); live != nil {
-		p.clearPreferRelay(peerID)
-		return nil
-	}
-	// One punch attempt failed; §4.1's backoff owns the next try. Memo prefer-relay
-	// so subsequent reconnects skip a punch that just proved untraversable.
-	p.markPreferRelay(peerID)
+	_, err := p.establishRemote(ctx, peerID, establishReconnect)
 	return err
 }
 

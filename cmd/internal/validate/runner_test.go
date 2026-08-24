@@ -258,6 +258,34 @@ func TestReport_ExcludeRecomputesElapsedAndBudget(t *testing.T) {
 	}
 }
 
+// A check-level selector must drop exactly that check and leave the rest of its
+// category scored. The category-wide form is what let a peer fail every
+// in-scope closure-scope serve while the run still reported zero failures:
+// serving_mode runs under the exclude and is only dropped from SCORING, so
+// excluding the category to silence four unsatisfiable T4 checks stopped
+// scoring the other 49 as well.
+func TestReport_ExcludeCheckLevelSelectorKeepsSiblingsScored(t *testing.T) {
+	r := NewReport("test:0")
+	r.Add(CheckResult{Category: "serving_mode", Name: "content_get_out_of_scope_404", Severity: Fail})
+	r.Add(CheckResult{Category: "serving_mode", Name: "content_get_in_scope_status", Severity: Fail})
+	r.Add(CheckResult{Category: "other", Name: "z", Severity: Pass})
+	r.Finalize()
+
+	r.ExcludeCategories(map[string]bool{"serving_mode.content_get_out_of_scope_404": true})
+
+	if r.Summary.Total != 2 {
+		t.Fatalf("total = %d; want 2 (only the named check dropped)", r.Summary.Total)
+	}
+	if r.Summary.Failed != 1 {
+		t.Errorf("failed = %d; want 1 — the in-scope failure MUST still be scored", r.Summary.Failed)
+	}
+	for _, c := range r.Checks {
+		if c.Name == "content_get_out_of_scope_404" {
+			t.Error("the check-level selector did not drop its target")
+		}
+	}
+}
+
 func TestCheckRunner_RecordsElapsed(t *testing.T) {
 	r := NewCheckRunner("test")
 	r.Declare("timed", "§1")

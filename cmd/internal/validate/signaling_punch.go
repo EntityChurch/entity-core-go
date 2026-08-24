@@ -66,8 +66,12 @@ func runSignalingPunch(ctx context.Context, r *CheckRunner, sigA, sigB *signalin
 			return FailCheck("derive pair key: " + err.Error())
 		}
 		var dialedA, dialedB atomic.Bool
-		partyA := punchParty(sigA, key, peerA.Keypair(), localA, &dialedA)
-		partyB := punchParty(sigB, key, peerB.Keypair(), localB, &dialedB)
+		// §11.5 deposit-bound teeth: count what reaches the node, per side, so a
+		// brute-force establishment cannot pass this gate on volume.
+		carrierA := &countingCarrier{Carrier: sigA}
+		carrierB := &countingCarrier{Carrier: sigB}
+		partyA := punchParty(carrierA, key, peerA.Keypair(), localA, &dialedA)
+		partyB := punchParty(carrierB, key, peerB.Keypair(), localB, &dialedB)
 
 		// Bound the punch so a stall never hangs the whole validator.
 		pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -147,9 +151,72 @@ func runSignalingPunch(ctx context.Context, r *CheckRunner, sigA, sigB *signalin
 			return FailCheck("second op after idle (pooled-transport reuse): " + err.Error())
 		}
 
-		return PassCheck(fmt.Sprintf("punched %s↔%s through the live node: candidate+sync exchange, both-fire simultaneous open, §7.4.1 identity, ping/pong over the direct path, and reuse after a 1s idle", idA[:8], idB[:8]))
+		// §11.5 (arch-pinned @ 78fdd13) — the channel MUST open within a BOUNDED
+		// number of coordination deposits: O(1), never scaling with poll or
+		// dispatch count. A gate that only asks "did a channel open?" is passed
+		// green by brute force — N independent negotiations deposited until two
+		// happen to overlap — which is exactly what NETWORK §10.3 obligation 5
+		// forbids and what hammers the shared carrier. Counting semantics are the
+		// pinned ones: OFFER deposits, node vantage, PER SIDE, per establishment.
+		//
+		// The bound is a fixed constant, and the property that fails brute force
+		// is that it is fixed — not its exact value (§11.5 is explicit on this).
+		//
+		// The ceiling is SUBSTRATE-SCOPED as of arch c78b3dc (2026-08-07): WebRTC
+		// has glare-rollback and ICE-restart re-offers, native TCP
+		// simultaneous-open has neither, so 16-on-WebRTC and 3-on-native are both
+		// conformant readings and neither transfers. This gate drives the native
+		// punch, so it scores against 3 — Go measures 1–2/side, still an order of
+		// magnitude below the ~470 brute force produced. The previous 8 came from
+		// browser-rust's WebRTC harness figure and was the wrong scope here.
+		if depA, depB := carrierA.offers(), carrierB.offers(); depA > sigDepositBound || depB > sigDepositBound {
+			return FailCheck(fmt.Sprintf("§11.5 deposit bound exceeded though the channel opened: initiator deposited %d offers, responder %d, bound %d/side on '"+sigDepositSubstrate+"' — a bounded-O(1) establishment is the requirement, not merely a successful one (NETWORK §10.3 obligation 5)", depA, depB, sigDepositBound))
+		}
+
+		return PassCheck(fmt.Sprintf("punched %s↔%s through the live node: candidate+sync exchange, both-fire simultaneous open, §7.4.1 identity, ping/pong over the direct path, reuse after a 1s idle, and %d/%d offer deposits per side within the §11.5 bound of %d", idA[:8], idB[:8], carrierA.offers(), carrierB.offers(), sigDepositBound))
 	})
 }
+
+// sigDepositBound is the §11.5 ceiling on coordination deposits per side per
+// establishment. It is a fixed O(1) constant: §11.5 is explicit that the
+// property which fails brute force is the ceiling being FIXED (never scaling
+// with poll / dispatch / tick count), not its value.
+//
+// SUBSTRATE-SCOPED, and a claim MUST name its substrate's value
+// `[MUST; arch c78b3dc, 2026-08-07]`. The ceiling covers the re-offer paths a
+// substrate can actually produce: WebRTC has glare-rollback and ICE-restart
+// re-offers, native TCP simultaneous-open has neither. **3 on native** and
+// **16 on WebRTC** are both conformant readings of the same rule and neither
+// transfers to the other substrate — comparing a figure across substrates is
+// meaningless.
+//
+// This validator drives the NATIVE punch, so the bound is 3. It was 8 — a
+// number carried over before the ceiling was substrate-scoped, and too loose
+// for native: it would have passed a peer depositing 5, which the ruling makes
+// non-conformant here. Go measures 2/1 per side, inside 3 either way.
+const sigDepositBound = 3
+
+// sigDepositSubstrate names the substrate the bound above belongs to, so a
+// published figure carries its scope rather than inviting a cross-substrate
+// comparison the ruling calls meaningless.
+const sigDepositSubstrate = "native TCP simultaneous-open"
+
+// countingCarrier tallies what a punch party deposits at the node so the gate
+// can assert §11.5's bound. It counts OFFER only — the pinned semantics count
+// deposits, and `collect` is a non-destructive poll of a bucket that persists
+// 60 s (§5 pins 1/6), i.e. the "deposit-once-and-poll-to-completion" shape
+// obligation 5 asks for rather than the load it bounds.
+type countingCarrier struct {
+	signaling.Carrier
+	offerCount atomic.Int64
+}
+
+func (c *countingCarrier) Offer(ctx context.Context, key, message []byte) (uint, error) {
+	c.offerCount.Add(1)
+	return c.Carrier.Offer(ctx, key, message)
+}
+
+func (c *countingCarrier) offers() int64 { return c.offerCount.Load() }
 
 // buildInProcPunchPeer builds a minimal in-process peer for a punch: no listener
 // is started (the punch dials peer-to-peer over the crossed socket; the serve
