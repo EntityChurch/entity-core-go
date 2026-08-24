@@ -13,6 +13,7 @@
 /compare-types
 /compute-corpus
 /conformance-register
+/consume-federation
 /corpus-check
 /dump-messages
 /dump-types

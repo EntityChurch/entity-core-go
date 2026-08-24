@@ -133,6 +133,18 @@ func runCompute(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("reactive_second_update", "COMPUTE §7.2")
 	r.Declare("reactive_final_result", "COMPUTE §7.2")
 
+	// v3.27 D8 (COMPUTE §7.1 / §10.3, arch ROUTING-2026-08-21-h §4b): the §7.1
+	// prose rule is normative — "all compute/lookup/tree paths reachable in the
+	// expression graph are registered." A lookup/tree nested inside a CONTAINER
+	// field MUST be registered as a reactive dependency, so a change to the watched
+	// path re-fires evaluation. Row (a): the only lookup/tree sits in a let binding
+	// (bindings[].value). Row (b, THE DISCRIMINATOR): it sits in an apply arg
+	// (args[]) — a hand-enumerated walker special-casing let.bindings alone passes
+	// (a) and fails (b). §7c-invisible (registration produces no boundary), so it is
+	// a behavioural wire check per §6.2.
+	r.Declare("d8_reeval_dep_in_let_binding", "COMPUTE §7.1 D8 (row a) — a lookup/tree inside let.bindings[].value is registered → dep change re-fires eval")
+	r.Declare("d8_reeval_dep_in_apply_arg", "COMPUTE §7.1 D8 (row b, DISCRIMINATOR) — a lookup/tree inside apply.args is registered → dep change re-fires eval")
+
 	// v3.8 Dynamic handlers — installed compute subgraphs as callable functions.
 	r.Declare("v38_tco_sum_2000", "COMPUTE §4.1 T2/T3")
 	r.Declare("v38_newton_sqrt", "COMPUTE §4.1 T2/T3")
@@ -1458,6 +1470,58 @@ func runCompute(ctx context.Context, client *PeerClient) []CheckResult {
 			return FailCheck(fmt.Sprintf("B1 after A1=0: expected 0 (0*2), got %v (%T)", val, val))
 		}
 		return PassCheck("B1 = A1*2 = 0*2 = 0 (third reactive update, zero case)")
+	})
+
+	// D8 row (a): the only compute/lookup/tree sits inside a let binding
+	// (bindings[0].value). A walker that only descends scalar hash fields (the
+	// §7.1 pseudocode) never enters the bindings array and misses the dependency.
+	r.Run("d8_reeval_dep_in_let_binding", func() CheckOutcome {
+		if out, ok := r.Require("reactive_final_result"); !ok {
+			return out
+		}
+		return d8ReevalRow(ctx, client, peerID, tp+"/d8-let",
+			func(put func(string, entity.Entity) hash.Hash, qualDep string) entity.Entity {
+				// B = let x = lookup/tree(dep) in x*2 — lookup/tree is bindings[0].value.
+				lookupDep, _ := types.ComputeLookupTreeData{Path: qualDep}.ToEntity()
+				lookupH := put("let-lookup", lookupDep)
+				scopeX, _ := types.ComputeLookupScopeData{Name: "x"}.ToEntity()
+				scopeXH := put("let-scopex", scopeX)
+				lit2, _ := types.ComputeLiteralData{Value: uint64(2)}.ToEntity()
+				lit2H := put("let-lit2", lit2)
+				body, _ := types.ComputeArithmeticData{Op: "mul", Left: scopeXH, Right: lit2H}.ToEntity()
+				bodyH := put("let-body", body)
+				expr, _ := types.ComputeLetData{
+					Bindings: []types.ComputeLetBinding{{Name: "x", Value: lookupH}},
+					Body:     bodyH,
+				}.ToEntity()
+				return expr
+			})
+	})
+
+	// D8 row (b) — THE DISCRIMINATOR: the only compute/lookup/tree sits inside an
+	// apply arg (args["n"]). A walker that special-cases let.bindings alone (py's
+	// old _walk_deps enumerated on the literal field name "value") passes row (a)
+	// and MISSES this — the reactive expression evaluates once and is never woken.
+	r.Run("d8_reeval_dep_in_apply_arg", func() CheckOutcome {
+		if out, ok := r.Require("reactive_final_result"); !ok {
+			return out
+		}
+		return d8ReevalRow(ctx, client, peerID, tp+"/d8-apply",
+			func(put func(string, entity.Entity) hash.Hash, qualDep string) entity.Entity {
+				// B = apply(λn. n*2, {n: lookup/tree(dep)}) — lookup/tree is args["n"].
+				scopeN, _ := types.ComputeLookupScopeData{Name: "n"}.ToEntity()
+				scopeNH := put("apply-scopen", scopeN)
+				lit2, _ := types.ComputeLiteralData{Value: uint64(2)}.ToEntity()
+				lit2H := put("apply-lit2", lit2)
+				fnBody, _ := types.ComputeArithmeticData{Op: "mul", Left: scopeNH, Right: lit2H}.ToEntity()
+				fnBodyH := put("apply-fnbody", fnBody)
+				fn, _ := types.ComputeClosureData{Params: []string{"n"}, Body: fnBodyH}.ToEntity()
+				fnH := put("apply-fn", fn)
+				lookupDep, _ := types.ComputeLookupTreeData{Path: qualDep}.ToEntity()
+				lookupH := put("apply-lookup", lookupDep)
+				expr, _ := types.ComputeApplyData{Fn: fnH, Args: map[string]hash.Hash{"n": lookupH}}.ToEntity()
+				return expr
+			})
 	})
 
 	// Step 20: v3.8 Dynamic handlers — TCO-powered algorithms as installed subgraphs.
@@ -3924,6 +3988,86 @@ func computeEvalErrorPropagation(ctx context.Context, client *PeerClient, peerID
 func putCE(ctx context.Context, client *PeerClient, path string, ent entity.Entity) hash.Hash {
 	_, _ = client.TreePut(ctx, path, ent)
 	return ent.ContentHash
+}
+
+// d8ReevalRow drives one D8 (§7.1 / §10.3) walk-completeness row. buildExpr
+// constructs a reactive expression whose ONLY compute/lookup/tree dependency is
+// nested inside a container field (a let binding, or an apply arg — the
+// discriminator); it uses the passed `put` to store child entities under `sp` and
+// returns the top-level expression to install. The flow mirrors the reactive
+// spreadsheet checks (result_path is written by a dependency-triggered re-eval, not
+// at install time):
+//
+//	dep=6 → install(expr) → dep:=9 → assert result_path == 18 (9*2)
+//
+// The observable the PASS/FAIL turns on is result_path reflecting the NEW dep value
+// after the write — the §7.1 [MUST] that "all reachable lookup/tree paths are
+// registered," read through §7.2's reactive re-evaluation. The teeth (AGENTS.md: a
+// no-op must degrade to a visible SKIP/FAIL, never a silent PASS):
+//
+//   - POSITIVE CONTROL is r.Require("reactive_final_result") at the call site: the
+//     direct-dependency reactive path (dep in a top-level arithmetic field) is proven
+//     to re-fire on this peer. Given that, a NESTED dep that does NOT re-fire is
+//     attributable to walk-completeness, not to a broken reactive mechanism.
+//   - install !200 → SKIP (cannot exercise re-eval without a live install).
+//   - after the dep change, result_path missing / not 18 → FAIL: the nested
+//     lookup/tree was NOT registered, so the dep change never re-fired evaluation
+//     (the D8 defect — the result_path a direct dep would have written never appears).
+//   - result_path == 18 → PASS.
+//
+// The observable is fully settled (D8 ruled, arch ROUTING-2026-08-21-h §4b), so this
+// is not a check riding a contested spec semantic.
+func d8ReevalRow(ctx context.Context, client *PeerClient, peerID, sp string,
+	buildExpr func(put func(string, entity.Entity) hash.Hash, qualDep string) entity.Entity) CheckOutcome {
+
+	put := func(name string, ent entity.Entity) hash.Hash {
+		return putCE(ctx, client, sp+"/"+name, ent)
+	}
+
+	depPath := sp + "/dep"
+	qualDep := fmt.Sprintf("/%s/%s", peerID, depPath)
+	depEnt, _ := types.ComputeLiteralData{Value: uint64(6)}.ToEntity()
+	if _, err := client.TreePut(ctx, depPath, depEnt); err != nil {
+		return SkipCheck("seed dependency: " + err.Error())
+	}
+
+	expr := buildExpr(put, qualDep)
+	bPath := sp + "/B"
+	if _, err := client.TreePut(ctx, bPath, expr); err != nil {
+		return SkipCheck("put reactive expression: " + err.Error())
+	}
+
+	qualB := fmt.Sprintf("/%s/%s", peerID, bPath)
+	installReq, _ := types.ComputeInstallRequestData{}.ToEntity()
+	uri := fmt.Sprintf("entity://%s/system/compute", peerID)
+	env, _, err := client.SendExecute(ctx, uri, "install", installReq,
+		&types.ResourceTarget{Targets: []string{qualB}})
+	if err != nil {
+		return SkipCheck("install reactive expression: " + err.Error())
+	}
+	respData, _ := types.ExecuteResponseDataFromEntity(env.Root)
+	if respData.Status != 200 {
+		return SkipCheck(fmt.Sprintf("install status %d — cannot exercise re-evaluation without a live install", respData.Status))
+	}
+
+	// Change the watched dependency 6→9. A registered nested lookup/tree re-fires
+	// evaluation and writes result_path = 9*2 = 18; the D8 defect never registers the
+	// dep, so no re-eval fires and result_path stays absent (or stale). The direct-dep
+	// reactive path is proven to write result_path on a dep change (the required
+	// reactive_final_result control), so a missing/wrong result here is the walk defect.
+	resultPath := qualB + "/result"
+	depEnt2, _ := types.ComputeLiteralData{Value: uint64(9)}.ToEntity()
+	if _, err := client.TreePut(ctx, depPath, depEnt2); err != nil {
+		return SkipCheck("update dependency: " + err.Error())
+	}
+	updated, err := readComputeResultValue(ctx, client, resultPath)
+	if err != nil {
+		return FailCheck("no result at result_path after dep 6→9 — the nested compute/lookup/tree was NOT registered, so re-evaluation never fired (§7.1 D8): " + err.Error())
+	}
+	if !numEq(updated, 18) {
+		return FailCheck(fmt.Sprintf("result %v after dep 6→9, expected 18 (9*2) — nested lookup/tree not registered as a reactive dependency (§7.1 D8)", updated))
+	}
+	return PassCheck("result_path re-evaluated to 18 after dep 6→9 (control: reactive_final_result proves the direct-dep path) — nested lookup/tree registered, re-evaluation fired (§7.1 D8)")
 }
 
 // numEq compares a value against an expected number, handling CBOR int/uint/float coercion.
