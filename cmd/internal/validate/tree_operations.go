@@ -1,6 +1,7 @@
 package validate
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math/rand"
@@ -10,6 +11,7 @@ import (
 	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/store"
+	"go.entitychurch.org/entity-core-go/core/tree"
 	"go.entitychurch.org/entity-core-go/core/types"
 
 	"github.com/fxamacker/cbor/v2"
@@ -84,6 +86,16 @@ func runTreeOperations(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("roundtrip_trie_nodes_included", "TREE §6.2")
 	r.Declare("roundtrip_merge_execute", "TREE §5.2")
 	r.Declare("roundtrip_verify_entity", "TREE §5.2")
+
+	// Step 8b: byte fidelity of an ingested entity across merge. Entity data is
+	// opaque bytes (PROTOCOL §1.8: hash is over {type, data}, data verbatim), so a
+	// peer that rebuilds an entity's data from a DECODED value loses any byte a
+	// canonical encoder would not author — the ingested binding then resolves to
+	// nothing (a re-encoded copy under a different hash) while merge reports 200.
+	// core-rust hit exactly this and asked why the round-trip check above missed
+	// it: that check is blind on three axes (canonical fixture · same-peer copy ·
+	// harness re-encode). This one closes all three.
+	r.Declare("merge_noncanonical_byte_fidelity", "TREE §5.2, V7 §1.8")
 
 	// Step 9: CAS semantics
 	r.Declare("cas_match", "V7 §3.9")
@@ -771,6 +783,130 @@ func runTreeOperations(ctx context.Context, client *PeerClient) []CheckResult {
 			return PassCheck(fmt.Sprintf("entity at %stest-1 matches source hash after merge", dstPrefix))
 		}
 		return FailCheck(fmt.Sprintf("entity hash mismatch: got %s, expected %s", gotEntity.ContentHash, testHash))
+	})
+
+	// --- Step 8b: non-canonical byte fidelity across merge ingest ---
+
+	r.Run("merge_noncanonical_byte_fidelity", func() CheckOutcome {
+		dstPrefix := "system/validate/fidelity-dst/"
+		uri := fmt.Sprintf("entity://%s/system/tree", client.remotePeerID)
+
+		// Two fresh entities the peer has NEVER been given (defeats the same-peer
+		// masking axis: with a prior copy under the true hash, a binding resolves
+		// even if merge stored a re-encoded copy under a different hash).
+		//
+		// Control: canonical. Discriminator: {"v": 1} with 1 written non-minimally
+		// as 0x18 0x01 — valid CBOR that no canonical encoder authors, so a
+		// decode→re-encode changes the bytes and the content hash. This is the only
+		// fixture shape that separates a byte-faithful peer from one that rebuilds
+		// entity data from a decoded value.
+		canonData, _ := ecf.Encode(map[string]int{"fidelity": 1})
+		canonEnt, err := entity.NewEntity("system/validate/fidelity", cbor.RawMessage(canonData))
+		if err != nil {
+			return FailCheck("build canonical control entity: " + err.Error())
+		}
+		nonCanonData := cbor.RawMessage([]byte{0xA1, 0x61, 0x76, 0x18, 0x01})
+		nonCanonEnt, err := entity.NewEntity("system/validate/fidelity", nonCanonData)
+		if err != nil {
+			return FailCheck("build non-canonical entity: " + err.Error())
+		}
+
+		// Assemble a source_envelope entirely client-side over a fresh store, so the
+		// peer's only copy of these entities arrives through the merge ingest.
+		cs := store.NewMemoryContentStore()
+		if _, err := cs.Put(canonEnt); err != nil {
+			return FailCheck("stage canonical entity: " + err.Error())
+		}
+		if _, err := cs.Put(nonCanonEnt); err != nil {
+			return FailCheck("stage non-canonical entity: " + err.Error())
+		}
+		root, err := tree.BuildTrie(cs, []tree.Binding{
+			{Path: "canon-1", Hash: canonEnt.ContentHash},
+			{Path: "noncanon-1", Hash: nonCanonEnt.ContentHash},
+		})
+		if err != nil {
+			return FailCheck("build source trie: " + err.Error())
+		}
+		snapEnt, err := types.SnapshotData{Root: root}.ToEntity()
+		if err != nil {
+			return FailCheck("build snapshot entity: " + err.Error())
+		}
+		included := make(map[hash.Hash]entity.Entity)
+		tree.CollectTrieEntitiesExcept(cs, root, nil, included)
+		envEnt, err := entity.Envelope{Root: snapEnt, Included: included}.ToEntity()
+		if err != nil {
+			return FailCheck("build source envelope: " + err.Error())
+		}
+
+		// Splice the RAW envelope-entity bytes into source_envelope. Round-tripping
+		// through interface{}/ecf.Encode here — as roundtrip_merge_execute does —
+		// would canonicalize the non-canonical leaf in the HARNESS before the peer
+		// ever saw it (the third blindness axis), making this check test nothing.
+		envRaw, err := ecf.Encode(envEnt)
+		if err != nil {
+			return FailCheck("encode source envelope entity: " + err.Error())
+		}
+		mergeReq := types.MergeRequestData{
+			SourceEnvelope: cbor.RawMessage(envRaw),
+			SourcePrefix:   "system/validate/fidelity-src/",
+			TargetPrefix:   dstPrefix,
+			Strategy:       "source-wins",
+		}
+		mergeParams, err := mergeReq.ToEntity()
+		if err != nil {
+			return FailCheck("build merge params: " + err.Error())
+		}
+
+		extras := make(map[hash.Hash]entity.Entity, len(included)+1)
+		for h, e := range included {
+			extras[h] = e
+		}
+		extras[snapEnt.ContentHash] = snapEnt
+
+		resource := &types.ResourceTarget{Targets: []string{dstPrefix}}
+		mergeEnv, _, err := client.SendExecuteWithIncluded(ctx, uri, "merge", mergeParams, resource, extras)
+		if err != nil {
+			return FailCheck("merge send failed: " + err.Error())
+		}
+		respData, err := types.ExecuteResponseDataFromEntity(mergeEnv.Root)
+		if err != nil || respData.Status != 200 {
+			st := uint(0)
+			if err == nil {
+				st = respData.Status
+			}
+			return FailCheck(fmt.Sprintf("merge returned status %d (want 200), err=%v", st, err))
+		}
+
+		// Cleanup both mirrored bindings regardless of outcome.
+		defer func() {
+			for _, key := range []string{"canon-1", "noncanon-1"} {
+				rp, _, _ := createRemoveRequest(dstPrefix + key)
+				if rp.Type != "" {
+					client.SendExecute(ctx, uri, "put", rp, nil)
+				}
+			}
+		}()
+
+		// Positive control (carry-the-teeth): the canonical sibling MUST round-trip.
+		// If it does not, the merge/binding path itself is broken and a
+		// non-canonical failure would not be attributable to fidelity loss — SKIP.
+		gotCanon, _, err := client.TreeGet(ctx, dstPrefix+"canon-1")
+		if err != nil || gotCanon.ContentHash != canonEnt.ContentHash {
+			return SkipCheck(fmt.Sprintf("canonical control did not round-trip through merge (err=%v hash=%s) — merge path broken, fidelity not attributable", err, gotCanon.ContentHash))
+		}
+
+		// Discriminator: the non-canonical entity must return byte-identical.
+		gotNC, _, err := client.TreeGet(ctx, dstPrefix+"noncanon-1")
+		if err != nil {
+			return FailCheck(fmt.Sprintf("non-canonical binding did not resolve after merge (%v): a re-encode stored the entity under a hash the binding does not point to — byte fidelity lost", err))
+		}
+		if gotNC.ContentHash != nonCanonEnt.ContentHash {
+			return FailCheck(fmt.Sprintf("non-canonical entity hash changed across merge: got %s, want %s — the peer rebuilt entity data from a decoded value (byte fidelity lost)", gotNC.ContentHash, nonCanonEnt.ContentHash))
+		}
+		if !bytes.Equal(gotNC.Data, nonCanonData) {
+			return FailCheck(fmt.Sprintf("non-canonical entity bytes changed across merge: got %x, want %x (byte fidelity lost)", gotNC.Data, []byte(nonCanonData)))
+		}
+		return PassCheck("non-canonical entity survived extract→merge byte-identical (canonical control also round-tripped)")
 	})
 
 	// --- Step 9: CAS semantics ---

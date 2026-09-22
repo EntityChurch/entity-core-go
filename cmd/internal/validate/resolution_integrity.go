@@ -62,6 +62,8 @@ func runResolutionIntegrity(ctx context.Context, newClient func() (*PeerClient, 
 		"V7 §1.8/§5.2a (K1, 0.8.2.23): the attacker's identity filed under the victim's author hash, EXECUTE signed by the attacker's key, MUST be REFUSED — a peer that resolves author BY the unverified key verifies the attacker's own signature and attributes it to the victim (impersonation, no victim key). Records the (status, code); §5.2a assigns the author row 401 authentication_failed, and a key-binding peer's uniform map-wide verdict is conformant.")
 	r.Declare("resolution_integrity_signer_mismatch_control",
 		"V7 §5.2a (K1 attributability): correct identity, correctly keyed, EXECUTE signed by the attacker's key MUST be refused. Proves signature verification is live, so an ACCEPTED author-forgery would be the substituted key being trusted, not a skipped check.")
+	r.Declare("resolution_integrity_wrong_root_type_invalid_request",
+		"ENTITY-CORE-PROTOCOL §3.3 / §4.11 (0.8.2.25 pre-admission refusal): a post-handshake frame whose ROOT entity is neither EXECUTE nor EXECUTE_RESPONSE (here a well-formed third-typed entity) MUST be refused 400 invalid_request with a coded frame — the pre-0.8.2.25 corpus mandated a bare close here, which §4.11 replaces (a bare close is indistinguishable from a network fault and, on a multiplexed connection, destroys unrelated admitted requests). The code is the CAUSE's (invalid_request), distinct from the resolution-integrity arm's hash_mismatch. Positive control: this category's self-signed EXECUTE succeeds (200), so the 400 here is attributable to the root TYPE, not a broken request. A silent drop / bare close (no coded frame) is the non-conformance.")
 
 	// The author-forgery arm's refusal is a RECEIVE-boundary connection close
 	// (go's validateRecv path), which is terminal for the connection. Run this
@@ -103,6 +105,7 @@ func runResolutionIntegrity(ctx context.Context, newClient func() (*PeerClient, 
 			"resolution_integrity_positive_control",
 			"resolution_integrity_signer_mismatch_control",
 			"resolution_integrity_author_forgery",
+			"resolution_integrity_wrong_root_type_invalid_request",
 		} {
 			r.Run(name, func() CheckOutcome { out, _ := setupGate(); return out })
 		}
@@ -269,6 +272,33 @@ func runResolutionIntegrity(ctx context.Context, newClient func() (*PeerClient, 
 			return FailCheck("signer-mismatch control ACCEPTED (200): the peer honored a signature that does not verify against the resolved author — signature verification is not live, so the author-forgery result is unattributable")
 		}
 		return PassCheck(fmt.Sprintf("signer mismatch refused (status=%d code=%q) — signature verification is live, so an accepted forgery would be the substituted key being trusted", status, code))
+	})
+
+	// (pre-admission) wrong root type: a well-formed frame whose ROOT is a third
+	// entity type (neither EXECUTE nor EXECUTE_RESPONSE nor a §6.5(b) reentry
+	// grant) → MUST refuse 400 invalid_request with a coded frame, and the
+	// connection MUST survive (the frame decoded whole; §4.9(c) forbids
+	// destroying admitted in-flight requests over one bad frame). Runs BEFORE the
+	// forgery arm because that arm closes the connection.
+	r.Run("resolution_integrity_wrong_root_type_invalid_request", func() CheckOutcome {
+		if out, ok := gate(); !ok {
+			return out
+		}
+		thirdType, err := entity.NewEntity("system/validate/preadmission", rawParams)
+		if err != nil {
+			return FailCheck("build third-type root: " + err.Error())
+		}
+		status, code, closed := sendClassify(entity.NewEnvelope(thirdType, nil))
+		if closed {
+			return FailCheck("wrong-root-type frame got no decodable coded response (bare close / silent drop) — the pre-0.8.2.25 non-conformance; §4.11 requires a coded 400 invalid_request frame")
+		}
+		if status == 400 && code == "invalid_request" {
+			return PassCheck("wrong-root-type frame refused 400 invalid_request with a coded frame, connection survived (§4.11 pre-admission refusal; the positive control's 200 makes this attributable to the root type)")
+		}
+		if status == 200 {
+			return FailCheck("wrong-root-type frame ACCEPTED (200): a non-EXECUTE/EXECUTE_RESPONSE root reached dispatch")
+		}
+		return FailCheck(fmt.Sprintf("wrong-root-type FAIL: got status=%d code=%q; want 400 invalid_request", status, code))
 	})
 
 	// (K1) author forgery: attacker identity under the victim's author hash,

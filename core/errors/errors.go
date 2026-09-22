@@ -108,6 +108,19 @@ var (
 	// loop can choose to emit the coded response before tearing down the
 	// connection rather than dropping silently.
 	ErrFrameTooLarge = errors.New("frame too large")
+
+	// ErrEnvelopeDecode indicates a wire frame that was read whole but could not
+	// be decoded into an Envelope — un-parseable or non-canonical CBOR. This is
+	// the "a frame that never becomes an Envelope at all" population of
+	// ENTITY-CORE-PROTOCOL §4.11 (0.8.2.25), and it surfaces as
+	// 400 invalid_request via a best-effort coded frame (a pre-admission
+	// refusal). Distinct from ErrFrameTooLarge (413, detected at the length
+	// prefix) and from a transport read error (EOF / reset): a complete frame
+	// with an undecodable payload leaves the stream synchronized on the next
+	// frame boundary, so the serve loop emits the coded frame and MAY keep
+	// serving — §4.9(c) forbids destroying admitted in-flight requests on a
+	// multiplexed connection over one bad frame.
+	ErrEnvelopeDecode = errors.New("envelope decode")
 )
 
 // ValidationError carries field-level validation context.

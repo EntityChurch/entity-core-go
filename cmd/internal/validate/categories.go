@@ -53,6 +53,7 @@ func AllCategories() []string {
 		catPeerIDForm,
 		catPeerIssued,
 		catPolicyDualForm,
+		catPreadmissionRefusal,
 		catPublishedRoot,
 		catPublishFetchHTTPPoll,
 		catQuery,

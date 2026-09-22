@@ -268,9 +268,23 @@ func (h *Handler) handleMerge(_ context.Context, req *handler.Request) (*handler
 			return handler.NewErrorResponse(400, "invalid_params",
 				"could not decode source_envelope as entity or envelope")
 		}
+		// §1.8 resolution integrity, applied to a surface that bypasses the receive
+		// boundary: the source_envelope arrives INSIDE params.data, so its nested
+		// included map is never seen by Envelope.ValidateAll — yet the merge binds
+		// paths to the hashes it carries. Bind every included key to its content
+		// BEFORE ingest (a mis-keyed entry is the forgery vector core-rust routed
+		// 2026-09-13) and refuse a failed Put rather than dropping it silently,
+		// which would leave a binding resolving to nothing while merge reports 200.
+		if err := entity.VerifyIncludedKeyBinding(env.Included); err != nil {
+			return handler.NewErrorResponse(400, "invalid_params",
+				"merge source_envelope included map failed §1.8 key-binding: "+err.Error())
+		}
 		// Ingest all included entities into the content store.
 		for _, ent := range env.Included {
-			hctx.Store.Put(ent)
+			if _, err := hctx.Store.Put(ent); err != nil {
+				return handler.NewErrorResponse(400, "invalid_params",
+					"merge source_envelope included entity rejected: "+err.Error())
+			}
 		}
 		// Store the root (snapshot) entity and use its hash as source.
 		rootHash, err := hctx.Store.Put(env.Root)
@@ -412,8 +426,24 @@ func (h *Handler) handleExtract(_ context.Context, req *handler.Request) (*handl
 
 	// Prefix from the effective resource target (§5.2, 0.8.2.20) first, fallback
 	// to params. effective[0], never Targets[0] — the F68 subject rule.
+	//
+	// N6 (EXTENSION-TREE §2.2a, 0.8.2.25) — extract is a BROAD-RESULT operation
+	// and the WIDEST of the three: its absent case ranges over every bound entity
+	// under the prefix (get leaks a listing of paths, snapshot a root hash,
+	// extract the entities themselves). The two empties are not the same request:
+	// a genuinely absent resource asks for the params-prefix (or whole-tree)
+	// extract — legitimate — but a resource PRESENT with a non-empty target set
+	// whose effective set is empty (the caller named a target and excluded it,
+	// §5.2) MUST be refused 400 path_required, not served the wider result. Same
+	// guard as tree:get (handler.go) and tree:snapshot (above); extract had none
+	// (validatePrefix("") passes → whole-tree extract at 200) until 0.8.2.25.
+	eff := hctx.EffectiveTargets()
+	if len(eff) == 0 && hctx.Resource != nil && len(hctx.Resource.Targets) > 0 {
+		return handler.NewErrorResponse(400, "path_required",
+			"resource is present with a non-empty target set whose effective set is empty (all targets excluded) — not the absent-resource extract case (N6)")
+	}
 	prefix := extractReq.Prefix
-	if eff := hctx.EffectiveTargets(); len(eff) > 0 {
+	if len(eff) > 0 {
 		prefix = eff[0]
 	}
 

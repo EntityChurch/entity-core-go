@@ -453,6 +453,143 @@ func (c *PeerClient) sendAndReadResponse(ctx context.Context, requestID string, 
 	}
 }
 
+// --- pre-admission refusal (§4.11) raw-frame primitives ---
+//
+// These drive the pre-admission refusal class: bytes that are NOT a well-formed
+// envelope (framing / un-parseable / oversize), and the multiplex arm (f) where
+// such a frame must NOT destroy an admitted in-flight request on the same
+// connection (§4.9(c)). They need raw socket access below the envelope layer and
+// direct control of the background-reader waiter registration, so they live here
+// beside sendAndReadResponse rather than in the check.
+
+// writeRawBytes puts arbitrary bytes on the wire below the envelope layer. TCP
+// only (the framing arms have no HTTP analogue — HTTP has no framing to corrupt).
+func (c *PeerClient) writeRawBytes(ctx context.Context, data []byte) error {
+	rw, ok := c.transport.(rawWritable)
+	if !ok {
+		return fmt.Errorf("transport does not support raw writes (pre-admission probes are TCP-only)")
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return rw.WriteRaw(ctx, data)
+}
+
+// SendRawBytesSingleAwait writes raw bytes and awaits the peer's coded response.
+// The pre-admission coded frame carries NO request_id (the bytes never became an
+// Envelope), so it is routed by the background reader's single-in-flight fallback
+// (bgWaiters==1). REQUIRES the bg reader active and NO other request in flight.
+// Used by the framing / oversize arms, which each drive one frame in isolation.
+func (c *PeerClient) SendRawBytesSingleAwait(ctx context.Context, data []byte) ([]byte, error) {
+	if !c.bgReader {
+		if err := c.writeRawBytes(ctx, data); err != nil {
+			return nil, fmt.Errorf("send raw: %w", err)
+		}
+		return c.readResponseFrame(ctx)
+	}
+	id := "preadmission-" + c.NextRequestID()
+	ch := make(chan bgFrame, 1)
+	c.bgPending.Store(id, ch)
+	c.bgWaiters.Add(1)
+	cleanup := func() {
+		if _, ok := c.bgPending.LoadAndDelete(id); ok {
+			c.bgWaiters.Add(-1)
+		}
+	}
+	if err := c.writeRawBytes(ctx, data); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("send raw: %w", err)
+	}
+	timer := time.NewTimer(time.Until(ioDeadline(ctx)))
+	defer timer.Stop()
+	select {
+	case f := <-ch:
+		if f.err != nil {
+			return nil, f.err
+		}
+		return f.raw, nil
+	case <-timer.C:
+		cleanup()
+		return nil, fmt.Errorf("read response: i/o timeout")
+	case <-ctx.Done():
+		cleanup()
+		return nil, fmt.Errorf("read response: %w", ctx.Err())
+	case <-c.bgDone:
+		err := c.bgErr
+		if err == nil {
+			err = fmt.Errorf("connection closed")
+		}
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+}
+
+// SendEnvelopeAwaitable registers a waiter for requestID and writes env, WITHOUT
+// blocking on the response. It returns an await func (call to collect the
+// id-matched response) and a cleanup func. This lets a caller keep a genuine
+// request in flight while injecting other frames on the same socket — the
+// multiplex arm (f). TCP/bg-reader only.
+func (c *PeerClient) SendEnvelopeAwaitable(ctx context.Context, requestID string, env entity.Envelope) (await func() ([]byte, error), cleanup func(), err error) {
+	if !c.bgReader {
+		return nil, nil, fmt.Errorf("awaitable send needs the background reader (TCP)")
+	}
+	ch := make(chan bgFrame, 1)
+	c.bgPending.Store(requestID, ch)
+	c.bgWaiters.Add(1)
+	cleanup = func() {
+		if _, ok := c.bgPending.LoadAndDelete(requestID); ok {
+			c.bgWaiters.Add(-1)
+		}
+	}
+	if werr := c.writeEnvelope(ctx, env); werr != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("send execute: %w", werr)
+	}
+	await = func() ([]byte, error) {
+		timer := time.NewTimer(time.Until(ioDeadline(ctx)))
+		defer timer.Stop()
+		select {
+		case f := <-ch:
+			if f.err != nil {
+				return nil, f.err
+			}
+			return f.raw, nil
+		case <-timer.C:
+			cleanup()
+			return nil, fmt.Errorf("await: i/o timeout")
+		case <-ctx.Done():
+			cleanup()
+			return nil, fmt.Errorf("await: %w", ctx.Err())
+		case <-c.bgDone:
+			e := c.bgErr
+			if e == nil {
+				e = fmt.Errorf("connection closed")
+			}
+			return nil, fmt.Errorf("await: %w", e)
+		}
+	}
+	return await, cleanup, nil
+}
+
+// ReservePreadmissionSink registers a sacrificial waiter so an empty-request_id
+// pre-admission coded frame — which the single-in-flight fallback would
+// otherwise MISROUTE to a real in-flight request — is DROPPED under the
+// bgWaiters>=2 rule, while the genuine request keeps its own id-matched routing.
+// The multiplex arm holds one of these across the bad-frame injection. Returns a
+// cleanup func to release it.
+func (c *PeerClient) ReservePreadmissionSink() func() {
+	if !c.bgReader {
+		return func() {}
+	}
+	id := "preadmission-sink-" + c.NextRequestID()
+	ch := make(chan bgFrame, 1)
+	c.bgPending.Store(id, ch)
+	c.bgWaiters.Add(1)
+	return func() {
+		if _, ok := c.bgPending.LoadAndDelete(id); ok {
+			c.bgWaiters.Add(-1)
+		}
+	}
+}
+
 // SetVerbose enables wire trace output on stderr.
 // SetProfile sets the V7 v7.72 §9.0 conformance profile the client
 // reports for per-check carve-outs ("core" or "full"). Called from the
@@ -831,11 +968,13 @@ func (c *PeerClient) ActiveHashFormat() byte {
 	return c.activeHashFormat
 }
 
-// SendExecute sends an authenticated EXECUTE and returns the response envelope
-// plus the raw frame bytes.
-func (c *PeerClient) SendExecute(ctx context.Context, uri, operation string, params entity.Entity, resource *types.ResourceTarget) (entity.Envelope, []byte, error) {
-	requestID := fmt.Sprintf("validate-%d", c.requestSeq.Add(1))
-
+// BuildAuthenticatedExecute constructs the authenticated EXECUTE envelope
+// SendExecute would send — same author/cap/signature and the same
+// authenticate-response included chain — but does NOT send it. The caller owns
+// the write and the response wait, which is what the pre-admission multiplex arm
+// (f) needs: keep this request in flight (via SendEnvelopeAwaitable) while
+// injecting a bad frame on the same socket.
+func (c *PeerClient) BuildAuthenticatedExecute(requestID, uri, operation string, params entity.Entity, resource *types.ResourceTarget) (entity.Envelope, error) {
 	env, err := protocol.CreateAuthenticatedExecute(
 		c.keypair,
 		c.identityEntity,
@@ -847,13 +986,24 @@ func (c *PeerClient) SendExecute(ctx context.Context, uri, operation string, par
 		resource,
 	)
 	if err != nil {
-		return entity.Envelope{}, nil, fmt.Errorf("create execute: %w", err)
+		return entity.Envelope{}, fmt.Errorf("create execute: %w", err)
 	}
-
 	// Include entities from the authenticate response (granter identity, capability
 	// signature, etc.) — required for verifyCapabilityChain on the server side.
 	for h, ent := range c.authenticateIncluded {
 		env.Include(entity.Entity{Type: ent.Type, Data: ent.Data, ContentHash: h})
+	}
+	return env, nil
+}
+
+// SendExecute sends an authenticated EXECUTE and returns the response envelope
+// plus the raw frame bytes.
+func (c *PeerClient) SendExecute(ctx context.Context, uri, operation string, params entity.Entity, resource *types.ResourceTarget) (entity.Envelope, []byte, error) {
+	requestID := fmt.Sprintf("validate-%d", c.requestSeq.Add(1))
+
+	env, err := c.BuildAuthenticatedExecute(requestID, uri, operation, params, resource)
+	if err != nil {
+		return entity.Envelope{}, nil, err
 	}
 
 	rawBytes, err := c.sendAndReadResponse(ctx, requestID, env)

@@ -450,6 +450,13 @@ func (s *ValidationSuite) Run(ctx context.Context) (*Report, error) {
 	// refused, never resolved as the victim.
 	runCat(catResolutionIntegrity, func() []CheckResult { return runResolutionIntegrity(ctx, s.newClient) })
 
+	// CORE-PREADMISSION-REFUSAL-1 (§4.11, 0.8.2.25): a frame refused before it is
+	// admitted as a request — un-parseable/truncated CBOR, wrong root type,
+	// oversize, mis-keyed included — MUST get a coded frame (a bare close and a
+	// silent drop are two non-conformances), and a framing refusal MUST NOT
+	// destroy an admitted in-flight request on a multiplexed connection (§4.9(c)).
+	runCat(catPreadmissionRefusal, func() []CheckResult { return runPreadmissionRefusal(ctx, s.newClient) })
+
 	// The §5.2/§5.4/§6.3 capability-EXCLUDE read/enumeration matrix under a
 	// NARROW cap — the arm every broad-cap category is structurally blind to.
 	runCat(catExcludeMatrix, func() []CheckResult { return runExcludeMatrix(ctx, client) })
@@ -910,6 +917,8 @@ func (s *ValidationSuite) RunCategory(ctx context.Context, category string) (*Re
 		report.AddAll(runResourceEffective(ctx, client))
 	case catResolutionIntegrity:
 		report.AddAll(runResolutionIntegrity(ctx, s.newClient))
+	case catPreadmissionRefusal:
+		report.AddAll(runPreadmissionRefusal(ctx, s.newClient))
 	case catExcludeMatrix:
 		report.AddAll(runExcludeMatrix(ctx, client))
 	case catAttestation:

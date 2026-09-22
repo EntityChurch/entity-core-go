@@ -6,6 +6,7 @@ import (
 
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
+	ecerrors "go.entitychurch.org/entity-core-go/core/errors"
 )
 
 // WriteEnvelope ECF-encodes an envelope and writes it as a length-prefixed frame.
@@ -42,7 +43,11 @@ func ReadEnvelopeNoValidate(r io.Reader) (entity.Envelope, error) {
 
 	var env entity.Envelope
 	if err := ecf.Decode(data, &env); err != nil {
-		return entity.Envelope{}, fmt.Errorf("decode envelope: %w", err)
+		// §4.11 (0.8.2.25): a whole frame that will not decode is the
+		// "never becomes an Envelope" population — tag it so the serve loop
+		// answers 400 invalid_request rather than bare-closing, and so it can
+		// keep the (synchronized) connection alive for admitted in-flight work.
+		return entity.Envelope{}, fmt.Errorf("decode envelope: %w: %w", ecerrors.ErrEnvelopeDecode, err)
 	}
 
 	return env, nil

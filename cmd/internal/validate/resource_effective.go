@@ -49,6 +49,8 @@ func runResourceEffective(ctx context.Context, client *PeerClient) []CheckResult
 		"ENTITY-CORE-PROTOCOL §3.3 (N6, 0.8.2.24; EXTENSION-TREE get row): the two empties differ. A genuinely ABSENT resource → 200 root listing (the positive control, established by the same drive); a resource PRESENT with a non-empty target set whose EFFECTIVE set is empty (in-grant P, exclude:[P]) → 400 path_required. Serving the second case a listing answers a request for one excluded path with a listing of the tree — the defect N6 closes. The excluded target is IN-GRANT so the 400 is attributable to N6, not to a capability denial. WIRE vector: an in-tree test cannot see a dispatch that pre-narrows targets to effective (rust's N6 was dead code at the wire for exactly this reason); this arm drives the real dispatch path.")
 	r.Declare("resource_effective_tree_snapshot_n6_two_empties",
 		"ENTITY-CORE-PROTOCOL 0.8.2.24 N6, snapshot form (py's cross-impl finding 2026-09-12): tree:snapshot binds N6 too, and is its widest form — §8.4 exempts the snapshot→diff path from a path check, so a self-excluded target served the whole-tree snapshot leaks the excluded key + its content hash out of a diff-against-empty. ABSENT resource → 200 snapshot (positive control); PRESENT with empty effective set → 400 path_required.")
+	r.Declare("resource_effective_tree_extract_n6_two_empties",
+		"ENTITY-CORE-PROTOCOL 0.8.2.25 N6, extract form (EXTENSION-TREE §2.2a; arch ROUTING-2026-09-14-e §4): tree:extract is the THIRD BROAD-RESULT site and the WIDEST — get leaks a listing of paths, snapshot a root hash, extract returns the bound entities themselves. Until 0.8.2.25 go's handleExtract had no N6 guard (self-excluded target fell back to the params prefix, default \"\", validatePrefix(\"\") true → whole-tree extract at 200). ABSENT resource → 200 extract of the tree (positive control, established by the same drive so the 400 is attributable to N6, not a capability denial); PRESENT with empty effective set (targets:[P] exclude:[P]) → 400 path_required. WIRE vector: an in-tree test cannot see the dispatch pre-narrowing (rust's N6 was dead code at the wire for exactly this).")
 
 	remote := string(client.RemotePeerID())
 	treeURI := fmt.Sprintf("entity://%s/system/tree", remote)
@@ -332,7 +334,77 @@ func runResourceEffective(ctx context.Context, client *PeerClient) []CheckResult
 		return FailCheck(fmt.Sprintf("N6 snapshot FAIL: got status=%d code=%q; want 400 path_required", status, code))
 	})
 
+	// N6 (0.8.2.25) — tree:extract two-empties on the WIRE (arch §4, the widest
+	// BROAD-RESULT site). Same shape as snapshot; extract returns the ENTITIES, so
+	// the positive control is scoped to the already-seeded `base/` prefix (the two
+	// f68 markers) rather than the whole tree — a whole-tree extract after the full
+	// suite has run returns every bound entity and times out. arch requirement 2:
+	// assert the absent extract CONTAINS a seeded binding, so a peer that never
+	// reached the branch (empty count) does not pass the positive control.
+	r.Run("resource_effective_tree_extract_n6_two_empties", func() CheckOutcome {
+		if setupErr != "" {
+			return FailCheck("setup: " + setupErr)
+		}
+		basePrefix := base + "/"
+		extractParams, eErr := types.ExtractRequestData{Prefix: basePrefix}.ToEntity()
+		if eErr != nil {
+			return FailCheck("build extract params: " + eErr.Error())
+		}
+		// Positive control: absent resource → extract of the seeded prefix (200),
+		// and it MUST contain the seeded bindings.
+		aEnv, _, aErr := client.SendExecute(ctx, treeURI, "extract", extractParams, nil)
+		if aErr != nil {
+			return FailCheck("send absent extract: " + aErr.Error())
+		}
+		aStatus, aCode, _, _ := extractStatusAndCode(aEnv)
+		if aStatus != 200 {
+			return FailCheck(fmt.Sprintf("N6 extract UNATTRIBUTABLE: absent resource did not serve an extract of the seeded prefix (status=%d code=%q); the 400 below cannot be attributed to presence-with-exclusion", aStatus, aCode))
+		}
+		if n := extractedBindingCount(aEnv); n == 0 {
+			return FailCheck("N6 extract UNATTRIBUTABLE: absent extract of the seeded prefix returned no bindings — cannot distinguish a served extract from a peer that never reached the branch (arch requirement 2)")
+		}
+		// Discriminator: present, sole target excluded → empty effective → 400
+		// path_required (the N6 guard fires before the prefix/path check, so the
+		// target path need not be specially placed; the 400 is path_required, not
+		// a capability denial).
+		selfExcl := base + "/allowed/y"
+		res := &types.ResourceTarget{Targets: []string{selfExcl}, Exclude: []string{selfExcl}}
+		env, _, err := client.SendExecute(ctx, treeURI, "extract", extractParams, res)
+		if err != nil {
+			return FailCheck("send self-excluded extract: " + err.Error())
+		}
+		status, code, _, _ := extractStatusAndCode(env)
+		if status == 400 && code == "path_required" {
+			return PassCheck("N6 extract: absent → 200 extract with the seeded bindings, present-but-effectively-empty (targets:[P] exclude:[P]) → 400 path_required. The widest BROAD-RESULT site does not return the bound entities for a request that names one excluded path.")
+		}
+		if status == 200 {
+			return FailCheck("N6 extract FAIL: targets:[P] exclude:[P] answered 200 — a self-excluded target was served the extract (bound entities), the widest N6 leak")
+		}
+		return FailCheck(fmt.Sprintf("N6 extract FAIL: got status=%d code=%q; want 400 path_required", status, code))
+	})
+
 	return r.Results()
+}
+
+// extractedBindingCount returns the number of bindings in a tree:extract
+// response. handleExtract bundles the result as an envelope encoded into the
+// result entity's Data, so we decode two layers: the EXECUTE_RESPONSE result
+// entity, then the extract envelope it carries. Returns 0 on any decode miss —
+// the caller treats 0 as "no bindings", which fails the positive control.
+func extractedBindingCount(respEnv entity.Envelope) int {
+	respData, err := types.ExecuteResponseDataFromEntity(respEnv.Root)
+	if err != nil {
+		return 0
+	}
+	var resultEnt entity.Entity
+	if err := ecf.Decode(respData.Result, &resultEnt); err != nil {
+		return 0
+	}
+	var extractEnv entity.Envelope
+	if err := ecf.Decode(resultEnt.Data, &extractEnv); err != nil {
+		return 0
+	}
+	return len(extractEnv.Included)
 }
 
 // mustSimpleTreeGetParams builds a minimal system/tree/get-request params entity.

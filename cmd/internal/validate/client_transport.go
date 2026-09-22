@@ -55,11 +55,34 @@ type backgroundReadable interface {
 	ReadFrameBlocking() ([]byte, error)
 }
 
+// rawWritable is implemented by transports that can put arbitrary bytes on the
+// wire below the envelope layer — a length-prefixed frame with an un-decodable
+// payload, or a bare oversize length prefix with no body. The pre-admission
+// refusal probes (§4.11) need this: they drive the framing / un-parseable /
+// oversize arms, which by definition are NOT well-formed envelopes. TCP
+// implements it; HTTP does not (the body is one buffered ECF envelope per POST,
+// with no framing layer to corrupt).
+type rawWritable interface {
+	WriteRaw(ctx context.Context, data []byte) error
+}
+
 // tcpTransport is the TCP wire-codec transport. Preserves the validator's
 // pre-HTTP behavior exactly: socket-deadline-bounded read/write of
 // length-prefixed envelope frames (V7 §1.6).
 type tcpTransport struct {
 	conn net.Conn
+}
+
+// WriteRaw writes bytes verbatim to the socket, bypassing envelope encoding and
+// the length-prefix framing (the caller supplies whatever bytes the probe needs
+// on the wire). Socket-deadline-bounded like the envelope writes.
+func (t *tcpTransport) WriteRaw(ctx context.Context, data []byte) error {
+	if err := t.conn.SetWriteDeadline(ioDeadline(ctx)); err != nil {
+		return fmt.Errorf("set write deadline: %w", err)
+	}
+	defer t.conn.SetWriteDeadline(time.Time{})
+	_, err := t.conn.Write(data)
+	return err
 }
 
 func newTCPTransport(ctx context.Context, addr string) (*tcpTransport, error) {

@@ -900,3 +900,71 @@ func TestSnapshot_N6_AbsentVsEmptyEffective(t *testing.T) {
 		t.Fatalf("self-excluded resource: expected code path_required, got %q", errData.Code)
 	}
 }
+
+// TestExtract_N6_AbsentVsEmptyEffective is the extract sibling of the get/snapshot
+// N6 tests — the third BROAD-RESULT site arch flagged (0.8.2.25 §4, EXTENSION-TREE
+// §2.2a). extract is the WIDEST of the three: get leaks a listing of paths,
+// snapshot a root hash, extract returns the bound entities themselves. Until
+// 0.8.2.25 handleExtract had no N6 guard, so a self-excluded target fell back to
+// the params prefix (default "", validatePrefix("") true) → whole-tree extract at
+// 200. The two empties:
+//
+//   - genuinely absent resource → params-prefix (here whole-tree) extract (200)
+//   - resource present, all targets excluded → 400 path_required
+//
+// Mutation witness: removing the N6 guard in handleExtract makes the self-excluded
+// arm return a 200 extract of every bound entity instead of 400.
+func TestExtract_N6_AbsentVsEmptyEffective(t *testing.T) {
+	h, cs, li, pid := setup(t)
+
+	e1 := makeEntity(t, "test/a", "a")
+	cs.Put(e1)
+	li.Set("local/files/a.txt", e1.ContentHash)
+
+	extractReq := types.ExtractRequestData{}
+	extractEntity, _ := extractReq.ToEntity()
+
+	// (1) genuinely absent resource → whole-tree extract, NOT path_required, and
+	// it MUST contain the seeded binding (arch requirement 2: an empty prefix that
+	// never reached the branch also returns count 0 — assert the CONTENTS).
+	reqAbsent := makeRequest(cs, li, pid, "system/tree", "extract", extractEntity, nil)
+	respAbsent, err := h.Handle(context.Background(), reqAbsent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if respAbsent.Status != 200 {
+		t.Fatalf("absent resource: expected 200 extract, got status %d", respAbsent.Status)
+	}
+	// extract bundles the bindings inside Result (an envelope encoded as entity
+	// data), not in Response.Included. Decode it and assert the seeded binding is
+	// present (arch requirement 2: an empty prefix that never reached the branch
+	// also returns an empty extract — assert the CONTENTS, not just count 0).
+	var extractedEnv entity.Envelope
+	if err := ecf.Decode(respAbsent.Result.Data, &extractedEnv); err != nil {
+		t.Fatalf("absent resource: decode extract envelope: %v", err)
+	}
+	if len(extractedEnv.Included) == 0 {
+		t.Fatalf("absent resource: expected the whole-tree extract to include the seeded binding, got an empty extract")
+	}
+
+	// (2) resource present, sole target excluded → empty effective → 400 path_required.
+	reqSelfExcluded := makeRequest(cs, li, pid, "system/tree", "extract", extractEntity,
+		&types.ResourceTarget{
+			Targets: []string{"local/files/"},
+			Exclude: []string{"local/files/"},
+		})
+	respExcluded, err := h.Handle(context.Background(), reqSelfExcluded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if respExcluded.Status != 400 {
+		t.Fatalf("self-excluded resource: expected 400 path_required, got status %d", respExcluded.Status)
+	}
+	var errData types.ErrorData
+	if err := ecf.Decode(respExcluded.Result.Data, &errData); err != nil {
+		t.Fatal(err)
+	}
+	if errData.Code != "path_required" {
+		t.Fatalf("self-excluded resource: expected code path_required, got %q", errData.Code)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"sync"
@@ -341,7 +342,10 @@ func (c *Connection) RecvEnvelope() (entity.Envelope, error) {
 	}
 	var env entity.Envelope
 	if err := ecf.Decode(data, &env); err != nil {
-		return entity.Envelope{}, fmt.Errorf("decode envelope: %w", err)
+		// §4.11 (0.8.2.25): mirror wire.ReadEnvelopeNoValidate — a whole frame
+		// that will not decode is the framing/un-parseable arm; tag it so serve()
+		// answers 400 invalid_request.
+		return entity.Envelope{}, fmt.Errorf("decode envelope: %w: %w", ecerrors.ErrEnvelopeDecode, err)
 	}
 	c.fireWireHooks(WireEvent{
 		Direction:   WireInbound,
@@ -461,6 +465,19 @@ func (c *Connection) reader() {
 	for {
 		env, err := wire.ReadEnvelopeNoValidate(c.conn)
 		if err != nil {
+			// §4.11 (0.8.2.25) on the dialer-side reentry seam: a WHOLE frame
+			// that will not decode must not tear down the reader — doing so would
+			// fail every in-flight response awaiting demux here (§4.9(c)). Emit a
+			// best-effort 400 invalid_request coded frame and keep reading. Any
+			// other read error is a genuine transport break: exit as before.
+			if errors.Is(err, ecerrors.ErrEnvelopeDecode) {
+				c.debugf("[%s] reader: pre-admission refusal of un-decodable frame: %v", c.conn.RemoteAddr(), err)
+				if respEnv, berr := buildInvalidRequestResponse("",
+					"frame is not a decodable ECF envelope (§4.11 pre-admission refusal)"); berr == nil {
+					_ = c.SendEnvelope(respEnv)
+				}
+				continue
+			}
 			exitErr = fmt.Errorf("connection read: %w", err)
 			return
 		}
@@ -629,19 +646,48 @@ func (c *Connection) serve(ctx context.Context) {
 		env, err := c.RecvEnvelope()
 		if err != nil {
 			c.debugf("[%s] recv error: %v", c.conn.RemoteAddr(), err)
-			// V7 §4.10(a) (v7.75 §9.1 floor MUST): oversize frames must be
-			// rejected with 413 payload_too_large before unbounded buffering. We caught
-			// the length prefix in wire.ReadFrame so nothing past the prefix
-			// was read. Emit a best-effort coded frame (empty request_id —
-			// the body never reached us) before tearing down. Spec-allowed
-			// shape per the handoff: "correlated by request_id if available,
-			// else a coded frame + close".
-			if errors.Is(err, ecerrors.ErrFrameTooLarge) {
+			// §4.11 (0.8.2.25) — the pre-admission refusal class. Each arm puts
+			// a coded frame on the wire before any close; a bare close and a
+			// silent drop are two distinct non-conformances (§1 relay). The
+			// classification is a pure function so every arm — including the
+			// transport-break arm that must NOT emit — is unit-teeth'd.
+			switch classifyRecvError(err) {
+			case dispOversizeClose:
+				// §4.10(a): oversize rejected at the length prefix (nothing past
+				// the prefix was read), so no request_id to correlate. Best-effort
+				// 413 coded frame, then close — the stream is misaligned (the body
+				// was never consumed) so keeping it would desync the next frame.
 				if respEnv, perr := buildPayloadTooLargeResponse(); perr == nil {
 					_ = c.SendEnvelope(respEnv)
 				}
+				return
+			case dispUndecodableContinue:
+				// Framing / un-parseable / non-canonical CBOR: a WHOLE frame was
+				// read (stream still synchronized on the next boundary) but did
+				// not decode into an Envelope. 400 invalid_request, and KEEP the
+				// connection — §4.9(c) forbids destroying admitted in-flight
+				// requests on a multiplexed connection over one bad frame.
+				if respEnv, berr := buildInvalidRequestResponse("",
+					"frame is not a decodable ECF envelope (§4.11 pre-admission refusal)"); berr == nil {
+					_ = c.SendEnvelope(respEnv)
+				}
+				continue
+			case dispTruncatedClose:
+				// A truncated frame (io.ErrUnexpectedEOF): the framing population
+				// of §4.11 too, but the stream is now misaligned, so the close is
+				// forced (SA-PY-62). Best-effort 400 invalid_request, then close.
+				if respEnv, berr := buildInvalidRequestResponse("",
+					"truncated frame (§4.11 pre-admission refusal)"); berr == nil {
+					_ = c.SendEnvelope(respEnv)
+				}
+				return
+			default: // dispSilentClose
+				// A clean io.EOF at a frame boundary (ordinary disconnect) or a
+				// genuine transport break (reset, broken pipe, deadline, cancel).
+				// Neither is a §4.11 refusal — close silently, do NOT emit a 400
+				// at a socket that is already gone (rust ROUTING-2026-09-15-d §1).
+				return
 			}
-			return
 		}
 		c.debugf("[%s] <- envelope root_type=%s", c.conn.RemoteAddr(), env.Root.Type)
 		if err := c.validateRecv("incoming", env); err != nil {
@@ -712,6 +758,23 @@ func (c *Connection) serve(ctx context.Context) {
 		// pre-adoption state — and never breaks the connection.
 		if protocol.IsReentryGrant(env) {
 			c.acceptReciprocalGrant(env)
+			continue
+		}
+
+		// §3.3 / §4.11 (0.8.2.25): a post-handshake frame whose root entity is
+		// neither EXECUTE nor EXECUTE_RESPONSE (the reentry grant, handled just
+		// above, is the one other admissible shape) is a pre-admission refusal.
+		// 400 invalid_request with a coded frame — the pre-N4 corpus mandated a
+		// bare close here, and §4.11 replaces that: a bare close is
+		// indistinguishable from a network fault and, on a multiplexed
+		// connection, destroys unrelated admitted requests. The frame decoded
+		// whole so the stream is synchronized; keep the connection (§4.9(c)).
+		if env.Root.Type != types.TypeExecute {
+			c.debugf("[%s] pre-admission refusal: unexpected root type %q", c.conn.RemoteAddr(), env.Root.Type)
+			if respEnv, berr := buildInvalidRequestResponse(bestEffortRequestID(env.Root),
+				"root entity is neither EXECUTE nor EXECUTE_RESPONSE (§3.3 pre-admission refusal)"); berr == nil {
+				_ = c.SendEnvelope(respEnv)
+			}
 			continue
 		}
 
@@ -1517,6 +1580,94 @@ func buildDecodeRefusalResponse(requestID string) (entity.Envelope, error) {
 	errData := types.ErrorData{
 		Code:    "hash_mismatch",
 		Message: "envelope failed receive-boundary hash/key-binding validation (§1.8)",
+	}
+	errEntity, err := errData.ToEntity()
+	if err != nil {
+		return entity.Envelope{}, err
+	}
+	resultRaw, err := ecf.Encode(errEntity)
+	if err != nil {
+		return entity.Envelope{}, err
+	}
+	respData := types.ExecuteResponseData{
+		RequestID: requestID,
+		Status:    400,
+		Result:    resultRaw,
+	}
+	respEntity, err := respData.ToEntity()
+	if err != nil {
+		return entity.Envelope{}, err
+	}
+	return entity.NewEnvelope(respEntity, map[hash.Hash]entity.Entity{
+		errEntity.ContentHash: errEntity,
+	}), nil
+}
+
+// recvDisposition is the §4.11 (0.8.2.25) pre-admission refusal disposition for
+// a RecvEnvelope error. It exists as the return of a PURE function
+// (classifyRecvError) so the transport-break arm — which is hard to drive
+// deterministically over a real socket — carries teeth.
+type recvDisposition int
+
+const (
+	// dispSilentClose: a clean io.EOF at a frame boundary (an ordinary
+	// disconnect) OR a genuine transport break (connection reset, broken pipe,
+	// read deadline, context cancel). Neither is the caller's bytes at fault, so
+	// no coded frame is owed — emitting a 400 at a socket that is already gone
+	// blames the caller for the network's failure (rust ROUTING-2026-09-15-d §1:
+	// keep the transport-error arm ahead of the refusal arm).
+	dispSilentClose recvDisposition = iota
+	// dispOversizeClose: the length prefix exceeded the maximum (§4.10(a)),
+	// detected at the prefix with the body never read. 413 payload_too_large
+	// best-effort, then close (the stream is misaligned).
+	dispOversizeClose
+	// dispUndecodableContinue: a WHOLE frame was read (stream synchronized on the
+	// next boundary) that will not decode into an Envelope. 400 invalid_request,
+	// KEEP the connection (§4.9(c) — one bad frame must not destroy admitted
+	// in-flight work). This is SA-PY-62's arm (a1), the satisfiable half.
+	dispUndecodableContinue
+	// dispTruncatedClose: the peer declared a length and sent fewer bytes, then
+	// EOF (io.ReadFull reports io.ErrUnexpectedEOF for a partial read). The
+	// framing population of §4.11, but there is no next boundary to find, so the
+	// close is FORCED, not chosen — SA-PY-62's arm (a2). go and rust converged on
+	// this split from the impl side; both siblings routed it. 400 invalid_request
+	// best-effort, then close.
+	dispTruncatedClose
+)
+
+// classifyRecvError maps a RecvEnvelope / ReadFrame error to its §4.11
+// disposition. The arms are mutually exclusive by construction: ErrFrameTooLarge
+// returns at the length check before any body read; ErrEnvelopeDecode is tagged
+// only after ReadFrame consumed a whole frame; io.ErrUnexpectedEOF is a partial
+// read inside ReadFrame (never tagged ErrEnvelopeDecode). Everything else — a
+// clean io.EOF and every transport error — is dispSilentClose.
+func classifyRecvError(err error) recvDisposition {
+	switch {
+	case errors.Is(err, ecerrors.ErrFrameTooLarge):
+		return dispOversizeClose
+	case errors.Is(err, ecerrors.ErrEnvelopeDecode):
+		return dispUndecodableContinue
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return dispTruncatedClose
+	default:
+		return dispSilentClose
+	}
+}
+
+// buildInvalidRequestResponse builds a best-effort 400 invalid_request
+// EXECUTE_RESPONSE envelope for the framing / un-parseable / wrong-root-type
+// population of ENTITY-CORE-PROTOCOL §4.11 (0.8.2.25) — the pre-admission
+// refusal class. The code is the CAUSE's, not the class's: framing/un-parseable/
+// truncated CBOR and a third-typed root both carry 400 invalid_request (distinct
+// from the resolution-integrity arm's 400 hash_mismatch and the oversize arm's
+// 413). requestID is the best-effort id from a still-decoded root (empty when the
+// frame never became an Envelope). A coded frame is mandatory here; whether the
+// caller closes afterwards is its own choice — and for the framing/wrong-type
+// arms the frame decoded whole, so serve() keeps the connection (§4.9(c)).
+func buildInvalidRequestResponse(requestID, message string) (entity.Envelope, error) {
+	errData := types.ErrorData{
+		Code:    "invalid_request",
+		Message: message,
 	}
 	errEntity, err := errData.ToEntity()
 	if err != nil {

@@ -11,6 +11,8 @@ import (
 	"go.entitychurch.org/entity-core-go/core/hash"
 	"go.entitychurch.org/entity-core-go/core/store"
 	"go.entitychurch.org/entity-core-go/core/types"
+
+	"github.com/fxamacker/cbor/v2"
 )
 
 // --- Snapshot Tests ---
@@ -1213,4 +1215,76 @@ func TestExtractSince_RevisionTrackedFastPath(t *testing.T) {
 	if _, ok := env.Included[e2.ContentHash]; ok {
 		t.Errorf("since-mode envelope contains b-leaf's data entity (should be skipped — unchanged)")
 	}
+}
+
+// TestMergeSourceEnvelopeRejectsMisKeyedInclude proves the §1.8 key-binding guard
+// on the merge source_envelope ingest — a surface that bypasses the receive
+// boundary because the envelope rides INSIDE params.data. The control (correctly
+// keyed) merges and its binding resolves; the mis-keyed variant (an entity filed
+// under a hash that is not its own content — the forgery vector core-rust routed
+// 2026-09-13) is refused 400. Mutation: drop VerifyIncludedKeyBinding in
+// handleMerge and the mis-keyed case returns 200 with a binding that resolves to
+// nothing (Store.Put re-derives the true hash and stores it elsewhere), so this
+// test fails closed on exactly the guard under proof.
+func TestMergeSourceEnvelopeRejectsMisKeyedInclude(t *testing.T) {
+	buildEnvelope := func() (entity.Entity, entity.Entity, map[hash.Hash]entity.Entity) {
+		cs := store.NewMemoryContentStore()
+		leaf := makeEntity(t, "test/leaf", map[string]string{"k": "v"})
+		cs.Put(leaf)
+		root, err := BuildTrie(cs, []Binding{{Path: "x", Hash: leaf.ContentHash}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapEnt, err := types.SnapshotData{Root: root}.ToEntity()
+		if err != nil {
+			t.Fatal(err)
+		}
+		included := make(map[hash.Hash]entity.Entity)
+		CollectTrieEntitiesExcept(cs, root, nil, included)
+		return leaf, snapEnt, included
+	}
+
+	sendMerge := func(t *testing.T, included map[hash.Hash]entity.Entity, snapEnt entity.Entity) *handler.Response {
+		t.Helper()
+		envEnt, err := (entity.Envelope{Root: snapEnt, Included: included}).ToEntity()
+		if err != nil {
+			t.Fatal(err)
+		}
+		envRaw, err := ecf.Encode(envEnt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mergeReq := types.MergeRequestData{
+			SourceEnvelope: cbor.RawMessage(envRaw),
+			TargetPrefix:   "mirror/",
+			Strategy:       "source-wins",
+		}
+		mergeEnt, _ := mergeReq.ToEntity()
+		h, cs, li, pid := setup(t)
+		req := makeRequest(cs, li, pid, "system/tree", "merge", mergeEnt,
+			&types.ResourceTarget{Targets: []string{"mirror/"}})
+		resp, err := h.Handle(context.Background(), req)
+		if err != nil {
+			t.Fatalf("handle merge: %v", err)
+		}
+		return resp
+	}
+
+	// Control: correctly keyed included map merges (200).
+	leaf, snapEnt, included := buildEnvelope()
+	if resp := sendMerge(t, included, snapEnt); resp.Status != 200 {
+		t.Fatalf("control: correctly-keyed source_envelope should merge, got %d", resp.Status)
+	}
+
+	// Teeth: file the leaf under a hash that is not its content — a mis-keyed
+	// (forged) included entry. VerifyIncludedKeyBinding must refuse it.
+	leaf2, snapEnt2, bad := buildEnvelope()
+	wrongKey := makeEntity(t, "test/other", "unrelated").ContentHash
+	delete(bad, leaf2.ContentHash)
+	bad[wrongKey] = leaf2
+	resp := sendMerge(t, bad, snapEnt2)
+	if resp.Status != 400 {
+		t.Fatalf("mis-keyed source_envelope included entry must be refused 400, got %d", resp.Status)
+	}
+	_ = leaf
 }

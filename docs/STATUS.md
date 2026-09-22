@@ -1,6 +1,6 @@
 # entity-core-go — status
 
-_Updated: 2026-09-14 · released version: the newest git tag on `master` (authoritative in `CHANGELOG.md` + `go.mod`) — deliberately not restated here, so it cannot go stale on a cut_
+_Updated: 2026-09-15 · released version: the newest git tag on `master` (authoritative in `CHANGELOG.md` + `go.mod`) — deliberately not restated here, so it cannot go stale on a cut_
 
 **This file is the canonical rolling log for this repo** — one file, re-measured
 rather than appended to, and the only status document that publishes. The dated
@@ -25,7 +25,7 @@ The codebase is a three-module `go.work` workspace — `core` (the protocol
 library, a strict 13-package DAG: `errors → ecf → hash → entity, crypto,
 store, types, wire → capability → handler → protocol, tree → peer`), `ext`
 (system extensions, each depending only on `core` — **28 packages**), and `cmd`
-(CLIs, the **67-category** validation suite, and cross-impl interop tooling). Go 1.25, only
+(CLIs, the **68-category** validation suite, and cross-impl interop tooling). Go 1.25, only
 two external dependencies (`fxamacker/cbor` for ECF, `mr-tron/base58` for
 PeerID), pure-Go/no-CGo. The build is fully containerized (`make` + `podman`,
 per-invocation resource caps in the `Makefile` / `RESOURCE-CAPS.md`); a fresh
@@ -40,6 +40,53 @@ live-HTTP transport surfaces.
 
 ## Where we left off
 
+> **2026-09-15 — the 0.8.2.25 round completed the two half-finished refusals from the
+> revision before it, and it finished both.** The protocol names a class of frame that is
+> refused *before* it is ever admitted as a request — a frame whose bytes will not decode at all
+> (garbled, truncated, or cut off mid-length), and a frame that decodes but is not one of the two
+> message types the protocol recognises. A peer used to answer both of these by simply hanging up
+> the connection. That is now non-conformant: **a peer must first put an explicit error on the
+> wire (a `400 invalid_request`) and only then, if it chooses, close.** A silent hang-up is
+> indistinguishable from the network failing, and on a connection carrying several requests at
+> once it destroys the unrelated ones; this implementation now answers each bad frame with the
+> coded error and, where the frame decoded whole, keeps the connection alive so the requests
+> already in flight on it still complete. **The widest listing operation was also brought into
+> line with the two narrower ones.** A request that asks to read the contents of a subtree, then
+> excludes exactly the one path it named, is asking for nothing; it is now refused
+> (`400 path_required`) rather than answered with an export of *every* entity in the tree — the
+> same distinction the two smaller read operations already drew, now applied to the one that
+> returns the most. Both changes were implemented against the landed specification, proved with
+> tests that cross a real socket, and driven end-to-end against a live peer. A full
+> conformance category for the pre-admission refusal class also went in — five arms driven
+> over raw sockets, including the one the specification calls out as never previously
+> exercised anywhere: a garbled frame arriving on a connection that is already carrying an
+> active request must not disturb that request, and the connection must keep serving new work
+> afterward. Every arm is verified by mutation — reverting the fix to the old bare-hang-up
+> behaviour turns the arm red — including that multiplexing arm, which required distinguishing
+> "keeps serving" from merely "lets the in-flight request finish before hanging up". Full
+> conformance suite a true green on every pass (`1666 · 0F · 0S`), the race detector clean
+> across all three modules and the validator.
+>
+> **2026-09-15 (b) — the other two implementations reviewed that round and drove the new
+> checks against their own peers, and the exchange found three issues, all in this
+> implementation's own code and test tooling.** (1) When a bad frame arrived, the connection
+> loop was answering *any* read error — including an ordinary network drop (a reset, a broken
+> pipe, a timeout) — with the same "your bytes are bad" error, blaming the caller for the
+> network's failure. It now tells a genuinely malformed frame from a lost connection and stays
+> silent on the latter, with the distinction pinned by a test covering every error kind. (2) A
+> conformance check that sends a deliberately-garbled frame was *named* for a case with the
+> opposite correct behaviour (a frame cut off mid-transmission, where a peer must close, versus
+> a whole frame that simply will not decode, where it must stay open); the label is a trap in a
+> check the whole cohort runs, and it was corrected. (3) The forgery check was demanding one
+> exact error code where the protocol has not settled which code applies, and its test frame had
+> a second unrelated flaw that let a peer pass it for the wrong reason; it was rebuilt so the
+> forgery is the *only* flaw and any correct refusal passes, with the exact code recorded rather
+> than demanded. That rebuild surfaced one genuine open question, now referred to the protocol
+> authors: implementations legitimately check an entity's identity binding at two different
+> points — as every frame arrives, or only when an entity is actually used — and they disagree
+> only on a harmless unused entry, never on a real forgery. All three implementations pass every
+> driven check; the full gate is green (`1666 · 0F · 0S`), race clean.
+>
 > **2026-09-14 — the 0.8.2.24 cohort round landed, and it was mostly arch retracting
 > its own recent text.** Two behaviours changed here. **A frame that fails validation the moment
 > it is decoded — a mis-keyed supporting entity, the impersonation vector closed on 2026-09-13 —
