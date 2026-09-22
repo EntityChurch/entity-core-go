@@ -51,6 +51,13 @@ type RootTracker struct {
 	// See the workbench F10 part-5 residual review.
 	rebuildMu   sync.Mutex
 	prefixLocks map[string]*sync.Mutex
+
+	// pending counts in-flight async incremental applies per prefix (the
+	// applyEventWithDepth contention path spawns a goroutine and returns
+	// before the apply lands). Guarded by rebuildMu. While pending[prefix] > 0
+	// the cached root at system/tree/root/{prefix} may lag the live index, so
+	// CurrentRoot computes the authoritative root directly. See CurrentRoot.
+	pending map[string]int
 }
 
 // NewRootTracker creates a tracker that will read/write through the given
@@ -63,6 +70,7 @@ func NewRootTracker(cs store.ContentStore, localPeerID string, debugLog *log.Log
 		debugLog:    debugLog,
 		tracked:     make(map[string]bool),
 		prefixLocks: make(map[string]*sync.Mutex),
+		pending:     make(map[string]int),
 	}
 }
 
@@ -270,7 +278,17 @@ func (t *RootTracker) applyEventWithDepth(prefix string, evt store.TreeChangeEve
 	// runs once it releases, preserving per-prefix serialization. Common (no
 	// contention) path stays synchronous.
 	if !prefixMu.TryLock() {
-		go t.applyEventLocked(prefix, evt, parentDepth, prefixMu)
+		// Deferred apply: mark it pending so CurrentRoot knows the cached
+		// root may lag until this goroutine lands. Decrement after the apply.
+		t.rebuildMu.Lock()
+		t.pending[prefix]++
+		t.rebuildMu.Unlock()
+		go func() {
+			t.applyEventLocked(prefix, evt, parentDepth, prefixMu)
+			t.rebuildMu.Lock()
+			t.pending[prefix]--
+			t.rebuildMu.Unlock()
+		}()
 		return
 	}
 	defer prefixMu.Unlock()
@@ -442,6 +460,44 @@ func (t *RootTracker) Root(prefix string) (hash.Hash, bool) {
 	}
 	rootPath := store.CleanPath(rootStoragePrefix + prefix)
 	return li.Get(rootPath)
+}
+
+// CurrentRoot returns the tracked root for prefix, guaranteed to reflect every
+// write whose sync-hook has already fired — including writes whose incremental
+// apply was deferred to a goroutine under lock contention (the async path in
+// applyEventWithDepth). While such an apply is in flight the cached root at
+// system/tree/root/{prefix} lags the live index, so the authoritative root is
+// recomputed from the live index directly. With nothing pending (the common,
+// uncontended case) the cached root is already current and returned as-is (O(1)).
+//
+// The AutoVersioner MUST read through this rather than Root(): a version built
+// from a lagging root both fails to capture the triggering write (the terminal
+// last-burst-write loss) and marks concurrently-written paths as deleted when
+// the version later participates in a 3-way merge. The live index is the source
+// of truth and grows monotonically during a write burst, so a root computed
+// from it can never regress.
+func (t *RootTracker) CurrentRoot(prefix string) (hash.Hash, bool) {
+	t.rebuildMu.Lock()
+	pending := t.pending[prefix] > 0
+	t.rebuildMu.Unlock()
+	if !pending {
+		return t.Root(prefix)
+	}
+
+	t.mu.RLock()
+	li := t.li
+	pid := t.localPeerID
+	enabled := t.tracked[prefix]
+	t.mu.RUnlock()
+	if li == nil || !enabled {
+		return t.Root(prefix)
+	}
+	root, err := BuildTrieForPrefix(t.cs, li, crypto.PeerID(pid), prefix)
+	if err != nil {
+		// Fall back to the cached root on build error rather than fabricate one.
+		return t.Root(prefix)
+	}
+	return root, true
 }
 
 // isSelfPath guards against recursion: we never react to writes of our own

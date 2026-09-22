@@ -184,27 +184,30 @@ func (a *AutoVersioner) fire(cfg types.RevisionConfigData, parentDepth uint64) {
 	// CAS-retry loop for the head write.
 	//
 	// muPrefix serializes auto-version emits FOR THIS PREFIX against each
-	// other, but it does NOT serialize against merge/checkout/fast-forward
-	// writes to the same head path (those handlers hold their own h.mu —
-	// a different lock). Under concurrent burst, the AutoVersioner's head
-	// write can race with merge's head advance: both writers Get(headP)
-	// independently, build a version chained from their respective view of
-	// the head, and Set(headP) without coordination. Whichever Set lands
-	// last wins; the loser's emitted version is orphaned in the content
-	// store (live tree still has its bindings, but no head pointer
-	// references the orphaned version).
+	// other AND against merge/checkout/fast-forward/revert/cherry-pick, which
+	// acquire the same per-prefix mutex via Handler.lockPrefixForApply across
+	// their head write and binding-apply phases (the F10 part-7 fix). The CAS
+	// below is therefore belt-and-suspenders for the head pointer: the lock
+	// already prevents a concurrent transcription op from advancing the head
+	// underneath us, and the CAS catches any writer that does not take the lock.
 	//
-	// The observable failure was the "symmetric last-burst-write loss"
-	// pattern — each peer's last burst write captured in an orphaned
-	// version, missing from the converged head's trie. Diagnosed by
-	// the workbench in the F10 part-3 results.
+	// NOTE ON THE "symmetric last-burst-write loss": this CAS loop was
+	// originally credited with closing that failure, but it did not. The loss
+	// reproduced under load with NO CAS retry firing at all — its actual cause
+	// was upstream, in the value this loop builds its version from: under a
+	// concurrent burst the RootTracker defers a write's incremental apply to a
+	// goroutine, so a plain tracker.Root() read lagged the live index by the
+	// very (last-of-burst) write being captured, versionRoot omitted it, and
+	// the dedup check below no-op'd the emit. It is terminal because the last
+	// write of a burst has no next event to re-fire. Fixed by reading through
+	// tracker.CurrentRoot() (see below), which recomputes from the live index
+	// while any apply is pending. This loop's job is narrower: keep the head
+	// pointer atomic against concurrent transcription writers.
 	//
-	// Fix: read currentHead, build candidate, then CompareAndSwap. On CAS
-	// failure (head moved underneath us — typically because merge advanced
-	// it), retry: re-read head, rebuild candidate chaining from the new
-	// head, re-emit. Bounded retries (maxFireRetries = 8) bound any
-	// pathological livelock; under realistic contention 1-2 attempts
-	// suffice and the system is self-healing on subsequent events anyway.
+	// On CAS failure (head moved underneath us): retry — re-read head, rebuild
+	// candidate chaining from the new head, re-emit. Bounded retries
+	// (maxFireRetries = 8) bound any pathological livelock; under realistic
+	// contention 1-2 attempts suffice.
 	//
 	// First-emit case (no prior head): plain Set. CAS cannot create from
 	// "no value" — `MemoryLocationIndex.CompareAndSwap` returns CasError{
@@ -225,7 +228,13 @@ func (a *AutoVersioner) fire(cfg types.RevisionConfigData, parentDepth uint64) {
 		// workload where absence means "not received yet"). Result: cascading
 		// data loss via merge.go deletions.
 		// See the workbench F10 part-5 residual analysis.
-		liveRoot, ok := a.tracker.Root(prefix)
+		// CurrentRoot, not Root: under a concurrent burst the RootTracker
+		// defers a write's incremental apply to a goroutine (its contention
+		// path), so a plain Root() read can lag the live index by the very
+		// write we are firing for. CurrentRoot recomputes from the live index
+		// while any apply is pending, so versionRoot always reflects the
+		// triggering write and never regresses a concurrently-written path.
+		liveRoot, ok := a.tracker.CurrentRoot(prefix)
 		if !ok {
 			a.debugf("fire %s: no tracked root (tracking-config missing or disabled)", prefix)
 			return
@@ -288,6 +297,7 @@ func (a *AutoVersioner) fire(cfg types.RevisionConfigData, parentDepth uint64) {
 			if ent, exists := a.cs.Get(currentHead); exists {
 				if curVer, err := types.RevisionEntryDataFromEntity(ent); err == nil {
 					if curVer.Root == versionRoot {
+						a.debugf("fire %s: dedup — head root already == versionRoot %s (no emit)", prefix, versionRoot.String())
 						return
 					}
 				}
@@ -357,11 +367,21 @@ func (a *AutoVersioner) fire(cfg types.RevisionConfigData, parentDepth uint64) {
 	}
 
 	// Retry budget exhausted. The candidate version is in the content store
-	// (cs.Put is idempotent) but unreferenced. The next sync-hook event for
-	// this prefix will fire() again and have another shot at capturing the
-	// live tree state. Loud log so operational observers can tell this is
-	// happening if it ever does in practice.
-	a.debugf("fire %s: exhausted %d CAS retries — emit abandoned; next event will retry",
+	// (cs.Put is idempotent) but unreferenced.
+	//
+	// The old recovery reasoning — "the next sync-hook event for this prefix
+	// will fire() again" — is UNSOUND for the last write of a burst, which has
+	// no next event; relying on it is what made the last-burst-write loss
+	// terminal (see the workbench 2026-08-20 review). It is not the mechanism
+	// that reached this line, though: with merge/transcription ops now holding
+	// the same per-prefix mutex (lockPrefixForApply), nothing advances the head
+	// underneath a fire() in progress, so a real CAS exhaustion here would
+	// require a head writer that does NOT take the lock — none exists in the
+	// current handler set. If that changes, the correct fix is a bounded
+	// re-fire of THIS prefix, not a passive wait; do not re-introduce the
+	// "next event will retry" contract. Logged loudly so it is visible if it
+	// ever fires in practice.
+	a.debugf("fire %s: exhausted %d CAS retries — emit abandoned (no re-fire scheduled; see comment)",
 		prefix, maxFireRetries)
 }
 

@@ -359,6 +359,9 @@ func runAutoVersion(ctx context.Context, client *PeerClient) []CheckResult {
 		return PassCheck("exclude grammar enforced: valid four-form pattern accepted, `**` rejected 400 config/invalid-exclude-pattern (REV-GLOB-REJECT-1)")
 	})
 
+	// Concurrent-burst capture: the wire detector for the last-burst-write loss.
+	addBurstConvergenceCheck(ctx, client, r)
+
 	return r.Results()
 }
 

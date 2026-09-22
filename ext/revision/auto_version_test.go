@@ -1,6 +1,8 @@
 package revision
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
@@ -132,6 +134,87 @@ func (f *autoVersionFixture) loadVersion(t *testing.T, h hash.Hash) types.Revisi
 		t.Fatalf("decode version: %v", err)
 	}
 	return v
+}
+
+// TestAutoVersion_CapturesEveryWriteUnderConcurrentBurst reproduces the
+// symmetric last-burst-write loss at the auto-version level and guards the fix
+// (fire() reading tracker.CurrentRoot instead of tracker.Root). Under a
+// concurrent burst the RootTracker defers some writes' incremental applies to
+// goroutines, so fire() reading the plain tracked root captured a version whose
+// trie was missing the last-landed write — terminally, since a burst's final
+// write has no next event to re-fire. The fix makes fire() recompute from the
+// live index while an apply is pending.
+//
+// This is a load test, not a deterministic one — the deterministic teeth for
+// the mechanism are core/tree TestRootTracker_CurrentRootReflectsPendingAsyncApply.
+// It reproduced reliably pre-fix (revert the CurrentRoot call to Root and this
+// goes RED within a few iterations under -race). Run with -race.
+func TestAutoVersion_CapturesEveryWriteUnderConcurrentBurst(t *testing.T) {
+	const (
+		iterations = 30
+		writers    = 8
+	)
+	f := newAutoVersionFixture(t)
+	f.enableTracking(t, "data/")
+	f.enableAutoVersion(t, "data/", nil)
+	absPrefix := resolvePrefix("data/", f.nsID)
+	pid := crypto.PeerID(f.nsID)
+
+	for iter := 0; iter < iterations; iter++ {
+		// Pre-mint the burst's entities so goroutines only race on the write.
+		hashes := make([]hash.Hash, writers)
+		paths := make([]string, writers)
+		for k := 0; k < writers; k++ {
+			data := map[string]string{"v": fmt.Sprintf("%d-%d", iter, k)}
+			raw, _ := ecf.Encode(data)
+			ent, _ := entity.NewEntity("test/doc", cbor.RawMessage(raw))
+			h, err := f.cs.Put(ent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hashes[k] = h
+			paths[k] = fmt.Sprintf("data/burst-%d-%d.md", iter, k)
+		}
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for k := 0; k < writers; k++ {
+			wg.Add(1)
+			go func(k int) {
+				defer wg.Done()
+				<-start // release all writers at once for maximum contention
+				f.li.Set(paths[k], hashes[k])
+			}(k)
+		}
+		close(start)
+		wg.Wait()
+
+		// Every write has landed and every fire() has run. The head's version
+		// root MUST equal the authoritative root over the live index — i.e. it
+		// captured every path, losing none.
+		headHash, ok := f.head("data/")
+		if !ok {
+			t.Fatalf("iter %d: no head after burst", iter)
+		}
+		headVer := f.loadVersion(t, headHash)
+		want, err := tree.BuildTrieForPrefix(f.cs, f.li, pid, absPrefix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if headVer.Root != want {
+			// Diagnose: which prefix-relative paths the head root is missing.
+			wantB := tree.CollectAllBindings(f.cs, want, "")
+			gotB := tree.CollectAllBindings(f.cs, headVer.Root, "")
+			var missing []string
+			for p := range wantB {
+				if _, ok := gotB[p]; !ok {
+					missing = append(missing, p)
+				}
+			}
+			t.Fatalf("iter %d: head version root %s != authoritative %s — head is missing %v (last-burst-write loss)",
+				iter, headVer.Root.String(), want.String(), missing)
+		}
+	}
 }
 
 // TestAutoVersion_PerWriteEntry verifies §6.1: each matching tree write to a

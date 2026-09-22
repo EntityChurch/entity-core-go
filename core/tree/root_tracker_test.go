@@ -2,6 +2,7 @@ package tree
 
 import (
 	"testing"
+	"time"
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/hash"
@@ -190,6 +191,89 @@ func TestSnapshotShortCircuitMatchesRebuild(t *testing.T) {
 	}
 	if got, _ := tracker.Root("project/"); got != want {
 		t.Fatalf("tracker.Root %s != rebuild %s", got.String(), want.String())
+	}
+}
+
+// TestRootTracker_CurrentRootReflectsPendingAsyncApply pins the fix for the
+// symmetric last-burst-write loss (workbench CORE-GO-LAST-BURST-WRITE-LOSS,
+// 2026-08-20). Under a concurrent burst the tracker defers a write's
+// incremental apply to a goroutine (applyEventWithDepth's contention path) and
+// returns before it lands, so a plain Root() read lags the live index by the
+// very write being applied. The AutoVersioner reads through CurrentRoot, which
+// must recompute from the live index while an apply is pending — otherwise it
+// builds a version from the lagging root, fails to capture the write, and the
+// loss is terminal for the last write of a burst (no next event re-fires).
+//
+// This test forces the async-defer deterministically by holding the prefix
+// mutex, so the assertion is not load-dependent. Teeth: point CurrentRoot back
+// at Root() and the CurrentRoot assertion goes RED (it would return `settled`,
+// the lagging root, not `want`).
+func TestRootTracker_CurrentRootReflectsPendingAsyncApply(t *testing.T) {
+	tracker, cs, li, pid := trackerSetup(t)
+	writeTrackingConfig(t, cs, li, "project", "project/", true)
+
+	// Baseline entry → settled tracked root.
+	e1 := makeEntity(t, "test/b", "v1")
+	cs.Put(e1)
+	li.Set("project/a.go", e1.ContentHash)
+	settled, ok := tracker.Root("project/")
+	if !ok {
+		t.Fatal("precondition: baseline tracked root must exist")
+	}
+
+	// Hold the per-prefix mutex so the next write's apply is forced down the
+	// async (contended) path and blocks on us — reproducing the burst window.
+	mu := tracker.lockForPrefix("project/")
+	mu.Lock()
+
+	// New write: its OnTreeChange async-spawns (pending++) and returns; the
+	// apply goroutine blocks on mu. The binding is in the live index now.
+	e2 := makeEntity(t, "test/b", "v2")
+	cs.Put(e2)
+	li.Set("project/b.go", e2.ContentHash)
+
+	// The cached root still lags — the apply is blocked on our lock.
+	if lag, _ := tracker.Root("project/"); lag != settled {
+		mu.Unlock()
+		t.Fatalf("precondition: cached root should still lag at %s, got %s", settled.String(), lag.String())
+	}
+
+	// The authoritative root over the live index includes the pending write.
+	want, err := BuildTrieForPrefix(cs, li, pid, "project/")
+	if err != nil {
+		mu.Unlock()
+		t.Fatal(err)
+	}
+	if want == settled {
+		mu.Unlock()
+		t.Fatal("test bug: the new write did not change the authoritative root")
+	}
+
+	// CurrentRoot must reflect the pending write — this is the fix.
+	got, ok := tracker.CurrentRoot("project/")
+	if !ok || got != want {
+		mu.Unlock()
+		t.Fatalf("CurrentRoot while apply pending = (%s, %v), want (%s, true); the lagging cached root %s is the pre-fix answer",
+			got.String(), ok, want.String(), settled.String())
+	}
+
+	// Release; the deferred apply lands and the cached root catches up.
+	mu.Unlock()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		tracker.rebuildMu.Lock()
+		p := tracker.pending["project/"]
+		tracker.rebuildMu.Unlock()
+		if p == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("deferred apply never drained")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if final, _ := tracker.Root("project/"); final != want {
+		t.Fatalf("after deferred apply, cached root = %s, want %s", final.String(), want.String())
 	}
 }
 
