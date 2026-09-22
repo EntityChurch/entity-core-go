@@ -160,23 +160,24 @@ func TestOfferMessageTooLargeRefuses(t *testing.T) {
 	}
 }
 
-// TestBadKeyLength covers §8: any key length other than 33 is bad_request, for
-// both offer and collect.
+// TestBadKeyLength covers §8: any key length other than 33 is invalid_request on
+// this wrapped surface (EXTENSION-SIGNALING v1.2 / §4.7; §9.2 keeps bad_request on
+// the unwrapped surface), for both offer and collect.
 func TestBadKeyLength(t *testing.T) {
 	h := New()
 	short := make([]byte, 32)
 	if resp := mustHandle(t, h, offerReq(t, short, []byte("x"))); resp.Status != 400 {
 		t.Errorf("offer with 32-byte key status=%d, want 400", resp.Status)
 	} else {
-		assertErrorCode(t, resp, "bad_request")
+		assertErrorCode(t, resp, "invalid_request")
 	}
 	if resp := mustHandle(t, h, collectReq(t, short)); resp.Status != 400 {
 		t.Errorf("collect with 32-byte key status=%d, want 400", resp.Status)
 	}
 }
 
-// TestUnknownOperation covers the closed-enum default: an unknown op is
-// bad_request, not a panic or a 500.
+// TestUnknownOperation covers the wrapped-surface default: an unknown op is
+// invalid_request (EXTENSION-SIGNALING v1.2 / §4.7), not a panic or a 500.
 func TestUnknownOperation(t *testing.T) {
 	h := New()
 	ent, _ := types.OfferRequestData{RendezvousKey: key33(7), Message: []byte("x")}.ToEntity()
@@ -184,7 +185,7 @@ func TestUnknownOperation(t *testing.T) {
 	if resp.Status != 400 {
 		t.Fatalf("unknown op status=%d, want 400", resp.Status)
 	}
-	assertErrorCode(t, resp, "bad_request")
+	assertErrorCode(t, resp, "invalid_request")
 }
 
 // TestTTLReaping covers §5 pin 3/6: an entry past ttl_seconds is reaped, so a

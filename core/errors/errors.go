@@ -74,6 +74,14 @@ var (
 	// ErrConnectionEstablished indicates the connection handshake was already completed.
 	ErrConnectionEstablished = errors.New("connection already established")
 
+	// ErrConnectionSequence indicates a connect operation the responder
+	// implements arrived in a state that forbids it (ENTITY-CORE-PROTOCOL §4.7
+	// out-of-order row → 409 connection_sequence_error). Distinct from
+	// ErrConnectionEstablished (a second hello AFTER hello_done, row 9) — this
+	// is the row-10 state half (e.g. a second hello mid-handshake, or a
+	// pre-handshake ping).
+	ErrConnectionSequence = errors.New("connection sequence error")
+
 	// ErrTTLExhausted indicates the request TTL reached zero.
 	ErrTTLExhausted = errors.New("TTL exhausted")
 

@@ -27,8 +27,14 @@ type ConnectionState struct {
 	Completed    bool
 	Phase        string // "init", "awaiting_authenticate", "completed"
 	RemotePeerID crypto.PeerID
-	OurNonce     []byte
-	TheirNonce   []byte
+	// HelloPeerID is the peer_id advertised in this connection's hello,
+	// retained so handleAuthenticate can enforce §4.6's "MUST also verify
+	// authenticate.peer_id == hello.peer_id for the same connection" — the
+	// identity does not change mid-handshake. A mismatch is 401
+	// identity_mismatch (§4.7 step-3 row). Empty until a hello is processed.
+	HelloPeerID string
+	OurNonce    []byte
+	TheirNonce  []byte
 	// GrantedCapability is the capability token granted during connection.
 	GrantedCapability *entity.Entity
 	// FrameBudget is the connection's configured maximum response frame
@@ -244,6 +250,17 @@ func containsString(list []string, s string) bool {
 	return false
 }
 
+// anyInBoth reports whether a and b share at least one element — a non-empty
+// intersection. Used for §4.5 protocols negotiation (incompatible_protocol).
+func anyInBoth(a, b []string) bool {
+	for _, s := range a {
+		if containsString(b, s) {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *ConnectHandler) Name() string { return "connect" }
 
 // SetConnectionGrants overrides the default connection grants.
@@ -373,6 +390,35 @@ func (h *ConnectHandler) handleHello(ctx context.Context, req *handler.Request) 
 		}
 	}
 
+	// V7 §4.5 protocols negotiation — two refusals, folded into
+	// ENTITY-CORE-PROTOCOL 0.8.2.4 (SA-PY-31 / SA-PY-32, §4.7 rows 1/10):
+	//
+	//  1. absent or empty set → 400 invalid_request (FM-2e). §4.5 marks
+	//     protocols Required with NO default; SA-PY-31 was ruled reading 2 —
+	//     a peer that names no version has made no incompatible-VERSION claim,
+	//     so an absent/empty list is a malformed request, not
+	//     incompatible_protocol (arch's own row-10 argument, one row up). This
+	//     arm is DORMANT: every cohort peer emits a non-empty list (go's own
+	//     initiator defaults to entity-core/1.0 in CreateHelloExecute), so it
+	//     refuses no conformant peer — safe to land incrementally, no flag day.
+	//  2. non-empty set disjoint from ours → 400 incompatible_protocol
+	//     (§4.7 row 1; the §8.4 identifiers, per SA-PY-32). This was the live
+	//     gap: go echoed hello.protocols back and never checked it.
+	//
+	// go previously shipped reading 1 (absent → unconstrained); arch ruled
+	// reading 2 because keystone's csharp/typescript peers already require the
+	// field and pass conformance (L16), so reading 1 was never the cohort
+	// position.
+	if len(helloDataIn.Protocols) == 0 {
+		return handler.NewErrorResponse(400, "invalid_request",
+			"hello protocols is required and must be non-empty (V7 §4.5, SA-PY-31)")
+	}
+	if !anyInBoth(helloDataIn.Protocols, h.protocols) {
+		return handler.NewErrorResponse(400, "incompatible_protocol",
+			fmt.Sprintf("no common protocol version: initiator=%v responder=%v (V7 §4.5)",
+				helloDataIn.Protocols, h.protocols))
+	}
+
 	// V7 v7.69 §4.5 — hash_formats: single-active-value negotiation.
 	// Initiator's preference order, first match in responder's set is the
 	// connection's active content_hash_format. Empty initiator set
@@ -429,6 +475,7 @@ func (h *ConnectHandler) handleHello(ctx context.Context, req *handler.Request) 
 		cs.OurNonce = nonce
 		cs.Phase = "awaiting_authenticate"
 		cs.ActiveHashFormat = activeFormat
+		cs.HelloPeerID = helloDataIn.PeerID // §4.6: bind authenticate.peer_id to this
 	}
 
 	helloData := types.HelloData{
@@ -487,10 +534,10 @@ func (h *ConnectHandler) handleAuthenticate(ctx context.Context, req *handler.Re
 					crypto.KeyTypeEd25519, crypto.KeyTypeEd448, dec.KeyType))
 		}
 	}
-	// Verify public key matches peer_id.
-	if !claimedPeerID.VerifyPublicKey(authenticateData.PublicKey) {
-		return handler.NewErrorResponse(401, "identity_mismatch", "public key does not match peer_id")
-	}
+	// §4.6 step 3 (the identity binding) runs AFTER step 2 (signature
+	// verification), below — the step numbering is a normative ORDER (ruled
+	// 2026-09-01-c). The check moved down from here; see the block after the
+	// signature verify. claimedPeerID / claimedKeyType are already decoded above.
 
 	// v7.65 §5 wire-acceptance carve-out: impls SHOULD debug-log non-canonical
 	// wire form acceptance. Canonical hash_type is per-key_type
@@ -536,6 +583,29 @@ func (h *ConnectHandler) handleAuthenticate(ctx context.Context, req *handler.Re
 	}
 	if !crypto.Verify(claimedKeyType, authenticateData.PublicKey, req.Params.ContentHash.Bytes(), authSigData.Signature) {
 		return handler.NewErrorResponse(401, "authentication_failed", "authenticate signature verification failed")
+	}
+
+	// §4.6 step 3 — the identity binding, run AFTER step 2 per the normative
+	// step order (ruled 2026-09-01-c). Step 2 proved possession of the private
+	// key for authenticate.public_key; step 3 proves that key is the one the
+	// claimed peer_id names. Ordering it last means an input that fails BOTH the
+	// signature (step 2) and the binding (step 3) is reported as the step-2
+	// authentication_failed, matching rust/py's numbered order — where before go
+	// reached identity_mismatch first and diverged (§4.7 row 8).
+	if !claimedPeerID.VerifyPublicKey(authenticateData.PublicKey) {
+		return handler.NewErrorResponse(401, "identity_mismatch", "public key does not match peer_id")
+	}
+
+	// §4.6 "MUST also verify authenticate.peer_id == hello.peer_id for the same
+	// connection" — the claimed identity does not change mid-handshake;
+	// combined with step 3 above this binds the whole handshake to one key. A
+	// mismatch is the §4.7 step-3 row → 401 identity_mismatch (same code as the
+	// public-key binding, so the numbered order is preserved). Guarded on a
+	// recorded hello peer_id: an authenticate that reached here passed the step-1
+	// nonce check, so a hello was processed and HelloPeerID is set.
+	if cs.HelloPeerID != "" && authenticateData.PeerID != cs.HelloPeerID {
+		return handler.NewErrorResponse(401, "identity_mismatch",
+			"authenticate.peer_id does not match the hello peer_id for this connection (§4.6)")
 	}
 
 	// Create connection capability for the remote peer.
@@ -1274,6 +1344,16 @@ func ValidateConnectionSequence(state *ConnectionState, operation string) error 
 	case "hello":
 		if state.Completed {
 			return ecerrors.ErrConnectionEstablished
+		}
+		// §4.7 out-of-order row (0.8.2.4): a SECOND hello mid-handshake (after
+		// the first hello issued a nonce, before the connection completes) is an
+		// operation the responder implements arriving in a state that forbids it
+		// → 409 connection_sequence_error. Without this the second hello re-issues
+		// a nonce and the state-conflict row is unreachable. The FIRST hello sees
+		// Phase "init" and is allowed; a hello after completion is caught above
+		// (connection_already_established, row 9).
+		if state.Phase == "awaiting_authenticate" {
+			return ecerrors.ErrConnectionSequence
 		}
 		return nil
 	case "authenticate":

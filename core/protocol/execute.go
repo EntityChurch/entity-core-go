@@ -76,6 +76,20 @@ func (d *Dispatcher) handleExecute(ctx context.Context, env entity.Envelope, con
 
 	// Connect path: no auth required, but only before connection is established.
 	if handlerPath == connectPath || (len(handlerPath) > len(connectPath) && handlerPath[:len(connectPath)+1] == connectPath+"/") {
+		// §4.7 row 10 (ruled 2026-09-01, closes PD-1g): an UNRECOGNIZED connect
+		// operation is a malformed request, not a sequencing conflict — 400
+		// invalid_request, distinct from the 409 state-conflict rows (a second
+		// hello → connection_already_established; a §4.6 replay → invalid_nonce).
+		// Telling a client its ordering was wrong when its operation NAME was
+		// wrong fails the contract the §4.7 table exists for. Recognized connect
+		// ops fall through to the state-based dispatch below.
+		switch execData.Operation {
+		case "hello", "authenticate", "ping":
+			// recognized — continue
+		default:
+			return d.makeErrorResponse(execData.RequestID, 400, "invalid_request",
+				"unknown connect operation "+execData.Operation+" (§4.7 row 10)")
+		}
 		// §5.1 keepalive ping: the one connect-handler op gated the INVERSE
 		// way — it rides only an ESTABLISHED connection (ValidateConnection-
 		// Sequence enforces Completed). Like hello/authenticate it skips the
@@ -84,7 +98,13 @@ func (d *Dispatcher) handleExecute(ctx context.Context, env entity.Envelope, con
 		if execData.Operation == "ping" {
 			if connState != nil {
 				if err := ValidateConnectionSequence(connState, execData.Operation); err != nil {
-					return d.makeErrorResponse(execData.RequestID, 403, "connection_required", err.Error())
+					// §4.7 out-of-order row (0.8.2.4): a pre-handshake ping is an
+					// operation this peer implements arriving in a state that
+					// forbids it → 409 connection_sequence_error. (Was 403
+					// connection_required — a code that appears in no spec; the
+					// §4.7 table has no such row, and the failure is a state
+					// conflict, the same class as a second hello mid-handshake.)
+					return d.makeErrorResponse(execData.RequestID, 409, "connection_sequence_error", err.Error())
 				}
 			}
 			return d.dispatchToHandler(ctx, handlerPath, execData, env, connState)
@@ -115,20 +135,37 @@ func (d *Dispatcher) handleExecute(ctx context.Context, env entity.Envelope, con
 				// replay special-cased above (RT-6) — because a 409/state-conflict
 				// under-signals the replay (§4.6 Hardening). Completed is already
 				// false here (that branch returned), so an authenticate reaching
-				// this point is exactly the pre-hello case. Every OTHER
-				// out-of-order connect op keeps 409 connection_sequence_error.
+				// this point is exactly the pre-hello case.
 				if execData.Operation == "authenticate" {
 					return d.makeErrorResponse(execData.RequestID, 401, "invalid_nonce", "authenticate before hello: no nonce has been issued for this connection (§4.6 single-use nonce; FM-1)")
 				}
+				// §4.7 out-of-order row (0.8.2.4) → 409 connection_sequence_error.
+				// Reached by a SECOND hello mid-handshake: ValidateConnectionSequence
+				// now returns ErrConnectionSequence for a hello arriving while
+				// Phase == "awaiting_authenticate" (before this it returned nil and
+				// the second hello re-issued a nonce, leaving this arm dead).
+				// authenticate-before-hello is special-cased to 401 invalid_nonce
+				// just above (FM-1, and §4.7 pins that input as invalid_nonce, NOT
+				// connection_sequence_error); ping is handled earlier; unknown ops
+				// were diverted to 400 invalid_request.
 				return d.makeErrorResponse(execData.RequestID, 409, "connection_sequence_error", err.Error())
 			}
 		}
 		return d.dispatchToHandler(ctx, handlerPath, execData, env, connState)
 	}
 
-	// Non-connect: require auth.
+	// Non-connect EXECUTE before the handshake completes (§4.2 third
+	// pre-authorization rule + §5.2a; ENTITY-CORE-PROTOCOL 0.8.2.5 note under
+	// §4.7). It carries no verified signer, so it is AUTH-class, not authz-class:
+	// §5.2a's discriminator puts an EXECUTE that cannot be authenticated at 401
+	// authentication_failed. Ruled at 0.8.1 (F32 replaced this bullet's blanket
+	// 403 with the auth/authz split); go emitted 403 connection_required — a code
+	// in no spec set, named non-conformant by the 0.8.2.5 note — because it read
+	// §4.7's connection-state vocabulary, where the rule is not findable. 403 is
+	// wrong here twice: it is the retired blanket status AND it asserts
+	// "authenticated but not permitted", false of an input with no verified signer.
 	if connState != nil && !connState.Completed {
-		return d.makeErrorResponse(execData.RequestID, 403, "connection_required", "connection not established")
+		return d.makeErrorResponse(execData.RequestID, 401, "authentication_failed", "connection not established: EXECUTE carries no verified signer (§4.2 pre-authorization / §5.2a auth-class)")
 	}
 
 	// EXTENSION-SIGNALING §6.5 (b) "Wielding", receive half. If the EXECUTE

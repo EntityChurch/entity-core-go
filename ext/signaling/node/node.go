@@ -41,7 +41,8 @@ const (
 	DefaultTTLSeconds     uint64 = 60
 
 	// keyLen is the fixed rendezvous-key length (§8: "exactly 33 bytes, opaque,
-	// compared byte-wise. Any other length is bad_request").
+	// compared byte-wise"). Any other length is invalid_request on this wrapped
+	// surface (§9.2 spells the same class bad_request on the unwrapped surface).
 	keyLen = 33
 )
 
@@ -139,8 +140,9 @@ func New(opts ...Option) *Handler {
 // Name identifies the handler in debug surfaces.
 func (h *Handler) Name() string { return "signaling-node" }
 
-// Handle dispatches the three §5.1 operations. An unknown op is bad_request, per
-// the closed error enum (§8).
+// Handle dispatches the three §5.1 operations. An unknown op is invalid_request on
+// this wrapped surface (§4.7; §9.2 spells the same class bad_request on the
+// unwrapped surface).
 func (h *Handler) Handle(_ context.Context, req *handler.Request) (*handler.Response, error) {
 	switch req.Operation {
 	case signaling.OpOffer:
@@ -150,7 +152,7 @@ func (h *Handler) Handle(_ context.Context, req *handler.Request) (*handler.Resp
 	case signaling.OpAdvertise:
 		return h.advertise()
 	default:
-		return badRequest("unknown op: " + req.Operation)
+		return invalidRequest("unknown op: " + req.Operation)
 	}
 }
 
@@ -161,10 +163,10 @@ func (h *Handler) Handle(_ context.Context, req *handler.Request) (*handler.Resp
 func (h *Handler) offer(req *handler.Request) (*handler.Response, error) {
 	d, err := types.OfferRequestDataFromEntity(req.Params)
 	if err != nil {
-		return badRequest("malformed offer-request: " + err.Error())
+		return invalidRequest("malformed offer-request: " + err.Error())
 	}
 	if len(d.RendezvousKey) != keyLen {
-		return badRequest(fmt.Sprintf("rendezvous_key is %d bytes, want %d", len(d.RendezvousKey), keyLen))
+		return invalidRequest(fmt.Sprintf("rendezvous_key is %d bytes, want %d", len(d.RendezvousKey), keyLen))
 	}
 	if uint64(len(d.Message)) > h.maxBlobBytes {
 		// §8 message_too_large — refused, never truncated.
@@ -204,10 +206,10 @@ func (h *Handler) offer(req *handler.Request) (*handler.Response, error) {
 func (h *Handler) collect(req *handler.Request) (*handler.Response, error) {
 	d, err := types.CollectRequestDataFromEntity(req.Params)
 	if err != nil {
-		return badRequest("malformed collect-request: " + err.Error())
+		return invalidRequest("malformed collect-request: " + err.Error())
 	}
 	if len(d.RendezvousKey) != keyLen {
-		return badRequest(fmt.Sprintf("rendezvous_key is %d bytes, want %d", len(d.RendezvousKey), keyLen))
+		return invalidRequest(fmt.Sprintf("rendezvous_key is %d bytes, want %d", len(d.RendezvousKey), keyLen))
 	}
 
 	h.mu.Lock()
@@ -275,11 +277,16 @@ func offerOK() (*handler.Response, error) {
 	return handler.NewResponse(200, types.TypeSignalingOfferResult, types.OfferResultData{Ok: true})
 }
 
-// badRequest renders the §8 `bad_request` code on the wrapped surface. Status 400
-// so the client's status check surfaces it (the wrapped surface conveys the
-// closed-enum error as an ErrorData entity; the raw §9 listener uses {ok:false}).
-func badRequest(msg string) (*handler.Response, error) {
-	return errResponse(400, "bad_request", msg)
+// invalidRequest renders the generic malformed-request code on the WRAPPED surface.
+// EXTENSION-SIGNALING v1.2 + ENTITY-CORE-PROTOCOL §4.7: the wrapped surface's
+// EXECUTE result.data.code MUST use the core's `invalid_request` and MUST NOT mint a
+// synonym. §4.3/§8 once listed `bad_request` here, so this rendered a synonym on the
+// surface where that MUST NOT applies (SA-PY-33). §9.2's UNWRAPPED closed enum is a
+// different registry and stays `bad_request` (raw §9 listener, {ok:false}); the
+// class boundaries match, only the spelling and envelope differ (§2.2 binds the
+// verbs, not the encodings). Status 400 so the client's status check surfaces it.
+func invalidRequest(msg string) (*handler.Response, error) {
+	return errResponse(400, "invalid_request", msg)
 }
 
 func errResponse(status uint, code, msg string) (*handler.Response, error) {
