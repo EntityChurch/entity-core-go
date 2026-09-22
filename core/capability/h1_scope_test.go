@@ -3,6 +3,8 @@ package capability
 import (
 	"testing"
 
+	"github.com/fxamacker/cbor/v2"
+
 	"go.entitychurch.org/entity-core-go/core/types"
 )
 
@@ -180,5 +182,128 @@ func TestCheckResourceScope_PatternTargetHonorsGrantExclude(t *testing.T) {
 	}
 	if !CheckResourceScope(covered, scope, pid, pid) {
 		t.Fatal("caller excluding the forbidden path must be allowed")
+	}
+}
+
+// J1 (§5.2, §5.4 — 0.8.2.22): the pattern-target arm's UNMATCHABLE grant-exclude
+// sentinel. An unmatchable exclude ("*/secret" → NEVER_MATCH) excludes EVERYTHING;
+// the arm's coverage test was correct in isolation and UNREACHABLE because
+// PatternsOverlap CONTINUEs on a sentinel — so the sentinel arm MUST run BEFORE the
+// overlap test. Concrete targets already had this via isExcluded; the pattern arm
+// had it "one line too late". Mutation: remove the IsUnmatchablePattern arm in
+// CheckResourceScope's pattern branch → the overlapping row below flips to ALLOW.
+func TestCheckResourceScope_PatternTargetUnmatchableGrantExcludeDenies(t *testing.T) {
+	pid := testPeerID
+
+	// Unmatchable grant exclude → the grant carves out nothing, so on the pre-J1
+	// reading a pattern target is ALLOWED; H1 flips it to deny (excludes everything).
+	unmatchable := types.CapabilityScope{
+		Include: []string{"*"},
+		Exclude: []string{"*/secret"},
+	}
+	target := &types.ResourceTarget{Targets: []string{"system/tree/*"}}
+	if CheckResourceScope(target, unmatchable, pid, pid) {
+		t.Fatal("J1: pattern target under an unmatchable grant exclude must be denied (unmatchable exclude excludes everything)")
+	}
+
+	// Discriminating control: a WELL-FORMED exclude beside the same include ALLOWS
+	// a non-overlapping pattern target — proving the deny above is the sentinel
+	// catch, not a deny-all-patterns regression.
+	wellFormed := types.CapabilityScope{
+		Include: []string{"*"},
+		Exclude: []string{"system/tree/secret"},
+	}
+	nonOverlap := &types.ResourceTarget{Targets: []string{"system/tree/public/*"}}
+	if !CheckResourceScope(nonOverlap, wellFormed, pid, pid) {
+		t.Fatal("J1 control: non-overlapping pattern target under a well-formed exclude must be allowed")
+	}
+}
+
+// J3 (§5.2 — 0.8.2.22): the pattern-SUBJECT arm's unmatchable grant-exclude
+// sentinel in CheckPathPermission — the EXTENSION-SUBSCRIPTION §2.3 include_payload
+// read check routes a pattern subject (a subscription target) here. Same sentinel
+// rule as J1's pattern-target arm: an unmatchable grant exclude denies before the
+// overlap test. Mutation: remove the IsUnmatchablePattern arm in the IsPattern
+// branch of CheckPathPermission → the row below flips to ALLOW.
+func TestCheckPathPermission_PatternSubjectUnmatchableExcludeDenies(t *testing.T) {
+	pid := testPeerID
+	unmatchable := types.CapabilityTokenData{
+		Grants: []types.GrantEntry{{
+			Handlers:   types.CapabilityScope{Include: []string{"system/tree"}},
+			Resources:  types.CapabilityScope{Include: []string{"*"}, Exclude: []string{"*/secret"}},
+			Operations: types.CapabilityScope{Include: []string{"get"}},
+		}},
+	}
+	if CheckPathPermission("get", "data/*", unmatchable, "system/tree", pid, pid) {
+		t.Fatal("J3: pattern subject under an unmatchable grant exclude must be denied")
+	}
+
+	// Discriminating control: a well-formed exclude ALLOWS a non-overlapping
+	// pattern subject — the deny above is the sentinel catch, not deny-all.
+	wellFormed := types.CapabilityTokenData{
+		Grants: []types.GrantEntry{{
+			Handlers:   types.CapabilityScope{Include: []string{"system/tree"}},
+			Resources:  types.CapabilityScope{Include: []string{"*"}, Exclude: []string{"data/secret"}},
+			Operations: types.CapabilityScope{Include: []string{"get"}},
+		}},
+	}
+	if !CheckPathPermission("get", "data/public/*", wellFormed, "system/tree", pid, pid) {
+		t.Fatal("J3 control: non-overlapping pattern subject under a well-formed exclude must be allowed")
+	}
+}
+
+// J4 (§5.2 "Scope types" — 0.8.2.22): the scope type (path-scope vs id-scope) is
+// a property of the DIMENSION supplied by the call site, never read from a
+// received entity's scope.type field. Go enforces this structurally —
+// CapabilityScope has only {Include, Exclude}, so a wire-supplied `type` key is
+// dropped at decode and cannot reach the matcher. This guard pins that: a scope
+// wire map carrying a spurious `type` decodes with the type IGNORED, and a
+// resources (path-scope) dimension is still matched as a PATH (canonicalized),
+// not literally, regardless of what the wire type claimed. If a Type field is
+// ever added to CapabilityScope and consulted, this test forces a conscious
+// decision — the F40 over-grant the clause guards against becomes reachable only
+// if the dispatch type is taken from the entity.
+func TestScopeTypeIsDimensionNotEntityField(t *testing.T) {
+	pid := testPeerID
+
+	// A resources (path-scope) dimension whose wire map falsely declares the
+	// id-scope type. An implementation that took the type from the entity would
+	// match the resource LITERALLY (id-scope) and over-grant.
+	wire := map[string]interface{}{
+		"include": []interface{}{"system/tree/*"},
+		"exclude": []interface{}{"system/tree/secret"},
+		"type":    "system/capability/id-scope", // spurious — MUST be ignored
+	}
+	raw, err := cbor.Marshal(wire)
+	if err != nil {
+		t.Fatalf("marshal wire scope: %v", err)
+	}
+	var scope types.CapabilityScope
+	if err := cbor.Unmarshal(raw, &scope); err != nil {
+		t.Fatalf("a wire scope carrying a spurious type key MUST decode (the key is dropped): %v", err)
+	}
+	if len(scope.Include) != 1 || scope.Include[0] != "system/tree/*" {
+		t.Fatalf("include not preserved: %v", scope.Include)
+	}
+	if len(scope.Exclude) != 1 || scope.Exclude[0] != "system/tree/secret" {
+		t.Fatalf("exclude not preserved: %v", scope.Exclude)
+	}
+
+	// Dispatch is by CALL SITE: the resources dimension is path-scope, so the
+	// pattern is canonicalized and covers the subtree — a subtree read is ALLOWED
+	// and the excluded leaf is DENIED. If the spurious id-scope type had been
+	// consulted, "system/tree/*" would be a literal identifier and match neither.
+	cap := types.CapabilityTokenData{
+		Grants: []types.GrantEntry{{
+			Handlers:   types.CapabilityScope{Include: []string{"system/tree"}},
+			Resources:  scope,
+			Operations: types.CapabilityScope{Include: []string{"get"}},
+		}},
+	}
+	if !CheckPathPermission("get", "system/tree/public", cap, "system/tree", pid, pid) {
+		t.Fatal("path-scope dimension must match the subtree by canonicalization (call-site type), not literally by a wire-declared id-scope")
+	}
+	if CheckPathPermission("get", "system/tree/secret", cap, "system/tree", pid, pid) {
+		t.Fatal("the path-scope exclude must still deny the excluded leaf")
 	}
 }

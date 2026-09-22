@@ -93,6 +93,21 @@ func (d *Dispatcher) resolveAuthoredGrant(env entity.Envelope, execData types.Ex
 // It checks: content hashes, signature target-matching, Ed25519 signature,
 // capability chain, and grantee == author.
 func VerifyRequest(env entity.Envelope, localPeerID crypto.PeerID) error {
+	// 0. Bind every included map key to the entity it addresses BEFORE any
+	// authority lookup. Author identity (step 1), signature signer, capability,
+	// grantee and the whole chain (step 5) all resolve BY HASH out of
+	// env.Included; a mis-keyed entry is an identity/capability forgery (an
+	// attacker files their own system/peer under a victim's identity hash, then
+	// their own signature verifies against their own key while the peer
+	// attributes it to the victim — core-rust routed 2026-09-13). Enforced here
+	// as well as in VerifyChain because the author check at step 1 fires before
+	// the chain walk (an author-identity forgery is an AUTHENTICATION failure,
+	// hence the auth-class code), and because VerifyRequest is a standalone
+	// verifier that may be reached without a prior ValidateAll.
+	if err := entity.VerifyIncludedKeyBinding(env.Included); err != nil {
+		return fmt.Errorf("%w: %v", ecerrors.ErrAuthenticationFailed, err)
+	}
+
 	execData, err := types.ExecuteDataFromEntity(env.Root)
 	if err != nil {
 		return fmt.Errorf("%w: invalid execute: %v", ecerrors.ErrAuthenticationFailed, err)

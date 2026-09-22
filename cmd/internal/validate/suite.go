@@ -445,6 +445,11 @@ func (s *ValidationSuite) Run(ctx context.Context) (*Report, error) {
 	// effective set, never resource.targets[0] (F68).
 	runCat(catResourceEffective, func() []CheckResult { return runResourceEffective(ctx, client) })
 
+	// K1 resolution-integrity forgery (§1.8/§5.2a, 0.8.2.23): a mis-keyed
+	// included entry (attacker identity under the victim's author hash) MUST be
+	// refused, never resolved as the victim.
+	runCat(catResolutionIntegrity, func() []CheckResult { return runResolutionIntegrity(ctx, s.newClient) })
+
 	// The §5.2/§5.4/§6.3 capability-EXCLUDE read/enumeration matrix under a
 	// NARROW cap — the arm every broad-cap category is structurally blind to.
 	runCat(catExcludeMatrix, func() []CheckResult { return runExcludeMatrix(ctx, client) })
@@ -903,6 +908,8 @@ func (s *ValidationSuite) RunCategory(ctx context.Context, category string) (*Re
 		report.AddAll(runResourceBounds(ctx, s.addr, s.newClient, s.effectiveDeclaredMaxPayload(), s.effectiveDeclaredMaxChainDepth()))
 	case catResourceEffective:
 		report.AddAll(runResourceEffective(ctx, client))
+	case catResolutionIntegrity:
+		report.AddAll(runResolutionIntegrity(ctx, s.newClient))
 	case catExcludeMatrix:
 		report.AddAll(runExcludeMatrix(ctx, client))
 	case catAttestation:

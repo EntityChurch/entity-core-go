@@ -1307,8 +1307,10 @@ func (c *Connection) Execute(ctx context.Context, uri, operation string, params 
 
 	// Include entities from the authenticate response (granter identity, capability
 	// signatures, etc.) — required for capability chain verification on the server.
-	for h, ent := range c.session.Envelope.Included {
-		env.Include(entity.Entity{Type: ent.Type, Data: ent.Data, ContentHash: h})
+	// Pass each unchanged; Include re-keys by recomputed content hash (§1.8), so
+	// the wire key h is never trusted as an address (forgery fix).
+	for _, ent := range c.session.Envelope.Included {
+		env.Include(ent)
 	}
 	// A connection-scoped grant's granter identity and signature are NOT in
 	// our handshake auth_included — the counterpart authored them — so they
@@ -1417,11 +1419,13 @@ func (c *Connection) ExecuteWithIncluded(
 		return entity.Envelope{}, fmt.Errorf("create execute: %w", err)
 	}
 
-	for h, ent := range c.session.Envelope.Included {
-		env.Include(entity.Entity{Type: ent.Type, Data: ent.Data, ContentHash: h})
+	// Pass each entity unchanged; Include re-keys by recomputed content hash
+	// (§1.8), so no wire key h is trusted as an address (forgery fix).
+	for _, ent := range c.session.Envelope.Included {
+		env.Include(ent)
 	}
-	for h, ent := range extras {
-		env.Include(entity.Entity{Type: ent.Type, Data: ent.Data, ContentHash: h})
+	for _, ent := range extras {
+		env.Include(ent)
 	}
 	// A connection-scoped grant's supporting chain (see Execute). Included
 	// here rather than merged into the caller's `extras` map, which we do

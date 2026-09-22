@@ -51,8 +51,8 @@ func runResourceEffective(ctx context.Context, client *PeerClient) []CheckResult
 	contentURI := fmt.Sprintf("entity://%s/system/content", remote)
 
 	base := "system/validate/f68"
-	secretPath := base + "/secret"           // forbidden: out of the scoped grant
-	allowedPath := base + "/allowed/y"        // permitted: under .../allowed/*
+	secretPath := base + "/secret"     // forbidden: out of the scoped grant
+	allowedPath := base + "/allowed/y" // permitted: under .../allowed/*
 	allowedA := base + "/allowed/a"
 	allowedB := base + "/allowed/b"
 	allowedPattern := base + "/allowed/*"

@@ -198,6 +198,51 @@ func TestEnvelopeInclude(t *testing.T) {
 	}
 }
 
+// K1 durable fix (§1.8 resolution integrity, 0.8.2.23): Include is the single
+// site that keys the included map, so it recomputes the key from {type, data}
+// and never trusts a caller-supplied (wire) ContentHash. This closes the four
+// outbound re-key sites in core/peer at the constructor rather than relying on
+// a non-local "the source map was already validated" argument at each. Mutation:
+// revert Include to `e.Included[ent.ContentHash] = ent` → the mis-stamped entity
+// files under the wrong key → the true-hash lookup below misses and this reds.
+func TestEnvelopeInclude_ReKeysMisStampedEntityUnderTrueHash(t *testing.T) {
+	root, _ := NewEntity("test/root", makeRawData(t, "root"))
+	env := NewEnvelope(root, nil)
+
+	// A genuine entity and its true hash.
+	inc, _ := NewEntity("test/included", makeRawData(t, "included"))
+	trueHash := inc.ContentHash
+
+	// A DIFFERENT entity's hash, used as the attacker/wire key.
+	other, _ := NewEntity("test/other", makeRawData(t, "other-decoy"))
+	wireKey := other.ContentHash
+	if wireKey == trueHash {
+		t.Fatal("setup: decoy hash collided with the true hash")
+	}
+
+	// The re-key idiom: re-stamp the genuine entity's ContentHash with a foreign
+	// wire key (exactly what the four core/peer sites used to do, and what a
+	// forgery does — file an entity under a key that is not its content).
+	misStamped := Entity{Type: inc.Type, Data: inc.Data, ContentHash: wireKey}
+	env.Include(misStamped)
+
+	// It MUST be filed under the true content hash, never the wire key.
+	if _, ok := env.FindIncluded(wireKey); ok {
+		t.Fatal("Include filed an entity under a caller-supplied wire key — resolution-integrity bypass")
+	}
+	found, ok := env.FindIncluded(trueHash)
+	if !ok {
+		t.Fatal("Include must key by recomputed content hash; true-hash lookup missed")
+	}
+	if found.ContentHash != trueHash {
+		t.Fatalf("stored entity's ContentHash not normalized to the true hash: got %s", found.ContentHash)
+	}
+	// And the resulting map passes the receiver-side binding check.
+	if err := VerifyIncludedKeyBinding(env.Included); err != nil {
+		t.Fatalf("Include-built map must satisfy VerifyIncludedKeyBinding: %v", err)
+	}
+}
+
 // URI tests
 
 func TestParseURI(t *testing.T) {
@@ -396,5 +441,45 @@ func TestFloorPinnedTypeRefusesNonFloorProcessDefault(t *testing.T) {
 	if ent.ContentHash.Algorithm != hash.AlgorithmSHA384 {
 		t.Fatalf("non-pinned type authored under 0x%02x, want the home format 0x%02x",
 			ent.ContentHash.Algorithm, hash.AlgorithmSHA384)
+	}
+}
+
+// TestValidateAll_BindsIncludedMapKey pins the decode/receive-path half of the
+// map-key-binding fix (core-rust routed 2026-09-13). A mis-keyed included entry
+// — an entity filed under a hash that is not its own — is an identity/capability
+// forgery vector, because every authority lookup resolves BY HASH out of this
+// map. ValidateAll (and VerifyIncludedKeyBinding beneath it) must reject it even
+// though each entity is individually self-consistent.
+func TestValidateAll_BindsIncludedMapKey(t *testing.T) {
+	entA, err := NewEntity("system/note", makeRawData(t, map[string]string{"v": "a"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entB, err := NewEntity("system/note", makeRawData(t, map[string]string{"v": "b"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := NewEntity("system/note", makeRawData(t, map[string]string{"v": "root"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Positive control: correctly keyed → passes.
+	honest := NewEnvelope(root, map[hash.Hash]Entity{
+		entA.ContentHash: entA,
+		entB.ContentHash: entB,
+	})
+	if err := honest.ValidateAll(); err != nil {
+		t.Fatalf("positive control failed — a correctly-keyed envelope must validate: %v", err)
+	}
+
+	// entB is self-consistent but filed under entA's hash: a mis-key.
+	forged := NewEnvelope(root, map[hash.Hash]Entity{
+		entA.ContentHash: entB, // <-- mis-keyed
+	})
+	if err := forged.ValidateAll(); err == nil {
+		t.Fatalf("mis-keyed included entry ACCEPTED — ValidateAll does not bind the map key")
+	} else if !errors.Is(err, ecerrors.ErrInvalidEntity) {
+		t.Fatalf("expected ErrInvalidEntity for a mis-keyed entry, got: %v", err)
 	}
 }

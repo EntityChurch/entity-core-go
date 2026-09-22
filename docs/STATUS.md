@@ -1,6 +1,6 @@
 # entity-core-go — status
 
-_Updated: 2026-09-09 · released version: the newest git tag on `master` (authoritative in `CHANGELOG.md` + `go.mod`) — deliberately not restated here, so it cannot go stale on a cut_
+_Updated: 2026-09-13 · released version: the newest git tag on `master` (authoritative in `CHANGELOG.md` + `go.mod`) — deliberately not restated here, so it cannot go stale on a cut_
 
 **This file is the canonical rolling log for this repo** — one file, re-measured
 rather than appended to, and the only status document that publishes. The dated
@@ -25,7 +25,7 @@ The codebase is a three-module `go.work` workspace — `core` (the protocol
 library, a strict 13-package DAG: `errors → ecf → hash → entity, crypto,
 store, types, wire → capability → handler → protocol, tree → peer`), `ext`
 (system extensions, each depending only on `core` — **28 packages**), and `cmd`
-(CLIs, the **66-category** validation suite, and cross-impl interop tooling). Go 1.25, only
+(CLIs, the **67-category** validation suite, and cross-impl interop tooling). Go 1.25, only
 two external dependencies (`fxamacker/cbor` for ECF, `mr-tron/base58` for
 PeerID), pure-Go/no-CGo. The build is fully containerized (`make` + `podman`,
 per-invocation resource caps in the `Makefile` / `RESOURCE-CAPS.md`); a fresh
@@ -40,6 +40,23 @@ live-HTTP transport surfaces.
 
 ## Where we left off
 
+> **2026-09-13 — the capability-forgery close and two path-scope corrections landed.** A
+> capability presented on the wire carries its supporting entities — identities, capability
+> chains, signatures — in a map addressed by content hash, and every authority decision looks
+> an entity up by that address. The address is now bound to the entity it names on receipt: an
+> entry whose key is not the hash of its own contents is rejected, closing an impersonation in
+> which an attacker files their own identity under a victim's address and has their signature
+> verified against their own key while the request is attributed to the victim. The single place
+> that builds that map now recomputes each address from the entity's contents, so no code path
+> can file an entity under an address that is not its own. A wire probe drives the impersonation
+> directly and confirms it is refused (verified by disabling the check and watching the forgery
+> succeed). Separately, two capability-scope checks that exclude paths by pattern were corrected
+> to honour an unmatchable exclusion — a mis-spelled exclusion pattern that matches nothing now
+> denies everything (fail-closed) rather than silently widening the grant — at evaluation, not
+> only when the capability is minted. Every derived path a bulk read or a merge produces is
+> authorized against the caller's own capability, so a narrow caller cannot reach paths its
+> capability does not cover. Full conformance suite green across all profiles.
+>
 > **2026-09-09 (b) — the 0.8.2.17 set converged three ways.** All three reference
 > implementations (Go, Rust, Python) landed the outbound sub-dispatch authorization
 > and the id-scope delegation-subset, and drove them against each other: the outbound

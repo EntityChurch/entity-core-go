@@ -36,7 +36,6 @@
     "compute.v319b_scope_hash_agreement": "NO_CITATION",
     "compute.v319c_construct_navigation_chain": "NO_CITATION",
     "compute.v319c_inline_vs_builtin_construct_hash_agreement": "NO_CITATION",
-    "concurrency.t1_2_concurrent_reentry": "PARTIAL",
     "conformance.\u003ccomputed\u003e": "DYNAMIC,DYNAMIC,DYNAMIC",
     "conformance.corpus_version_agreement": "NON_NORMATIVE",
     "conformance.spec_version_agreement": "NON_NORMATIVE",

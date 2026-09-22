@@ -305,11 +305,25 @@ func CheckResourceScope(resource *types.ResourceTarget, grantResources types.Cap
 			// OVERLAPS this target, the caller must carry a corresponding exclude
 			// that covers it — otherwise the effective target spans paths the grant
 			// forbids. Grant patterns canonicalize against the granter (PR-8); the
-			// caller exclude is a request-path field (localPeerID). NEVER_MATCH is
-			// not special-cased here (per §5.2): an unmatchable grant exclude cannot
-			// overlap any real target and is caught by the H1 validity gate instead.
+			// caller exclude is a request-path field (localPeerID).
+			//
+			// The sentinel arm is FIRST and is a control-flow obligation, not a
+			// line (§5.4 consumer table, 0.8.2.22): an unmatchable grant exclude
+			// (§5.4 NEVER_MATCH — a `*/`, `./`, `../`-leading pattern) MUST deny
+			// before the overlap test, because PatternsOverlap CONTINUEs on such a
+			// pattern (it overlaps nothing), which would skip the deny. The concrete
+			// arm below carries the same rule via isExcluded; this arm had it "one
+			// line too late" — the coverage test at IsCoveredBy is correct in
+			// isolation and was unreachable. (J1, arch ROUTING-2026-09-13-d. The
+			// H1 validity gate refuses such a cap at mint, but a received cap that
+			// was not minted locally reaches evaluation, so the deny must also live
+			// here, per the same "a control must fail closed on its own input"
+			// discipline the H1 exclude-matrix ratchet is built on.)
 			for _, ge := range grantResources.Exclude {
 				cge := Canonicalize(ge, granterPeerID)
+				if IsUnmatchablePattern(cge) {
+					return false
+				}
 				if !PatternsOverlap(ct, cge) {
 					continue
 				}
@@ -543,8 +557,19 @@ func CheckPathPermission(operation, path string, cap types.CapabilityTokenData, 
 		//     at mint), matching check_resource_scope's pattern arm exactly.
 		excluded := false
 		if IsPattern(canonicalPath) {
+			// J3 (§5.2, 0.8.2.22): the sentinel rule applies to the pattern
+			// subject arm too — an unmatchable grant exclude denies BEFORE the
+			// overlap test (PatternsOverlap CONTINUEs on it), matching
+			// check_resource_scope's pattern arm (J1) fixed the same round. A
+			// received cap not minted locally reaches evaluation, so the deny
+			// must live here, not only at the mint-time validity gate.
 			for _, excl := range grant.Resources.Exclude {
-				if PatternsOverlap(canonicalPath, Canonicalize(excl, granterPeerID)) {
+				cexcl := Canonicalize(excl, granterPeerID)
+				if IsUnmatchablePattern(cexcl) {
+					excluded = true
+					break
+				}
+				if PatternsOverlap(canonicalPath, cexcl) {
 					excluded = true
 					break
 				}

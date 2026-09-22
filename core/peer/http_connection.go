@@ -194,9 +194,13 @@ func (c *HTTPConnection) Execute(ctx context.Context, uri, operation string, par
 	}
 
 	// Include entities from the authenticate response (granter identity,
-	// capability signatures) so the server can verify the chain.
-	for h, ent := range c.session.Envelope.Included {
-		env.Include(entity.Entity{Type: ent.Type, Data: ent.Data, ContentHash: h})
+	// capability signatures) so the server can verify the chain. Pass each
+	// entity unchanged: Include keys the map by recomputed content hash
+	// (§1.8 resolution integrity), so the map key is never a re-stamped wire
+	// hash. (This loop previously rebuilt entity.Entity{…, ContentHash: h}
+	// from the wire key h — the re-key idiom the forgery fix closed at Include.)
+	for _, ent := range c.session.Envelope.Included {
+		env.Include(ent)
 	}
 
 	return c.roundTrip(ctx, env, false)
@@ -236,11 +240,13 @@ func (c *HTTPConnection) ExecuteWithIncluded(ctx context.Context, uri, operation
 		return entity.Envelope{}, fmt.Errorf("create execute: %w", err)
 	}
 
-	for h, ent := range c.session.Envelope.Included {
-		env.Include(entity.Entity{Type: ent.Type, Data: ent.Data, ContentHash: h})
+	// Pass each entity unchanged; Include re-keys by recomputed content hash
+	// (§1.8), so no wire key h is trusted as an address (forgery fix).
+	for _, ent := range c.session.Envelope.Included {
+		env.Include(ent)
 	}
-	for h, ent := range extras {
-		env.Include(entity.Entity{Type: ent.Type, Data: ent.Data, ContentHash: h})
+	for _, ent := range extras {
+		env.Include(ent)
 	}
 
 	return c.roundTrip(ctx, env, false)

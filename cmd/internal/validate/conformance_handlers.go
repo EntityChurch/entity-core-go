@@ -416,6 +416,7 @@ func (c *PeerClient) SendDispatchOutboundProbe(ctx context.Context, value interf
 //     the INNER (sub-dispatch) status — inner 403.
 //   - RELAYED (py): the handler relays the refusal as the OUTER status —
 //     outer 403 capability_denied, inner 0.
+//
 // A peer that keeps the §7a.2a triple MANDATORY refuses the omitted-triple
 // probe at PARAM VALIDATION (outer 400 invalid_params) — a refusal BEFORE any
 // dispatch, so the ambient arm is NOT reachable over this probe and the outcome

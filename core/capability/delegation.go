@@ -70,6 +70,18 @@ func ResolveGranterPeerIDFromIncluded(granter types.Granter, included map[hash.H
 // validation runs). Both fail closed; the difference is which error code
 // fires for compound-failure cases.
 func VerifyChain(capEntity entity.Entity, included map[hash.Hash]entity.Entity, localPeerID crypto.PeerID) error {
+	// Bind every included map key to the entity it addresses before any
+	// resolution. Chain-granter, per-link signer identity, and grantee
+	// resolution all read entities BY HASH out of `included`; a mis-keyed entry
+	// substitutes an attacker's key under a victim's identity hash (core-rust
+	// routed 2026-09-13). VerifyChain enforces it here — not only in
+	// VerifyRequest — because the §7a.2a presented-authority arm calls VerifyChain
+	// directly with a bundle merged from the parent envelope's included, and that
+	// arm deliberately relaxes root-trust, so the link-signature substitution
+	// bites hardest exactly there.
+	if err := entity.VerifyIncludedKeyBinding(included); err != nil {
+		return fmt.Errorf("%w: %v", ecerrors.ErrCapabilityDenied, err)
+	}
 	chain, err := CollectAuthorityChain(capEntity, IncludedResolver(included))
 	if err != nil {
 		// V7 §4.10(b) (v7.75 §9.1 floor MUST): a chain that exceeds the impl's
