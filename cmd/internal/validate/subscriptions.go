@@ -111,6 +111,7 @@ func runSubscriptions(ctx context.Context, client *PeerClient) []CheckResult {
 	// convergent_mirror multi-peer category.
 	r.Declare("include_payload_field_persisted", "SUBSCRIPTION §2.1 v3.14")
 	r.Declare("include_payload_unauthorized", "SUBSCRIPTION §2.3 v3.13")
+	r.Declare("include_payload_overlapping_exclude", "SUBSCRIPTION §2.3 / V7 §6.3 (pattern-subject exclude)")
 
 	// The events-vocabulary delivery filter (§4 `if event_type in
 	// subscription.data.events` + §11 vocabulary created/updated/deleted): a
@@ -963,6 +964,109 @@ func runSubscriptions(ctx context.Context, client *PeerClient) []CheckResult {
 			return PassCheck("subscribe with include_payload=true (no tree:get) rejected 403 payload_unauthorized")
 		}
 		return PassCheck(fmt.Sprintf("subscribe with include_payload=true (no tree:get) rejected 403 (code=%q; spec says payload_unauthorized)", errCode))
+	})
+
+	// include_payload where the caller HAS tree:get on the subtree but the
+	// subscription PATTERN overlaps a grant EXCLUDE (§2.3 hands a PATTERN subject
+	// — `data/*` — to CheckPathPermission; §6.3's concrete-only exclude test let
+	// a pattern re-spell straight past a concrete grant exclude). A subscription
+	// on `data/*` under a cap granting tree:get on `data/*` EXCEPT `data/secret`
+	// MUST be 403 — else include_payload pushes the excluded body on every write,
+	// forever. The control (a NON-overlapping pattern) must be 200, proving the
+	// tree:get grant genuinely covers, so the 403 is attributable to the overlap.
+	r.Run("include_payload_overlapping_exclude", func() CheckOutcome {
+		remote := string(client.RemotePeerID())
+		ipInbox := "system/inbox/validate-overlap-exclude"
+		base := "system/validate/xm-sub/data"
+		getScope := "/" + remote + "/" + base + "/*"
+		getExclude := "/" + remote + "/" + base + "/secret"
+
+		// Cap: subscribe on the pattern + tree:get on data/* EXCEPT data/secret.
+		// The dispatch cap's granter is US, so bare patterns canonicalize to
+		// /{us}/... and miss the remote's namespace (§5.5/PR-8) — remote-qualify
+		// BOTH grants, else the subscribe authorization itself fails and the 403
+		// is a capability_denied mismatch, not the §2.3 payload check.
+		grants := []types.GrantEntry{
+			{
+				Handlers:   types.CapabilityScope{Include: []string{"system/subscription"}},
+				Resources:  types.CapabilityScope{Include: []string{getScope, "/" + remote + "/" + base + "/public/*"}},
+				Operations: types.CapabilityScope{Include: []string{"subscribe"}},
+			},
+			{
+				Handlers:   types.CapabilityScope{Include: []string{"system/tree"}},
+				Resources:  types.CapabilityScope{Include: []string{getScope}, Exclude: []string{getExclude}},
+				Operations: types.CapabilityScope{Include: []string{"get"}},
+			},
+		}
+		narrowCap, narrowCapSig, err := client.CreateDispatchCapabilityWithGrants(grants)
+		if err != nil {
+			return FailCheck("mint overlap cap: " + err.Error())
+		}
+		token, tokenSig, err := client.CreateDeliveryToken(ipInbox, "receive")
+		if err != nil {
+			return FailCheck("create delivery token: " + err.Error())
+		}
+		extras := map[hash.Hash]entity.Entity{
+			token.ContentHash:    token,
+			tokenSig.ContentHash: tokenSig,
+		}
+
+		subscribePayload := func(pattern string) (uint, string, error) {
+			subReq := types.SubscriptionRequestData{
+				Events:         []string{"created", "updated"},
+				DeliverTo:      types.DeliverySpec{URI: ipInbox, Operation: "receive"},
+				DeliverToken:   token.ContentHash,
+				IncludePayload: true,
+			}
+			params, perr := subReq.ToEntity()
+			if perr != nil {
+				return 0, "", perr
+			}
+			uri := fmt.Sprintf("entity://%s/system/subscription", remote)
+			respEnv, _, serr := client.SendExecuteWithCap(ctx, uri, "subscribe", params,
+				&types.ResourceTarget{Targets: []string{pattern}}, narrowCap, narrowCapSig, extras)
+			if serr != nil {
+				return 0, "", serr
+			}
+			respData, derr := types.ExecuteResponseDataFromEntity(respEnv.Root)
+			if derr != nil {
+				return 0, "", derr
+			}
+			code := ""
+			if respData.Result != nil {
+				var errEnt entity.Entity
+				if ecf.Decode(respData.Result, &errEnt) == nil {
+					if errData, e := types.ErrorDataFromEntity(errEnt); e == nil {
+						code = errData.Code
+					}
+				}
+			}
+			return respData.Status, code, nil
+		}
+
+		// Overlapping pattern: data/* overlaps the exclude data/secret → 403.
+		st, code, err := subscribePayload(base + "/*")
+		if err != nil {
+			return FailCheck("subscribe overlapping pattern: " + err.Error())
+		}
+		if st == 200 {
+			return FailCheck("SUB PATTERN-EXCLUDE FAIL: include_payload on `data/*` was ACCEPTED under a cap that excludes `data/secret` — the §6.3 pattern subject re-spelled past the concrete exclude; the excluded body would be pushed on every write (§2.3)")
+		}
+		if st != 403 {
+			return FailCheck(fmt.Sprintf("SUB PATTERN-EXCLUDE FAIL: overlapping include_payload got status %d code=%q; want 403", st, code))
+		}
+
+		// Control: NON-overlapping pattern data/public/* → 200, proving the
+		// tree:get grant genuinely covers (so the 403 above is the overlap, not
+		// a canonicalization mismatch that denies everything).
+		cs, _, err := subscribePayload(base + "/public/*")
+		if err != nil {
+			return FailCheck("subscribe control pattern: " + err.Error())
+		}
+		if cs != 200 {
+			return WarnCheck(fmt.Sprintf("SUB PATTERN-EXCLUDE INCONCLUSIVE: overlapping pattern was 403 but the NON-overlapping control `data/public/*` was ALSO refused (status=%d) — cannot tell an overlap-deny from a grant that covers nothing (canonicalization mismatch); investigate before trusting", cs))
+		}
+		return PassCheck(fmt.Sprintf("include_payload on `data/*` overlapping exclude `data/secret` → 403 (code=%q); non-overlapping `data/public/*` control → 200 — the pattern-subject exclude is honored and attributable (§2.3/§6.3)", code))
 	})
 
 	// --- Step 11: Events-vocabulary delivery filter ---

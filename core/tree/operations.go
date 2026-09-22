@@ -117,10 +117,23 @@ func (h *Handler) handleSnapshot(_ context.Context, req *handler.Request) (*hand
 		return handler.NewErrorResponse(403, "capability_denied", "insufficient capability for snapshot prefix: "+prefix)
 	}
 
-	// Short-circuit: if a tracked root is maintained for this prefix, return
-	// it directly (EXTENSION-TREE v3.8 §3.4 — O(1) instead of O(N) rebuild).
+	// A snapshot commits to the bindings under `prefix`. §11 exempts `diff` from
+	// path checks — sound ONLY while a snapshot cannot commit to bindings the
+	// caller may not see; py drove the leak (snapshot the prefix, diff against an
+	// empty snapshot, and the excluded key + its content hash fall out of `added`,
+	// via the one operation the spec says needs no authority — 2026-09-12). So
+	// under a caller capability the snapshot is per-binding filtered exactly as
+	// extract/listing are (EXTENSION-TREE §8.4 unswept row). The tracked-root
+	// fast path returns a root over UNFILTERED bindings, so it is bypassed when a
+	// cap is present — a filter added only to the rebuild branch would be silently
+	// skipped through the O(1) path (py flagged this too).
+	capScoped := hctx.CallerCapability.ContentHash.IsZero() == false
+
 	var root hash.Hash
-	if h.tracker != nil {
+	if h.tracker != nil && !capScoped {
+		// Short-circuit: tracked root maintained for this prefix (EXTENSION-TREE
+		// v3.8 §3.4 — O(1) instead of O(N) rebuild). Only for the cap-free
+		// (local/trusted) case, where there is nothing to filter.
 		if r, ok := h.tracker.Root(prefix); ok {
 			root = r
 		}
@@ -134,9 +147,16 @@ func (h *Handler) handleSnapshot(_ context.Context, req *handler.Request) (*hand
 		var bindings []Binding
 		for _, e := range entries {
 			rel := strings.TrimPrefix(e.Path, qualifiedPrefix)
-			if rel != "" {
-				bindings = append(bindings, Binding{Path: rel, Hash: e.Hash})
+			if rel == "" {
+				continue
 			}
+			// Per-binding capability filter (checkPathPerm is a no-op when no cap
+			// is present). Filtering before BuildTrie is re-rooting (§6.2): the
+			// snapshot root is complete against what the caller may see.
+			if !checkPathPerm(hctx, "get", e.Path) {
+				continue
+			}
+			bindings = append(bindings, Binding{Path: rel, Hash: e.Hash})
 		}
 
 		var err error
@@ -427,7 +447,7 @@ func (h *Handler) handleExtract(_ context.Context, req *handler.Request) (*handl
 			}
 		}
 		// Filtered: read specific paths directly. Each path is re-checked against
-		// the caller capability (EXTENSION-TREE §8.2): an out-of-scope path MUST be
+		// the caller capability (ENTITY-CORE-PROTOCOL §6.3): an out-of-scope path MUST be
 		// indistinguishable from absent, so it is silently omitted exactly as a
 		// well-formed path that binds nothing is (§6.1) — a caller cannot use an
 		// explicit paths[] entry to extract a binding its grant excludes.
@@ -443,10 +463,11 @@ func (h *Handler) handleExtract(_ context.Context, req *handler.Request) (*handl
 	} else {
 		// Full prefix: all bindings under prefix.
 		// List returns qualified paths; trim the full qualified prefix to get relative keys.
-		// Per-binding capability filter (EXTENSION-TREE §8.2): a binding the caller
-		// capability does not grant `get` is omitted. Filtering before BuildTrie is
-		// RE-ROOTING, not filtering (§6.2 v4.6) — the envelope is complete against
-		// the filtered root — so the envelope never ships an entity the cap forbids.
+		// Per-binding capability filter (ENTITY-CORE-PROTOCOL §6.3): a binding the
+		// caller capability does not grant `get` is omitted. Filtering before
+		// BuildTrie is RE-ROOTING, not filtering (EXTENSION-TREE §6.2 v4.6) — the
+		// envelope is complete against the filtered root — so it never ships an
+		// entity the cap forbids.
 		qp := store.QualifyPath(string(hctx.LocalPeerID), prefix)
 		entries := hctx.LocationIndex.List(prefix)
 		for _, e := range entries {

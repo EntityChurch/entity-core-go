@@ -521,25 +521,45 @@ func CheckPathPermission(operation, path string, cap types.CapabilityTokenData, 
 			continue
 		}
 
-		// Check excludes. The path being checked is concrete, so this mirrors
-		// check_resource_scope's concrete arm: an UNMATCHABLE grant exclude excludes
-		// EVERYTHING (H1, 0.8.2.21) — fail closed. Without this arm a granter's
-		// misspelled exclude ("*/secret") carves out nothing and the grant is
-		// silently wider than written, the sentinel's fail-OPEN direction. This was
-		// the fourth fail-open site left after isExcluded got the arm (G-1, both
-		// siblings routed 2026-09-11); §6.3 is the SOLE resource enforcement when
-		// the dispatch-level resource dimension is absent, so it is the site that
-		// carries the guarantee once the dispatch path is vacuous.
+		// Check excludes. The subject PATH is usually concrete (a get/put on a
+		// specific path), but EXTENSION-SUBSCRIPTION §2.3 routes a PATTERN subject
+		// here (a subscription target like `data/*`). The two need different exclude
+		// semantics, exactly as check_resource_scope's concrete/pattern split does:
+		//
+		//   - CONCRETE subject: an UNMATCHABLE grant exclude excludes EVERYTHING
+		//     (H1, 0.8.2.21 — fail closed; a misspelled "*/secret" carves out
+		//     nothing and the grant is silently wider than written), and a concrete
+		//     exclude that matches the path excludes it. §6.3 is the SOLE resource
+		//     enforcement when the dispatch resource dimension is absent (G-1).
+		//   - PATTERN subject: the concrete exact test is a literal inequality, so a
+		//     pattern re-spells straight past a concrete grant exclude — the G-4
+		//     bypass one handler over (py routed 2026-09-12: an include_payload
+		//     subscription on `data/*` under a grant excluding `data/secret` shipped
+		//     the excluded body forever). There is no caller-exclude at this call
+		//     site, so ANY grant exclude that OVERLAPS the pattern subject forbids it
+		//     (the §5.2 pattern arm reduced to zero caller coverage). NEVER_MATCH is
+		//     not special-cased in this arm (per §5.2 — it cannot overlap a real
+		//     pattern and is caught by the FirstUnmatchableScopePattern validity gate
+		//     at mint), matching check_resource_scope's pattern arm exactly.
 		excluded := false
-		for _, excl := range grant.Resources.Exclude {
-			canonicalExclude := Canonicalize(excl, granterPeerID)
-			if IsUnmatchablePattern(canonicalExclude) {
-				excluded = true
-				break
+		if IsPattern(canonicalPath) {
+			for _, excl := range grant.Resources.Exclude {
+				if PatternsOverlap(canonicalPath, Canonicalize(excl, granterPeerID)) {
+					excluded = true
+					break
+				}
 			}
-			if MatchesPattern(canonicalPath, canonicalExclude) {
-				excluded = true
-				break
+		} else {
+			for _, excl := range grant.Resources.Exclude {
+				canonicalExclude := Canonicalize(excl, granterPeerID)
+				if IsUnmatchablePattern(canonicalExclude) {
+					excluded = true
+					break
+				}
+				if MatchesPattern(canonicalPath, canonicalExclude) {
+					excluded = true
+					break
+				}
 			}
 		}
 		if !excluded {

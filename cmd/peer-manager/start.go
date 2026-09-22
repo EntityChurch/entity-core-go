@@ -182,6 +182,7 @@ func cmdStart(args []string) {
 	httpPollPrefix := fs.String("http-poll-prefix", "/poll", "Chunk E: URL prefix when mounting poll on live listener (default /poll); ignored on isolated port.")
 	serveNamespace := fs.String("serve-namespace", "", "Chunk E: content-namespace scope (e.g. system/content/public). Tree binding at NAMESPACE/{hex(H)} = in-scope.")
 	serveWholeStore := fs.Bool("serve-scope-whole-store", false, "Chunk E: DEBUG OPT-IN — serve every H in local content-store (ruling §1.3 T2/T3 caveat).")
+	serveCapScope := fs.String("serve-cap-scope", "", "EXTENSION-NETWORK Amendment 5 §5A: serve under a CapTokenScope minted from INCLUDE[,INCLUDE...][:EXCLUDE[,EXCLUDE...]] resource patterns, evaluated by the same capability.CheckPathPermission the live surface uses. Go-only: absent from both sibling CLIs (enumerated in full), so dropped with a warning for rust/python. Forwarded as -serve-cap-scope to Go entity-peer.")
 	keyType := fs.String("key-type", "ed25519", "peer keypair algorithm: ed25519 (default) | ed448 (v7.67 §3). Applies when minting a new identity for this peer. Honored by all three: Go --key-type, Python --key-type, Rust `key_type` on `peer init` (cmd/entity-peer/src/main.rs, PeerAction::Init) — and peer-manager HAS been forwarding it to rust init all along (see startRustPeer below). This note read \"forwarded to Rust once its CLI lands\" until 2026-08-12 (e), which was the SECOND claim in this file to contradict the forwarding code sitting a few hundred lines beneath it. A false negative about a sibling reads as their gap and is ours."+siblingSurfaceVerifiedAt())
 	hashType := fs.String("hash-type", "sha256", "content_hash_format / home format the peer authors content + substrate under: sha256 (default, 0x00) | sha384 (0x01). V7 v7.70 §1.2. Honored by all three: Go --hash-type, Rust `hash_type` (cmd/entity-peer/src/main.rs, on both `peer start` and `peer issue-binding`), Python --hash-type. NOTE: sha384 is accepted by all three CLIs. The two spec pins that blocked it are GONE as of 2026-08-10 (verified in spec text 2026-08-11): EXTENSION-NETWORK §6.5.3.1 has no 33-byte pin left, and EXTENSION-SIGNALING §6.3 carries an explicit \"Corrected 2026-08-10\" dropping the fixed-33 requirement on inner_content_hash — it is authored content and follows the signing peer's home format. §3.1's 33-byte rendezvous_key is deliberate and NOT the defect: it is pinned to the SHA-256 floor because a rendezvous key is a reproduced lookup token, not authored content. GO NOW RUNS SHA-384 END TO END, MEASURED 2026-08-12 (e): `HASH_TYPE=sha384 ./scripts/validate-complete.sh` → 1571 · 0F · 0S · 0W / 633 / 55 / 19, exit 0 on all four passes. This sentence read \"UNMEASURED SINCE THAT CORRECTION — re-measure before relying on it\" for two days, and the honest part of that warning was warranted: the first run found 1 F plus two more defects hidden behind it, all of them §4.5a item 1a identity-format violations in our own code. Fixed; see WORK-STATUS G-9. See docs/validation/spec-issues/2026-08-10-the-33-byte-hash-*."+siblingSurfaceVerifiedAt())
 	inboxRelayRegistry := fs.String("inbox-relay-registry", "", "EXTENSION-RELAY §3.5 REGISTRY-served inbox-relay decl chain (Go-only initially): comma-separated peer-names of registries to consult (in order). The names are translated to peer-ids from state. Forwarded as --inbox-relay-registry to entity-peer.")
@@ -237,6 +238,7 @@ func cmdStart(args []string) {
 		serveNamespace:      *serveNamespace,
 		serveWholeStore:     *serveWholeStore,
 		serveClosureRoot:    *serveClosureRoot,
+		serveCapScope:       *serveCapScope,
 		validate:            *validate,
 		signalingNode:       *signalingNode,
 		publishRoot:         *publishRoot,
@@ -363,6 +365,7 @@ type chunkEFlags struct {
 	serveNamespace   string
 	serveWholeStore  bool
 	serveClosureRoot bool
+	serveCapScope    string
 	// Beyond Chunk E, but plumbed alongside since the orchestrator path
 	// (validate-peers-green.sh) brings them up as a bundle.
 	validate           bool
@@ -544,6 +547,9 @@ func startGoPeer(name, addr string, debug, openAccess bool, files, history, stor
 	}
 	if poll.serveClosureRoot {
 		cmdArgs = append(cmdArgs, "-serve-closure-root")
+	}
+	if poll.serveCapScope != "" {
+		cmdArgs = append(cmdArgs, "-serve-cap-scope", poll.serveCapScope)
 	}
 	if poll.validate {
 		cmdArgs = append(cmdArgs, "-validate")

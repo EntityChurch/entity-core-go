@@ -581,24 +581,46 @@ func cborIn(value, arrayValue cbor.RawMessage) bool {
 	return false
 }
 
-// checkQueryPathPermission does a basic path authorization check.
-// Path is qualified ({peerID}/bare). Resource targets are bare.
-// Qualify targets before comparing. Iterates the EFFECTIVE targets (§5.2,
-// 0.8.2.20) so a caller-excluded target cannot authorize a path.
+// checkQueryPathPermission authorizes a query result path (QUERY §5.2 step 6b).
+//
+// Authorization is the CALLER CAPABILITY (§6.3), never the request's resource
+// field. The prior implementation consulted hctx.Resource and returned true
+// when it was ABSENT — but hctx.Resource is a caller-supplied query NARROWING,
+// not a grant, so "no resource" meant "allow every result", and a cap scoped to
+// /{p}/app/* returned matches from /{p}/secret/* on any find without a resource
+// field. That is the exact §6.3 case the check exists for — a bulk reader
+// enumerating paths — and it was fail-open (rust routed 2026-09-12; py is the
+// conformant seat, checking the capability). This is the listing/extract class,
+// one handler over. Callers gate this on a non-zero CallerCapability, so a
+// decode/granter-resolution failure is fail-closed (deny), not a skip.
 func checkQueryPathPermission(path string, hctx *handler.HandlerContext) bool {
-	if hctx.Resource != nil {
-		for _, target := range hctx.EffectiveTargets() {
-			if target == "*" {
-				return true
-			}
-			qualifiedTarget := store.QualifyPath(string(hctx.LocalPeerID), target)
-			if strings.HasPrefix(path, qualifiedTarget) {
-				return true
-			}
-		}
+	capData, err := types.CapabilityTokenDataFromEntity(hctx.CallerCapability)
+	if err != nil {
 		return false
 	}
-	// No resource restriction — allow.
+	granterPeerID, gerr := capability.ResolveGranterPeerID(capData.Granter, hctx.Store, hctx.LocalPeerID)
+	if gerr != nil {
+		return false
+	}
+	if !capability.CheckPathPermission("get", path, capData, "system/tree", hctx.LocalPeerID, granterPeerID) {
+		return false
+	}
+	// Optional caller narrowing: when the request carries resource targets, a
+	// result must ALSO fall within the effective set — a query MAY be scoped to a
+	// subset of what the capability authorizes. This is a filter layered on top of
+	// authorization, never a substitute for it.
+	if hctx.Resource != nil {
+		within := false
+		for _, target := range hctx.EffectiveTargets() {
+			if target == "*" || strings.HasPrefix(path, store.QualifyPath(string(hctx.LocalPeerID), target)) {
+				within = true
+				break
+			}
+		}
+		if !within {
+			return false
+		}
+	}
 	return true
 }
 

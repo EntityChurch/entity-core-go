@@ -45,6 +45,8 @@ import (
 var notInAnyRun = map[string]string{
 	"catConformance": "OFFLINE and corpus-driven: it connects to no peer and diffs per-impl `emit-canonical` artifacts against a shared corpus (GUIDE-CONFORMANCE §3.3). Its -peers flag carries <label>:<path> emission FILES, not addresses, so it is not a thing ValidationSuite.Run — which holds peer connections — can call. Reachable via `validate-peer -category conformance -corpus <f> -peers go:emit-go.cbor,...`.",
 
+	"catServingCapScope": "Requires a peer started with --serve-cap-scope \"include:exclude\" — a serving posture NO other pass arms (pass 1 is --serve-closure-root, pass 2 is --serve-namespace). ValidationSuite.Run drives whatever single serving posture the peer was started in, so it cannot turn on a cap-token scope; a default-run call would 404/200 against a closure/namespace peer and score a skip masquerading as coverage. Reachable via `validate-peer -category serving_cap_scope -poll-url <u>` against a peer started with the cap-scope flag, which is exactly what the dedicated gate pass in validate-complete.sh does. If a future posture serves a cap-scope in the all-categories run, delete this entry and wire it into Run.",
+
 	"catConformancePassthrough": "Needs a corpus artifact that does not live in this repo — `-corpus <conformance-vectors-v1.cbor>`, produced by the wire-conformance build-fixture tool. ValidationSuite.Run has no corpus path and would have to skip every check, which is a skip masquerading as coverage. Reachable via `validate-peer -addr <p> -category conformance_passthrough -corpus <f>`. If the corpus ever ships in-repo or in validate-complete.sh, delete this entry and wire it into Run — this test will then hold it there.",
 }
 

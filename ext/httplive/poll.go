@@ -498,7 +498,16 @@ func (h *PollHandler) serveTreeEntity(w http.ResponseWriter, r *http.Request, pe
 		http.NotFound(w, r)
 		return
 	}
-	inScope, err := h.Scope.InScope(r.Context(), resolvedH)
+	// The .bin tree route is the PATH-KEYED face (poll.go interface doc:
+	// "InScopePath(p) — path-keyed. /{peer_id}/{path}.bin|.list hit this"), so
+	// the scope decision is on the PATH, not the resolved hash. For
+	// NamespaceScope / ClosureScope / WholeStoreScope this is behavior-
+	// preserving (their InScopePath resolves path→hash→InScope). For
+	// CapTokenScope it is the difference between the content-namespace hash
+	// face and the tree path face: a serve_scope cap that excludes a tree path
+	// must filter this route, which InScope(hash) — checking
+	// content/public/{hex(H)} — cannot see.
+	inScope, err := h.Scope.InScopePath(r.Context(), lookupPath)
 	if err != nil {
 		http.Error(w, "scope check failed: "+err.Error(), http.StatusInternalServerError)
 		return

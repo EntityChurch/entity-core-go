@@ -122,6 +122,73 @@ func TestListing_FiltersExcludedEntriesAndCount(t *testing.T) {
 	}
 }
 
+// snapshot must filter too (py routed 2026-09-12): §11 exempts diff from path
+// checks, sound only while a snapshot cannot commit to bindings the caller may
+// not see. A scoped snapshot's root must be the trie over the VISIBLE bindings
+// only — otherwise snapshot+diff-against-empty leaks the excluded key and hash.
+func TestSnapshot_FiltersExcludedBindingsFromRoot(t *testing.T) {
+	h, cs, li, pid, identity := filterHarness(t)
+
+	pub := makeEntity(t, "test/doc", "public-snap")
+	sec := makeEntity(t, "test/doc", "secret-snap")
+	cs.Put(pub)
+	cs.Put(sec)
+	li.Set("local/files/a.txt", pub.ContentHash)
+	li.Set("local/files/secret", sec.ContentHash)
+
+	snapshot := func(capEntity entity.Entity) types.SnapshotData {
+		snapReq, _ := types.SnapshotRequestData{}.ToEntity()
+		req := &handler.Request{
+			Path: "system/tree", Operation: "snapshot", Params: snapReq,
+			Context: &handler.HandlerContext{
+				LocalPeerID:      pid,
+				Store:            cs,
+				LocationIndex:    li,
+				HandlerPattern:   "system/tree",
+				CallerCapability: capEntity,
+				Resource:         &types.ResourceTarget{Targets: []string{"local/files/"}},
+			},
+		}
+		resp, err := h.Handle(context.Background(), req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != 200 {
+			t.Fatalf("snapshot status: got %d want 200", resp.Status)
+		}
+		var s types.SnapshotData
+		if err := ecf.Decode(resp.Result.Data, &s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+
+	// Expected roots computed directly: visible-only vs both. The snapshot
+	// rebuild trims to the relative key under the qualified prefix.
+	rootVisible, _ := BuildTrie(cs, []Binding{{Path: "a.txt", Hash: pub.ContentHash}})
+	rootBoth, _ := BuildTrie(cs, []Binding{
+		{Path: "a.txt", Hash: pub.ContentHash},
+		{Path: "secret", Hash: sec.ContentHash},
+	})
+	if rootVisible == rootBoth {
+		t.Fatal("test precondition: visible-only and full roots must differ")
+	}
+
+	// Scoped cap (excludes `secret`) → snapshot root commits to a.txt only.
+	scoped := snapshot(capWithExclude(identity, []string{"local/files/*"}, []string{"local/files/secret"}))
+	if scoped.Root != rootVisible {
+		t.Fatalf("scoped snapshot root must be the visible-only trie root; got %s want %s",
+			scoped.Root, rootVisible)
+	}
+	// Control: broad cap → snapshot commits to both (proves the filter, not a
+	// blanket drop, moved the root).
+	broad := snapshot(capWithExclude(identity, []string{"local/files/*"}, nil))
+	if broad.Root != rootBoth {
+		t.Fatalf("broad snapshot root must be the full trie root; got %s want %s",
+			broad.Root, rootBoth)
+	}
+}
+
 func TestExtract_FiltersExcludedBindings(t *testing.T) {
 	h, cs, li, pid, identity := filterHarness(t)
 

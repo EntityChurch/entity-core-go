@@ -66,6 +66,8 @@ func runTreeOperations(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("diff_no_changed", "EXTENSION-TREE S4")
 
 	// Step 6: Extract
+	r.Declare("extract_malformed_path_total", "EXTENSION-TREE S6 / V7 §1.4 (CORE-PARAMS-PATH-TOTAL-1)")
+	r.Declare("merge_malformed_target_prefix_total", "EXTENSION-TREE S5 / V7 §1.4 (CORE-PARAMS-PATH-TOTAL-1)")
 	r.Declare("extract_execute", "EXTENSION-TREE S6")
 	r.Declare("extract_result_type", "EXTENSION-TREE S6")
 	r.Declare("extract_envelope_decode", "EXTENSION-TREE S6")
@@ -1333,6 +1335,73 @@ func runTreeOperations(ctx context.Context, client *PeerClient) []CheckResult {
 			return FailCheck(fmt.Sprintf("CORE-TREE-PATH-FLEX-1 sub-pin(s) failed: %v", failed))
 		}
 		return PassCheck(fmt.Sprintf("all %d sub-pins passed (V7 §1.4 + §5.4 / v7.72 §9.5a CORE-TREE-PATH-FLEX-1)", len(subs)))
+	})
+
+	// --- CORE-PARAMS-PATH-TOTAL-1: a caller-controlled PARAMS path is a DISTINCT
+	// channel from the resource target, so the dispatch resource pre-validator
+	// does not cover it. A malformed extract.paths[] / merge.target_prefix that
+	// reaches the location index MUST be refused (400), never crash the peer (a
+	// remote DoS, d65081d) and never a 200-with-corruption. Assert against the
+	// STATUS, not "MUST NOT crash" — a peer may fail soft where go's boundary is
+	// total (py's caveat). ---
+
+	r.Run("extract_malformed_path_total", func() CheckOutcome {
+		uri := fmt.Sprintf("entity://%s/system/tree", string(client.RemotePeerID()))
+		// A null byte is not valid in any path segment; extract.paths[] hands it
+		// straight to the location index (a channel the resource pre-validator
+		// never sees).
+		params, err := types.ExtractRequestData{Paths: []string{"system/validate/tree-ops/bad\x00seg"}}.ToEntity()
+		if err != nil {
+			return FailCheck("build extract params: " + err.Error())
+		}
+		resp, _, _, err := client.SendExecuteRaw(ctx, uri, "extract", params, &types.ResourceTarget{Targets: []string{"system/validate/tree-ops/"}})
+		if err != nil {
+			return FailCheck("PARAMS-PATH-TOTAL FAIL: extract with a null-byte paths[] entry errored the transport (peer crash / connection reset) — a remote DoS reachable by any peer holding a normal grant (d65081d): " + err.Error())
+		}
+		if resp.Status == 200 {
+			return FailCheck("PARAMS-PATH-TOTAL FAIL: extract with a null-byte paths[] entry returned 200 — the malformed path was acted on rather than refused")
+		}
+		if resp.Status == 400 {
+			return PassCheck("extract with a malformed (null-byte) paths[] entry → 400 (the params-path boundary is total; no crash, no corruption)")
+		}
+		return WarnCheck(fmt.Sprintf("extract malformed paths[] returned status %d (want 400; not a crash/200, so no DoS, but not the mandated code)", resp.Status))
+	})
+
+	r.Run("merge_malformed_target_prefix_total", func() CheckOutcome {
+		uri := fmt.Sprintf("entity://%s/system/tree", string(client.RemotePeerID()))
+		// A REAL source snapshot so the malformed target_prefix — not a missing
+		// source — is what is under test.
+		_, srcSnapEntity, err := client.TreeSnapshot(ctx, "system/validate/tree-ops/")
+		if err != nil {
+			return FailCheck("snapshot source for merge: " + err.Error())
+		}
+		t := true
+		mergeReq := types.MergeRequestData{
+			Source:       srcSnapEntity.ContentHash,
+			Strategy:     "prefer_source",
+			DryRun:       &t,
+			TargetPrefix: "bad\x00prefix",
+		}
+		params, err := mergeReq.ToEntity()
+		if err != nil {
+			return FailCheck("build merge params: " + err.Error())
+		}
+		extras := map[hash.Hash]entity.Entity{srcSnapEntity.ContentHash: srcSnapEntity}
+		env, _, err := client.SendExecuteWithIncluded(ctx, uri, "merge", params, nil, extras)
+		if err != nil {
+			return FailCheck("PARAMS-PATH-TOTAL FAIL: merge with a null-byte target_prefix errored the transport (peer crash / connection reset) — a remote DoS (d65081d): " + err.Error())
+		}
+		respData, err := types.ExecuteResponseDataFromEntity(env.Root)
+		if err != nil {
+			return FailCheck("decode merge response: " + err.Error())
+		}
+		if respData.Status == 200 {
+			return FailCheck("PARAMS-PATH-TOTAL FAIL: merge with a null-byte target_prefix returned 200 — the malformed prefix was applied rather than refused")
+		}
+		if respData.Status == 400 {
+			return PassCheck("merge with a malformed (null-byte) target_prefix → 400 (the params-path boundary is total; no crash, no corruption)")
+		}
+		return WarnCheck(fmt.Sprintf("merge malformed target_prefix returned status %d (want 400; not a crash/200, so no DoS, but not the mandated code)", respData.Status))
 	})
 
 	// --- Cleanup ---

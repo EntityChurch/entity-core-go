@@ -89,6 +89,9 @@ func runQuery(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("constraint_system_type_query", "QUERY §5.5")
 	r.Declare("constraint_test_type_query", "QUERY §5.5")
 
+	// Step 13b: Bulk-read authorization (§6.3 — the query result-path filter).
+	r.Declare("query_bulk_read_cap_filter", "QUERY §5.2 / V7 §6.3")
+
 	// Step 14: Delegation security.
 	r.Declare("deleg_setup", "V7 §5.6")
 	r.Declare("deleg_drop_constraint_key", "V7 §5.6")
@@ -638,6 +641,74 @@ func runQuery(ctx context.Context, client *PeerClient) []CheckResult {
 			return PassCheck("test type query returns correct count through constraint pathway")
 		}
 		return FailCheck(fmt.Sprintf("test type query returned %d (expected 3) through constraint pathway", testResult.Total))
+	})
+
+	// --- Step 13b: Bulk-read authorization (the query result-path filter) ---
+
+	// A `find` enumerates entities and returns their paths; §6.3 requires each
+	// returned path be authorized by the CALLER'S capability, not the request's
+	// resource field (a caller narrowing). checkQueryPathPermission consulting
+	// the request and returning true when it is absent is a fail-open: a cap
+	// scoped to /{p}/app/* would leak results from /{p}/secret/*. This is the
+	// omission assertion the `query` category structurally lacks — every current
+	// arm drives the broad connection cap, where the right and wrong answers
+	// agree. Wire mirror of ext/query.TestCheckQueryPathPermission_ConsultsCapabilityNotRequest.
+	r.Run("query_bulk_read_cap_filter", func() CheckOutcome {
+		remote := string(client.RemotePeerID())
+		const markerType = "test/query-authz-marker"
+		appPath := "system/validate/query-authz/app/doc"
+		secretPath := "system/validate/query-authz/secret/doc"
+
+		appEnt := mustCreateEntity(markerType, map[string]string{"where": "app"})
+		secretEnt := mustCreateEntity(markerType, map[string]string{"where": "secret"})
+		if _, err := client.TreePut(ctx, appPath, appEnt); err != nil {
+			return FailCheck("seed app marker: " + err.Error())
+		}
+		if _, err := client.TreePut(ctx, secretPath, secretEnt); err != nil {
+			return FailCheck("seed secret marker: " + err.Error())
+		}
+		defer func() {
+			client.TreeRemove(ctx, appPath)
+			client.TreeRemove(ctx, secretPath)
+		}()
+
+		// Cap scoped to the app subtree only, covering the query dispatch AND
+		// the tree:get the result-path filter checks. Remote-qualified (§5.5/PR-8).
+		appScope := "/" + remote + "/system/validate/query-authz/app/*"
+		scopedGrant := types.GrantEntry{
+			Handlers:   types.CapabilityScope{Include: []string{"system/query", "system/tree"}},
+			Resources:  types.CapabilityScope{Include: []string{appScope}},
+			Operations: types.CapabilityScope{Include: []string{"find", "count", "get"}},
+		}
+
+		// find by type with NO path/resource field — the exact fail-open case.
+		status, result, err := sendDelegatedQuery(ctx, client, scopedGrant, "find",
+			types.QueryExpressionData{TypeFilter: markerType})
+		if err != nil {
+			return FailCheck("delegated find: " + err.Error())
+		}
+		if status != 200 || result == nil {
+			return FailCheck(fmt.Sprintf("delegated find returned status=%d (want 200 with a filtered result set)", status))
+		}
+
+		sawApp, sawSecret := false, false
+		for _, m := range result.Matches {
+			if strings.Contains(m.Path, "/query-authz/secret/") {
+				sawSecret = true
+			}
+			if strings.Contains(m.Path, "/query-authz/app/") {
+				sawApp = true
+			}
+		}
+		if sawSecret {
+			return FailCheck("QUERY BULK-READ FAIL: a find with NO resource field under a cap scoped to /{p}/app/* returned a result under /{p}/secret/* — the result-path filter consulted the request (fail-open) instead of the caller capability (§6.3)")
+		}
+		// Control: the in-scope app result IS returned — proving the filter is
+		// not a blanket drop and the cap genuinely reaches the marker entities.
+		if !sawApp {
+			return WarnCheck("query bulk-read: secret result correctly absent, but the in-scope app result was ALSO absent — the cap may not cover the app subtree (inconclusive: cannot tell a working filter from a deny-all)")
+		}
+		return PassCheck("find with no resource field under a /{p}/app/* cap returns the app result and OMITS the /{p}/secret/* result — the result-path filter is the caller capability, not the request (§6.3)")
 	})
 
 	// --- Step 14: Delegation security ---

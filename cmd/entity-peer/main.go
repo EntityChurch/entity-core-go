@@ -97,6 +97,7 @@ func main() {
 	serveNamespace := flag.String("serve-namespace", "", "Chunk E: content-namespace scope (e.g. system/content/public). Serves H iff bound at NAMESPACE/{hex(H)} in tree. Mutually exclusive with --serve-scope-whole-store / --serve-closure-root.")
 	serveWholeStore := flag.Bool("serve-scope-whole-store", false, "Chunk E: DEBUG OPT-IN — serve every H in local content-store. Operator owns T2/T3 consequence (ruling §1.3). Logs startup warning.")
 	serveClosureRoot := flag.Bool("serve-closure-root", false, "EXTENSION-NETWORK §6.5.6 Amendment 10: scope served set to the transitive trie-node closure reachable from the local peer's current system/peer/published-root. Pairs with --publish-root so a consumer's signed-root hash-chain walk does not 404 on a CHAMP interior node. Mutually exclusive with --serve-namespace / --serve-scope-whole-store.")
+	serveCapScope := flag.String("serve-cap-scope", "", "EXTENSION-NETWORK Amendment 5 §5A: serve under a CapTokenScope minted from INCLUDE[,INCLUDE...][:EXCLUDE[,EXCLUDE...]] resource patterns (get on system/tree + system/content), evaluated by the SAME capability.CheckPathPermission the live-EXECUTE surface uses. Bare patterns canonicalize against this peer (self-granted serve_scope). Mutually exclusive with the other --serve-* scopes.")
 	keyType := flag.String("key-type", "ed25519", "ephemeral keypair algorithm: ed25519 (default) | ed448. Ignored when --name selects a persistent identity (algorithm comes from the on-disk PEM header).")
 	hashType := flag.String("hash-type", "sha256", "content_hash_format used for entities this peer authors: sha256 (default, 0x00) | sha384 (0x01). Received entities verify under their claimed algorithm regardless (v7.67 §2.3 format-code interpretation).")
 	validate := flag.Bool("validate", false, "enable GUIDE-CONFORMANCE §7a test handlers (system/validate/echo + system/validate/dispatch-outbound) for validate-peer probing. OFF by default — these handlers expose §6.13(a)/§6.13(b) for black-box wire attestation and MUST NOT be on in production (dispatch-outbound originates outbound).")
@@ -130,7 +131,7 @@ func main() {
 
 	// Validate Chunk E flag combinations per impl plan §3 before
 	// constructing the peer.
-	pollEnabled, pollErr := validateChunkEFlags(*httpAddr, *httpPollAddr, *httpPollMountOnLive, *serveNamespace, *serveWholeStore, *serveClosureRoot)
+	pollEnabled, pollErr := validateChunkEFlags(*httpAddr, *httpPollAddr, *httpPollMountOnLive, *serveNamespace, *serveWholeStore, *serveClosureRoot, *serveCapScope)
 	if pollErr != nil {
 		log.Fatalf("serving-mode flags: %v", pollErr)
 	}
@@ -986,8 +987,14 @@ func main() {
 	// Chunk E serving-mode is on.
 	var pollScope httplive.ScopePredicate
 	if pollEnabled {
-		pollScope = makeChunkEScopePredicate(p, publisher, *serveNamespace, *serveWholeStore, *serveClosureRoot)
+		var scopeErr error
+		pollScope, scopeErr = makeChunkEScopePredicate(p, publisher, *serveNamespace, *serveWholeStore, *serveClosureRoot, *serveCapScope)
+		if scopeErr != nil {
+			log.Fatalf("serve scope: %v", scopeErr)
+		}
 		switch {
+		case *serveCapScope != "":
+			log.Printf("Serving mode: cap-token scope (NETWORK Amendment 5 §5A) — gated by capability.CheckPathPermission against serve_scope %q", *serveCapScope)
 		case *serveClosureRoot:
 			log.Printf("Serving mode: closure-of-signed-root (NETWORK §6.5.6 Amendment 10) — content gated by transitive trie-node closure of system/peer/published-root")
 		case *serveWholeStore:
@@ -1117,15 +1124,15 @@ func parseFilesFlag(value string) (name, fsPath, prefix string, err error) {
 // validateChunkEFlags enforces the impl plan §3 flag combination rules.
 // Returns (pollEnabled, error). Serving-mode is OFF when both
 // --http-poll-addr and --http-poll-mount-on-live are unset.
-func validateChunkEFlags(httpAddr, httpPollAddr string, httpPollMountOnLive bool, serveNamespace string, serveWholeStore, serveClosureRoot bool) (bool, error) {
+func validateChunkEFlags(httpAddr, httpPollAddr string, httpPollMountOnLive bool, serveNamespace string, serveWholeStore, serveClosureRoot bool, serveCapScope string) (bool, error) {
 	pollAddrSet := httpPollAddr != ""
 	mountSet := httpPollMountOnLive
-	scopeSet := (serveNamespace != "") || serveWholeStore || serveClosureRoot
+	scopeSet := (serveNamespace != "") || serveWholeStore || serveClosureRoot || (serveCapScope != "")
 
 	// (1) Serving disabled unless one of poll-addr / mount-on-live.
 	if !pollAddrSet && !mountSet {
 		if scopeSet {
-			return false, fmt.Errorf("--serve-namespace / --serve-scope-whole-store / --serve-closure-root set without --http-poll-addr or --http-poll-mount-on-live")
+			return false, fmt.Errorf("--serve-namespace / --serve-scope-whole-store / --serve-closure-root / --serve-cap-scope set without --http-poll-addr or --http-poll-mount-on-live")
 		}
 		return false, nil
 	}
@@ -1148,21 +1155,86 @@ func validateChunkEFlags(httpAddr, httpPollAddr string, httpPollMountOnLive bool
 	if serveClosureRoot {
 		scopeCount++
 	}
+	if serveCapScope != "" {
+		scopeCount++
+	}
 	if scopeCount > 1 {
-		return false, fmt.Errorf("--serve-namespace, --serve-scope-whole-store, and --serve-closure-root are mutually exclusive")
+		return false, fmt.Errorf("--serve-namespace, --serve-scope-whole-store, --serve-closure-root, and --serve-cap-scope are mutually exclusive")
 	}
 	if scopeCount == 0 {
-		return false, fmt.Errorf("serving-mode requires a scope: --serve-namespace NAMESPACE, --serve-scope-whole-store, or --serve-closure-root")
+		return false, fmt.Errorf("serving-mode requires a scope: --serve-namespace NAMESPACE, --serve-scope-whole-store, --serve-closure-root, or --serve-cap-scope SPEC")
+	}
+	if serveCapScope != "" {
+		if _, _, err := parseCapScopeSpec(serveCapScope); err != nil {
+			return false, err
+		}
 	}
 	return true, nil
+}
+
+// parseCapScopeSpec parses a --serve-cap-scope value of the form
+// "INCLUDE[,INCLUDE...][:EXCLUDE[,EXCLUDE...]]" into include/exclude pattern
+// slices. An empty include set is an error (a serve_scope covering nothing
+// serves nothing, which is never the intent).
+func parseCapScopeSpec(spec string) (include, exclude []string, err error) {
+	incPart := spec
+	excPart := ""
+	if i := strings.IndexByte(spec, ':'); i >= 0 {
+		incPart = spec[:i]
+		excPart = spec[i+1:]
+	}
+	splitCSV := func(s string) []string {
+		var out []string
+		for _, p := range strings.Split(s, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	include = splitCSV(incPart)
+	exclude = splitCSV(excPart)
+	if len(include) == 0 {
+		return nil, nil, fmt.Errorf("--serve-cap-scope requires at least one include pattern (got %q)", spec)
+	}
+	return include, exclude, nil
 }
 
 // makeChunkEScopePredicate constructs the appropriate ScopePredicate
 // for the configured flags. Caller guarantees validateChunkEFlags
 // has returned pollEnabled=true.
-func makeChunkEScopePredicate(p *peer.Peer, publisher *publishedroot.Publisher, namespace string, wholeStore, closureRoot bool) httplive.ScopePredicate {
+func makeChunkEScopePredicate(p *peer.Peer, publisher *publishedroot.Publisher, namespace string, wholeStore, closureRoot bool, capScopeSpec string) (httplive.ScopePredicate, error) {
+	if capScopeSpec != "" {
+		include, exclude, err := parseCapScopeSpec(capScopeSpec)
+		if err != nil {
+			return nil, err
+		}
+		// Self-granted serve_scope cap: granter is this peer, so bare patterns
+		// canonicalize against p.PeerID() (§5.5/PR-8). CheckPathPermission reads
+		// the passed granterPeerID for canonicalization, not cap.Granter, so the
+		// token needs no signature — it is trusted config, not a presented
+		// credential.
+		// Handlers "*": the serve_scope spans both the tree and content read
+		// faces, evaluated with HandlerPattern "*" (cap_scope.go). A specific
+		// handler set would fail scopeContains("*", …); the read set is
+		// bracketed by Resources + Operations[get], not by the handler.
+		capData := types.CapabilityTokenData{
+			Grants: []types.GrantEntry{{
+				Handlers:   types.CapabilityScope{Include: []string{"*"}},
+				Resources:  types.CapabilityScope{Include: include, Exclude: exclude},
+				Operations: types.CapabilityScope{Include: []string{"get"}},
+			}},
+		}
+		return httplive.CapTokenScope{
+			Cap:            capData,
+			HandlerPattern: "*",
+			LocalPeerID:    p.PeerID(),
+			GranterPeerID:  p.PeerID(),
+			Index:          p.LocationIndex(),
+		}, nil
+	}
 	if wholeStore {
-		return httplive.WholeStoreScope{}
+		return httplive.WholeStoreScope{}, nil
 	}
 	if closureRoot {
 		sc := &httplive.ClosureScope{
@@ -1182,12 +1254,12 @@ func makeChunkEScopePredicate(p *peer.Peer, publisher *publishedroot.Publisher, 
 				return e.ContentHash, true
 			}
 		}
-		return sc
+		return sc, nil
 	}
 	return httplive.NamespaceScope{
 		Index:     p.LocationIndex(),
 		Namespace: namespace,
-	}
+	}, nil
 }
 
 // runHTTPListener spins up an http.Server on addr serving handler.

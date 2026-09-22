@@ -288,13 +288,18 @@ func (h *Handler) handleListing(hctx *handler.HandlerContext, prefix string, get
 		}
 	}
 
-	// EXTENSION-TREE §8.2: a listing returns ONLY entries the capability grants
-	// `get` access to, and the `count` field MUST reflect the filtered (visible)
-	// count — a discrepancy between count and returned entries would leak the
-	// existence of hidden paths. The dispatch/prefix-level check authorized the
-	// prefix; each child is a distinct path the handler is about to reveal, so
-	// each is checked here (the §6.3 handler-level check, per-entry — rust routed
-	// this gap 2026-09-11). checkPathPerm returns true when no caller capability
+	// ENTITY-CORE-PROTOCOL §6.3: a listing returns ONLY entries the capability
+	// grants `get` access to, and the `count` field MUST reflect the filtered
+	// (visible) count — a discrepancy between count and returned entries would
+	// leak the existence of hidden paths. (This is the UNCONDITIONAL core-§6.3
+	// rule against the caller capability — NOT EXTENSION-TREE §8.2 View Trees,
+	// whose scope.can_get is a compiled view scope and which §12.2 scopes to
+	// peers that implement view trees; citing §8.2 lets a peer that implements no
+	// view trees conclude the obligation does not bind it, which is exactly the
+	// seat whose listings leak. rust + py routed the citation correction
+	// 2026-09-12.) The dispatch/prefix check authorized the prefix; each child is
+	// a distinct path the handler reveals, so each is checked here per-entry.
+	// checkPathPerm returns true when no caller capability
 	// is present (local/trusted), so an unscoped read is unfiltered as before.
 	// childAbs = qualifiedPrefix + name is a genuine prefix of the entry's full
 	// path (qualifiedPrefix + rel == e.Path), so it needs no separator fix-up.

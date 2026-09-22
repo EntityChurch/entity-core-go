@@ -445,6 +445,10 @@ func (s *ValidationSuite) Run(ctx context.Context) (*Report, error) {
 	// effective set, never resource.targets[0] (F68).
 	runCat(catResourceEffective, func() []CheckResult { return runResourceEffective(ctx, client) })
 
+	// The §5.2/§5.4/§6.3 capability-EXCLUDE read/enumeration matrix under a
+	// NARROW cap — the arm every broad-cap category is structurally blind to.
+	runCat(catExcludeMatrix, func() []CheckResult { return runExcludeMatrix(ctx, client) })
+
 	// Category 16: EXTENSION-ATTESTATION (substrate primitive).
 	runCat(catAttestation, func() []CheckResult { return runAttestation(ctx, client) })
 
@@ -899,6 +903,8 @@ func (s *ValidationSuite) RunCategory(ctx context.Context, category string) (*Re
 		report.AddAll(runResourceBounds(ctx, s.addr, s.newClient, s.effectiveDeclaredMaxPayload(), s.effectiveDeclaredMaxChainDepth()))
 	case catResourceEffective:
 		report.AddAll(runResourceEffective(ctx, client))
+	case catExcludeMatrix:
+		report.AddAll(runExcludeMatrix(ctx, client))
 	case catAttestation:
 		report.AddAll(runAttestation(ctx, client))
 	case catQuorum:
@@ -922,6 +928,11 @@ func (s *ValidationSuite) RunCategory(ctx context.Context, category string) (*Re
 			return nil, fmt.Errorf("serving_mode category requires -poll-url http://host:port (peer must be started with --http-poll-addr and --serve-namespace system/content/public)")
 		}
 		report.AddAll(runServingMode(ctx, client, s.pollURL))
+	case catServingCapScope:
+		if s.pollURL == "" {
+			return nil, fmt.Errorf("serving_cap_scope category requires -poll-url http://host:port (peer must be started with --http-poll-addr and --serve-cap-scope \"system/validate/served/*:system/validate/served/secret\")")
+		}
+		report.AddAll(runServingCapScope(ctx, client, s.pollURL))
 	case catUniversalAddressSpace:
 		report.AddAll(runUniversalAddressSpace(ctx, client))
 	case catTransportFamily:

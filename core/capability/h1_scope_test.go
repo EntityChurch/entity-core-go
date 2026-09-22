@@ -113,6 +113,40 @@ func TestFirstUnmatchableScopePattern_WalksHandlers(t *testing.T) {
 	}
 }
 
+// CheckPathPermission pattern-subject arm (2026-09-12, py routed via
+// EXTENSION-SUBSCRIPTION §2.3): the §6.3 check is handed a PATTERN subject (a
+// subscription target `data/*`), and the concrete exact-exclude test let it
+// re-spell past a concrete grant exclude — the G-4 bypass one handler over. A
+// pattern subject overlapping a grant exclude must be denied (no caller-exclude
+// at this site to cover it); concrete subjects still take the exact/H1 arm.
+func TestCheckPathPermission_PatternSubjectHonorsOverlappingExclude(t *testing.T) {
+	pid := testPeerID
+	cap := types.CapabilityTokenData{
+		Grants: []types.GrantEntry{{
+			Handlers:   types.CapabilityScope{Include: []string{"system/tree"}},
+			Resources:  types.CapabilityScope{Include: []string{"data/*"}, Exclude: []string{"data/secret"}},
+			Operations: types.CapabilityScope{Include: []string{"get"}},
+		}},
+	}
+
+	// Pattern subject overlapping the exclude → DENY (the subscription bypass row).
+	if CheckPathPermission("get", "data/*", cap, "system/tree", pid, pid) {
+		t.Fatal("pattern subject overlapping a grant exclude must be denied")
+	}
+	// Control 1: a non-overlapping pattern subject → ALLOW (not deny-all-patterns).
+	if !CheckPathPermission("get", "data/public/*", cap, "system/tree", pid, pid) {
+		t.Fatal("non-overlapping pattern subject must be allowed")
+	}
+	// Control 2: a concrete in-scope path → ALLOW (concrete arm unchanged).
+	if !CheckPathPermission("get", "data/report", cap, "system/tree", pid, pid) {
+		t.Fatal("concrete in-scope path must be allowed")
+	}
+	// Control 3: the concrete excluded path → DENY (concrete arm still excludes).
+	if CheckPathPermission("get", "data/secret", cap, "system/tree", pid, pid) {
+		t.Fatal("concrete excluded path must be denied")
+	}
+}
+
 // G-4: the §5.2 pattern-target arm. A pattern target that OVERLAPS a concrete
 // grant exclude must be denied unless the caller carries a covering exclude —
 // the concrete-only exclude test (MatchesPattern of a pattern against a concrete

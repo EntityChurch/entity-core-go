@@ -325,7 +325,34 @@ echo "    $REF_ADDR"
 # probe — a squatted port IS listening, so "something answers" cannot tell the
 # target's own listener from the squatter's. Cost a bisect to attribute on
 # 2026-09-04.
-for probe in "${POLL_PORT}:target(pass1)" "$((POLL_PORT + 1)):NS_PORT(pass2)"; do
+# FAIL CLOSED on a FIXED listener port that sits inside the kernel's EPHEMERAL
+# source-port range: a free-now port there can be grabbed mid-run by an outbound
+# connection (the suite's own load test does exactly this), and the peer's
+# listener then dies with EADDRINUSE ONE PASS LATER — presenting as "the peer
+# won't come up" right after whatever change ran that pass, a regression story
+# that is really a harness collision (py nearly mis-attributed it 2026-09-12,
+# [Errno 98]; routed the guard to go). The pre-flight free-port probe above
+# cannot see this because the port IS free at start. go's defaults (9451/9401)
+# sit below the range, so this only fires on an operator-supplied ephemeral port.
+# Fail-closed on OWN config: if the range file is unreadable we WARN and proceed
+# (missing input is distinguishable from a pass), not silently skip.
+if [ -r /proc/sys/net/ipv4/ip_local_port_range ]; then
+    read -r EPH_LO EPH_HI < /proc/sys/net/ipv4/ip_local_port_range
+    for probe in "${POLL_PORT}:POLL_PORT" "$((POLL_PORT + 1)):NS_PORT" "${PI_PORT}:PI_PORT"; do
+        p="${probe%%:*}"; name="${probe##*:}"
+        if [ "$p" -ge "$EPH_LO" ] && [ "$p" -le "$EPH_HI" ]; then
+            echo "ABORT: ${name}=${p} is inside the kernel ephemeral source-port range (${EPH_LO}-${EPH_HI})." >&2
+            echo "       A fixed listener there will collide with an outbound source port grabbed mid-run," >&2
+            echo "       and the peer dies with EADDRINUSE a pass later — a false regression story." >&2
+            echo "       Re-run with ports below ${EPH_LO}:  POLL_PORT=9451 PI_PORT=9401 $0 $TYPE" >&2
+            exit 2
+        fi
+    done
+else
+    echo "WARN: /proc/sys/net/ipv4/ip_local_port_range unreadable — skipping the ephemeral-range port guard." >&2
+fi
+
+for probe in "${POLL_PORT}:target(pass1)" "$((POLL_PORT + 1)):NS_PORT(pass2)" "$((POLL_PORT + 2)):CS_PORT(pass5)"; do
     p="${probe%%:*}"; role="${probe##*:}"
     if (exec 3<>"/dev/tcp/127.0.0.1/${p}") 2>/dev/null; then
         # NB: close fd 3 with a bare `exec 3>&-` — do NOT append `2>/dev/null`,
@@ -589,9 +616,49 @@ if [ "${KEEP:-0}" != "1" ]; then
     go run ./cmd/peer-manager stop "$RSB_TARGET" >/dev/null 2>&1 || true
 fi
 
+# PASS 5 — serving_cap_scope against a peer served under a CapTokenScope.
+#
+# EXTENSION-NETWORK Amendment 5 §5A: the HTTP read face can be bracketed by a
+# serve_scope CAPABILITY, evaluated by the SAME capability.CheckPathPermission
+# the live-EXECUTE surface uses — so a cap EXCLUDE must filter the read face. No
+# other pass arms this posture (pass 1 is --serve-closure-root, pass 2 is
+# --serve-namespace), and serving_cap_scope is therefore notInAnyRun (it needs
+# --serve-cap-scope), so it is scored here, in its own pass, against a peer
+# whose serve_scope covers system/validate/served/* MINUS .../served/secret.
+# The category's in-scope-served arm proves the scope is not deny-all, so the
+# excluded path's 404 is attributable to the cap exclude. Go-only today (the
+# --serve-cap-scope flag is Go-only); rust/py inherit the category the moment
+# they land the flag.
+RC5=0
+if [ "$TYPE" = "go" ]; then
+    echo
+    echo "==> PASS 5/5 — serving_cap_scope against a $TYPE peer served under a CapTokenScope (Amendment 5 §5A)"
+    CS_TARGET="vccs-${STAMP}"
+    CS_PORT=$((POLL_PORT + 2))
+    CS_ADDR=$(go run ./cmd/peer-manager start --name "$CS_TARGET" --type "$TYPE" --debug \
+        --http-poll-addr "127.0.0.1:${CS_PORT}" \
+        --serve-cap-scope 'system/validate/served/*:system/validate/served/secret' \
+        "${HASH_ARGS_PEER[@]}" \
+        | sed -n 's/.*addr=\([^ ]*\).*/\1/p')
+    set +e
+    go run ./cmd/validate-peer \
+        -addr "$CS_ADDR" \
+        -poll-url "http://127.0.0.1:${CS_PORT}" \
+        "${HASH_ARGS_VALIDATE[@]}" \
+        -category serving_cap_scope
+    RC5=$?
+    set -e
+    if [ "${KEEP:-0}" != "1" ]; then
+        go run ./cmd/peer-manager stop "$CS_TARGET" >/dev/null 2>&1 || true
+    fi
+else
+    echo
+    echo "==> PASS 5/5 — serving_cap_scope SKIPPED for type=$TYPE (--serve-cap-scope is Go-only; rust/py inherit the category once they land the flag)"
+fi
+
 echo
-echo "PASS 0 exit $RC0 (conformance corpora, static) · PASS 0b exit $RC0B (conformance register, static) · PASS 1 exit $RC1 (all surfaces, closure scope) · PASS 1b exit $RC1B (core profile, same target) · PASS 2 exit $RC2 (serving_mode, namespace scope) · PASS 3 exit $RC3 (registry_issuer, registry posture) · PASS 4 exit $RC4 (relay_store_bounds, §8.1 armed)"
-echo "Zero failures AND zero skips is the bar for passes 1, 2, 3 and 4 — read each COVERAGE"
+echo "PASS 0 exit $RC0 (conformance corpora, static) · PASS 0b exit $RC0B (conformance register, static) · PASS 1 exit $RC1 (all surfaces, closure scope) · PASS 1b exit $RC1B (core profile, same target) · PASS 2 exit $RC2 (serving_mode, namespace scope) · PASS 3 exit $RC3 (registry_issuer, registry posture) · PASS 4 exit $RC4 (relay_store_bounds, §8.1 armed) · PASS 5 exit $RC5 (serving_cap_scope, cap-token scope)"
+echo "Zero failures AND zero skips is the bar for passes 1, 2, 3, 4 and 5 — read each COVERAGE"
 echo "block for anything that did not run, and close it rather than allowlisting it."
 echo
 echo "PASS 1b is the one pass that legitimately reports skips (~100), and the distinction"
@@ -599,5 +666,5 @@ echo "matters: they are PROFILE-KEYED skips — the extension surface that sits 
 echo "v7.72 §9.0 core tier by definition, exempted in HasFailures via isProfileKeyedSkip,"
 echo "NOT by an -allow-skip allowlist. A skip there that is not profile-keyed still fails"
 echo "the pass. Read 1b's exit code, not its skip count."
-[ "$RC0" -eq 0 ] && [ "$RC0B" -eq 0 ] && [ "$RC1" -eq 0 ] && [ "$RC1B" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 0 ] && [ "$RC4" -eq 0 ] || exit 1
+[ "$RC0" -eq 0 ] && [ "$RC0B" -eq 0 ] && [ "$RC1" -eq 0 ] && [ "$RC1B" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 0 ] && [ "$RC4" -eq 0 ] && [ "$RC5" -eq 0 ] || exit 1
 exit 0
