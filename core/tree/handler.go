@@ -133,7 +133,7 @@ func (h *Handler) Handle(ctx context.Context, req *handler.Request) (*handler.Re
 	case "extract":
 		return h.handleExtract(ctx, req)
 	default:
-		return handler.NewErrorResponse(400, "unknown_operation", "tree handler does not support operation: "+req.Operation)
+		return handler.NewErrorResponse(501, "unsupported_operation", "tree handler does not support operation: "+req.Operation)
 	}
 }
 

@@ -181,7 +181,7 @@ func (h *Handler) Handle(ctx context.Context, req *handler.Request) (*handler.Re
 	case "watch":
 		return h.handleWatch(ctx, req)
 	default:
-		resp, _ := handler.NewErrorResponse(400, "unknown_operation",
+		resp, _ := handler.NewErrorResponse(501, "unsupported_operation",
 			"local/files handler does not support operation: "+req.Operation)
 		return resp, nil
 	}

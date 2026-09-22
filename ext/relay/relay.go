@@ -553,7 +553,7 @@ func (h *Handler) Handle(ctx context.Context, req *handler.Request) (*handler.Re
 	case OpAdvertise:
 		return h.handleAdvertise(ctx, req)
 	default:
-		return handler.NewErrorResponse(400, "unknown_operation",
+		return handler.NewErrorResponse(501, "unsupported_operation",
 			HandlerPattern+" does not support operation: "+req.Operation)
 	}
 }
@@ -653,7 +653,7 @@ func (h *Handler) handleForward(ctx context.Context, req *handler.Request) (*han
 			// surface no_inbox_relay/502 (never a silent drop).
 			storedAt, code, ferr := h.queueFallback(req, rd, innerEnt, localPeerID)
 			if ferr != nil {
-				return handler.NewErrorResponse(500, "internal",
+				return handler.NewErrorResponse(500, "internal_error",
 					"§6.2.1 fallback store failed: "+ferr.Error())
 			}
 			if code != "" {
@@ -668,8 +668,11 @@ func (h *Handler) handleForward(ctx context.Context, req *handler.Request) (*han
 		}
 		// Any other dispatcher error surfaces as a hard fail — relay
 		// MUST NOT silently drop (consistent with v7.75 substrate-
-		// resilience posture; §4.3 fail-closed).
-		return handler.NewErrorResponse(500, "dispatch_failed",
+		// resilience posture; §4.3 fail-closed). §3.3: RELAY defines no
+		// 500 error-code table, so an internal dispatcher failure takes
+		// the default `internal_error` — matching the sibling fallback-
+		// store failure above (was a bespoke `dispatch_failed`).
+		return handler.NewErrorResponse(500, "internal_error",
 			"terminal deliver to "+rd.Destination+" failed: "+err.Error())
 	}
 
@@ -714,7 +717,7 @@ func (h *Handler) handleForward(ctx context.Context, req *handler.Request) (*han
 		// no_inbox_relay/502.
 		storedAt, code, ferr := h.queueFallback(req, rd, innerEnt, localPeerID)
 		if ferr != nil {
-			return handler.NewErrorResponse(500, "internal",
+			return handler.NewErrorResponse(500, "internal_error",
 				"§6.2.1 fallback store failed: "+ferr.Error())
 		}
 		if code != "" {
@@ -727,7 +730,9 @@ func (h *Handler) handleForward(ctx context.Context, req *handler.Request) (*han
 				StoredAt: storedAt,
 			})
 	}
-	return handler.NewErrorResponse(500, "dispatch_failed",
+	// §3.3 default (see terminal-deliver case above): undefined 500 spelling
+	// → `internal_error`, not a bespoke `dispatch_failed`.
+	return handler.NewErrorResponse(500, "internal_error",
 		"forward to next hop "+next+" failed: "+err.Error())
 }
 
@@ -1042,7 +1047,7 @@ func (h *Handler) handlePut(_ context.Context, req *handler.Request) (*handler.R
 	// Build the store-entry entity for hash/canonical storage.
 	entryEnt, err := rd.ToEntity()
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"materialize store-entry: "+err.Error())
 	}
 	storedAt := types.RelayStorePath(rd.Namespace, entryEnt.ContentHash)
@@ -1083,20 +1088,20 @@ func (h *Handler) handlePut(_ context.Context, req *handler.Request) (*handler.R
 	// cbor.RawMessage; nothing is decoded.
 	if hctx := req.Context; hctx != nil && hctx.Store != nil && hctx.LocationIndex != nil {
 		if _, err := hctx.Store.Put(entryEnt); err != nil {
-			return handler.NewErrorResponse(500, "internal",
+			return handler.NewErrorResponse(500, "internal_error",
 				"store store-entry bytes: "+err.Error())
 		}
 		if _, err := hctx.Store.Put(innerEnt); err != nil {
-			return handler.NewErrorResponse(500, "internal",
+			return handler.NewErrorResponse(500, "internal_error",
 				"store inner envelope bytes: "+err.Error())
 		}
 		if _, err := hctx.TreeSet(storedAt, entryEnt.ContentHash, OpPut); err != nil {
-			return handler.NewErrorResponse(500, "internal",
+			return handler.NewErrorResponse(500, "internal_error",
 				"tree-bind store-entry at "+storedAt+": "+err.Error())
 		}
 		innerPath := types.RelayInnerPath(rd.Namespace, innerEnt.ContentHash)
 		if _, err := hctx.TreeSet(innerPath, innerEnt.ContentHash, OpPut); err != nil {
-			return handler.NewErrorResponse(500, "internal",
+			return handler.NewErrorResponse(500, "internal_error",
 				"tree-bind inner envelope at "+innerPath+": "+err.Error())
 		}
 	}
@@ -1211,29 +1216,29 @@ func (h *Handler) handleAdvertise(_ context.Context, req *handler.Request) (*han
 	// publication lives at the peer-builder seam (it has the keypair).
 	advertiseEnt, err := rd.ToEntity()
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"materialize advertise: "+err.Error())
 	}
 	hctx := req.Context
 	if hctx == nil || hctx.Store == nil || hctx.LocationIndex == nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"missing store / location index")
 	}
 	h.mu.RLock()
 	localPeerID := h.localPeerIDBase58
 	h.mu.RUnlock()
 	if localPeerID == "" {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"advertise without local peer-id: SetupStore not called or local_peer_id empty")
 	}
 	// Put the entity content; bind at the canonical advertise path.
 	if _, err := hctx.Store.Put(advertiseEnt); err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"store advertise entity: "+err.Error())
 	}
 	path := types.RelayAdvertisePath(localPeerID)
 	if _, err := hctx.TreeSet(path, advertiseEnt.ContentHash, OpAdvertise); err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"bind advertise at "+path+": "+err.Error())
 	}
 	return &handler.Response{Status: 200}, nil

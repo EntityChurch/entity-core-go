@@ -325,7 +325,7 @@ func (d *Dispatcher) makeLocalExecute(parentCtx context.Context, callerCtx *hand
 					"handler bound at "+handlerPath+" has neither expression_path nor compiled implementation")
 				return resp, nil
 			case "decode_failed":
-				resp, _ := handler.NewErrorResponse(500, "internal", "failed to decode handler entity")
+				resp, _ := handler.NewErrorResponse(500, "internal_error", "failed to decode handler entity")
 				return resp, nil
 			default:
 				resp, _ := handler.NewErrorResponse(404, "not_found", "no handler for path: "+handlerPath)
@@ -451,7 +451,7 @@ func (d *Dispatcher) makeLocalExecute(parentCtx context.Context, callerCtx *hand
 		var entityNativeExprPath string
 		if res.handlerData.ExpressionPath != "" {
 			if d.EvaluateExpression == nil {
-				resp, _ := handler.NewErrorResponse(501, "not_implemented",
+				resp, _ := handler.NewErrorResponse(501, "unsupported_operation",
 					"compute extension not wired for entity-native dispatch")
 				return resp, nil
 			}

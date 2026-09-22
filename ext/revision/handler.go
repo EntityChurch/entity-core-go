@@ -149,7 +149,7 @@ func (h *Handler) Handle(ctx context.Context, req *handler.Request) (*handler.Re
 	case "merge-config":
 		return h.handleMergeConfig(ctx, req)
 	default:
-		resp, _ := handler.NewErrorResponse(400, "unknown_operation",
+		resp, _ := handler.NewErrorResponse(501, "unsupported_operation",
 			"revision handler does not support operation: "+req.Operation)
 		return resp, nil
 	}

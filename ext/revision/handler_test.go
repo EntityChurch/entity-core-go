@@ -1383,8 +1383,9 @@ func TestUnknownOperation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Status != 400 {
-		t.Fatalf("expected 400, got %d", resp.Status)
+	// §3.3 (0.8.2.6): registered handler, unimplemented op → 501 unsupported_operation.
+	if resp.Status != 501 {
+		t.Fatalf("expected 501, got %d", resp.Status)
 	}
 }
 

@@ -80,7 +80,7 @@ func (h *Handler) Handle(ctx context.Context, req *handler.Request) (*handler.Re
 	case "tick":
 		return h.handleTick(ctx, req)
 	default:
-		resp, _ := handler.NewErrorResponse(400, "unknown_operation",
+		resp, _ := handler.NewErrorResponse(501, "unsupported_operation",
 			"clock handler does not support operation: "+req.Operation)
 		return resp, nil
 	}

@@ -329,7 +329,7 @@ func (i *Issuer) Handle(ctx context.Context, req *handler.Request) (*handler.Res
 	case OpDenyRequest:
 		return i.handleDecision(ctx, req, false)
 	default:
-		return handler.NewErrorResponse(400, "unknown_operation",
+		return handler.NewErrorResponse(501, "unsupported_operation",
 			IssuerHandlerPattern+" does not support operation: "+req.Operation)
 	}
 }
@@ -388,7 +388,7 @@ func (i *Issuer) handleRegisterRequest(_ context.Context, req *handler.Request) 
 	// to store the mode in the first place. A policy that predates that
 	// refusal still has to be answered here.
 	if policy.Mode == types.IssuerPolicyModeDomainControl {
-		return handler.NewErrorResponse(501, "not_implemented",
+		return handler.NewErrorResponse(501, "unsupported_operation",
 			"domain-control mode is deferred to the web-native domain-proof co-design (§6a.10)")
 	}
 

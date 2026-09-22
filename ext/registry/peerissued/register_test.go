@@ -310,8 +310,9 @@ func TestRegister_ReplayDetected_SameNonceTwice(t *testing.T) {
 }
 
 // Bonus — REG-REGISTER-DOMAINCTRL-1 stub: requesting under domain-control
-// mode MUST be rejected as not_implemented per §6a.10 (the format is
-// deferred to the web-native domain-proof co-design).
+// mode MUST be rejected at 501 per §6a.10 (the format is deferred to the
+// web-native domain-proof co-design). Per the §3.3 501-slot ruling (0.8.2.7)
+// the code is `unsupported_operation`; `not_implemented` is a retired synonym.
 func TestRegister_DomainControlMode_Deferred(t *testing.T) {
 	registryKP, _, _ := newRegistry(t)
 	iss, hctx := newIssuer(t, registryKP,
@@ -332,8 +333,8 @@ func TestRegister_DomainControlMode_Deferred(t *testing.T) {
 	if resp.Status != 501 {
 		t.Fatalf("domain-control: status want 501 got %d", resp.Status)
 	}
-	if code := decodeErrorCode(t, resp); code != "not_implemented" {
-		t.Fatalf("domain-control: code want not_implemented got %s", code)
+	if code := decodeErrorCode(t, resp); code != "unsupported_operation" {
+		t.Fatalf("domain-control: code want unsupported_operation got %s", code)
 	}
 }
 

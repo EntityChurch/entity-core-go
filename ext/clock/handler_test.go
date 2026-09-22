@@ -618,8 +618,18 @@ func TestUnknownOperation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if resp.Status != 400 {
-		t.Fatalf("expected status 400, got %d", resp.Status)
+	// §3.3 (0.8.2.6): a registered handler that does not implement the named
+	// operation emits 501 unsupported_operation; unknown_operation is a retired
+	// spelling and MUST NOT be emitted.
+	if resp.Status != 501 {
+		t.Fatalf("expected status 501, got %d", resp.Status)
+	}
+	var ed types.ErrorData
+	if err := ecf.Decode(resp.Result.Data, &ed); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if ed.Code != "unsupported_operation" {
+		t.Fatalf("expected code unsupported_operation, got %q", ed.Code)
 	}
 }
 

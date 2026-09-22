@@ -279,9 +279,9 @@ func (d *Dispatcher) handleExecute(ctx context.Context, env entity.Envelope, con
 			return d.makeErrorResponse(execData.RequestID, 404, "not_found",
 				"handler bound at "+handlerPath+" has neither expression_path nor compiled implementation")
 		case "decode_failed":
-			return d.makeErrorResponse(execData.RequestID, 500, "internal", "failed to decode handler entity")
+			return d.makeErrorResponse(execData.RequestID, 500, "internal_error", "failed to decode handler entity")
 		default:
-			return d.makeErrorResponse(execData.RequestID, 404, "not_found", "no handler for path: "+handlerPath)
+			return d.makeErrorResponse(execData.RequestID, 404, "handler_not_found", "no handler for path: "+handlerPath)
 		}
 	}
 	pattern := res.pattern
@@ -290,7 +290,7 @@ func (d *Dispatcher) handleExecute(ctx context.Context, env entity.Envelope, con
 	var entityNativeExprPath string
 	if entityNative {
 		if d.EvaluateExpression == nil {
-			return d.makeErrorResponse(execData.RequestID, 501, "not_implemented",
+			return d.makeErrorResponse(execData.RequestID, 501, "unsupported_operation",
 				"compute extension not wired for entity-native dispatch")
 		}
 		entityNativeExprPath = qualifyIfRelative(string(d.LocalPeerID), res.handlerData.ExpressionPath)
@@ -620,9 +620,9 @@ func (d *Dispatcher) dispatchToHandler(ctx context.Context, handlerPath string, 
 			return d.makeErrorResponse(execData.RequestID, 404, "not_found",
 				"handler bound at "+handlerPath+" has neither expression_path nor compiled implementation")
 		case "decode_failed":
-			return d.makeErrorResponse(execData.RequestID, 500, "internal", "failed to decode handler entity")
+			return d.makeErrorResponse(execData.RequestID, 500, "internal_error", "failed to decode handler entity")
 		default:
-			return d.makeErrorResponse(execData.RequestID, 404, "not_found", "no handler for path: "+handlerPath)
+			return d.makeErrorResponse(execData.RequestID, 404, "handler_not_found", "no handler for path: "+handlerPath)
 		}
 	}
 
@@ -664,7 +664,7 @@ func (d *Dispatcher) dispatchToHandler(ctx context.Context, handlerPath string, 
 
 	if res.handlerData.ExpressionPath != "" {
 		if d.EvaluateExpression == nil {
-			return d.makeErrorResponse(execData.RequestID, 501, "not_implemented",
+			return d.makeErrorResponse(execData.RequestID, 501, "unsupported_operation",
 				"compute extension not wired for entity-native dispatch")
 		}
 		exprPath := qualifyIfRelative(string(d.LocalPeerID), res.handlerData.ExpressionPath)

@@ -142,7 +142,7 @@ func (h *DispatchOutboundHandler) Handle(ctx context.Context, req *handler.Reque
 	}
 
 	if req.Context == nil || req.Context.Execute == nil {
-		resp, _ := handler.NewErrorResponse(500, "internal",
+		resp, _ := handler.NewErrorResponse(500, "internal_error",
 			"dispatcher did not wire hctx.Execute (§6.13(b) seam missing)")
 		return resp, nil
 	}
@@ -248,7 +248,7 @@ func (h *DispatchOutboundHandler) Handle(ctx context.Context, req *handler.Reque
 	// byte fidelity survives back through this handler's primitive/any wrap.
 	resultRaw, err := ecf.Encode(resp.Result)
 	if err != nil {
-		errResp, _ := handler.NewErrorResponse(500, "internal",
+		errResp, _ := handler.NewErrorResponse(500, "internal_error",
 			"encode reentry result: "+err.Error())
 		return errResp, nil
 	}
@@ -257,7 +257,7 @@ func (h *DispatchOutboundHandler) Handle(ctx context.Context, req *handler.Reque
 		Result: cbor.RawMessage(resultRaw),
 	})
 	if err != nil {
-		errResp, _ := handler.NewErrorResponse(500, "internal",
+		errResp, _ := handler.NewErrorResponse(500, "internal_error",
 			"build dispatch-outbound result: "+err.Error())
 		return errResp, nil
 	}

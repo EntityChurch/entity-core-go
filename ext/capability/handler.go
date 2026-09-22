@@ -194,7 +194,7 @@ func (h *Handler) handleRequest(ctx context.Context, req *handler.Request) (*han
 
 	parentCap, err := types.CapabilityTokenDataFromEntity(hctx.CallerCapability)
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to decode caller capability: "+err.Error())
 	}
 
@@ -311,7 +311,7 @@ func (h *Handler) handleDelegate(ctx context.Context, req *handler.Request) (*ha
 
 	parentData, err := types.CapabilityTokenDataFromEntity(parentEnt)
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to decode parent token: "+err.Error())
 	}
 
@@ -394,16 +394,16 @@ func (h *Handler) handleRevoke(ctx context.Context, req *handler.Request) (*hand
 	}
 	markerEnt, err := marker.ToEntity()
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to build revocation marker: "+err.Error())
 	}
 	if _, err := hctx.Store.Put(markerEnt); err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to store revocation marker: "+err.Error())
 	}
 	markerPath := corecap.RevocationPathFor(rr.Token)
 	if _, err := hctx.TreeSet(markerPath, markerEnt.ContentHash, "capability-revoke"); err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to bind revocation marker at "+markerPath+": "+err.Error())
 	}
 
@@ -496,16 +496,16 @@ func (h *Handler) handleConfigure(ctx context.Context, req *handler.Request) (*h
 
 	entryEnt, err := pe.ToEntity()
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to build policy-entry: "+err.Error())
 	}
 	if _, err := hctx.Store.Put(entryEnt); err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to store policy-entry: "+err.Error())
 	}
 	policyPath := PolicyPathPrefix + "/" + pe.PeerPattern
 	if _, err := hctx.TreeSet(policyPath, entryEnt.ContentHash, "capability-configure"); err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to bind policy-entry at "+policyPath+": "+err.Error())
 	}
 
@@ -747,7 +747,7 @@ func (h *Handler) mintAndReturn(
 ) (*handler.Response, error) {
 	capEnt, err := childData.ToEntity()
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to build token entity: "+err.Error())
 	}
 	sig := keypair.Sign(capEnt.ContentHash.Bytes())
@@ -758,19 +758,19 @@ func (h *Handler) mintAndReturn(
 		Signature: sig,
 	}.ToEntity()
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to build signature entity: "+err.Error())
 	}
 	if _, err := hctx.Store.Put(identity); err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to store granter identity: "+err.Error())
 	}
 	if _, err := hctx.Store.Put(capEnt); err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to store token entity: "+err.Error())
 	}
 	if _, err := hctx.Store.Put(sigEnt); err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to store signature entity: "+err.Error())
 	}
 

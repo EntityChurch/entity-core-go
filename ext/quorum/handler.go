@@ -139,7 +139,7 @@ func (h *Handler) Handle(ctx context.Context, req *handler.Request) (*handler.Re
 	case "verify":
 		return h.handleVerify(ctx, req)
 	default:
-		return handler.NewErrorResponse(400, "unknown_operation",
+		return handler.NewErrorResponse(501, "unsupported_operation",
 			"system/quorum does not support operation: "+req.Operation)
 	}
 }

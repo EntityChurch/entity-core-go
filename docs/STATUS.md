@@ -1,6 +1,6 @@
 # entity-core-go — status
 
-_Updated: 2026-08-24 · released version: the newest git tag on `master` (authoritative in `CHANGELOG.md` + `go.mod`) — deliberately not restated here, so it cannot go stale on a cut_
+_Updated: 2026-09-04 · released version: the newest git tag on `master` (authoritative in `CHANGELOG.md` + `go.mod`) — deliberately not restated here, so it cannot go stale on a cut_
 
 **This file is the canonical rolling log for this repo** — one file, re-measured
 rather than appended to, and the only status document that publishes. The dated
@@ -40,7 +40,45 @@ live-HTTP transport surfaces.
 
 ## Where we left off
 
-> **NEXT SESSION STARTS HERE — 2026-08-22 (c): SIGNED OFF for publish. §5.2 compute depth-budget
+> **NEXT SESSION STARTS HERE — 2026-09-04: §3.3 error-code convergence is CLOSED at the
+> reference-implementation tier; a scoped follow-on backlog is analysed and reconciled.**
+>
+> **§3.3 (0.8.2.7) error codes — done, cross-impl clean.** go/rust/py are zero-FAIL on every
+> §3.3 error-code row (501 slot `unsupported_operation`; 404 `handler_not_found`; generic 500
+> `internal_error`; the code carried in the `code` field). Two harness surfaces the slot sweep
+> had missed were fixed (`c2ff3a2`): `checkOptionalOp` now WARNs an unimplemented optional TYPE
+> op at `501/unsupported_operation` (was: only the retired 400), and `handler_not_found_on_
+> unregistered_path` SKIPs a catch-all peer (the 404 row is not drivable there — §3.3
+> satisfaction-mode). Correcting the first surfaced a real core-rust defect (type-handler error
+> code under key `type`, not `code`) — rust fixed it (`f0a399b`), wire-confirmed. Arch ruled the
+> field layer 2026-09-04: the requirement already bound (§3.3 descriptor); the genuine gap (how a
+> conformance test asserts a code) landed in GUIDE-CONFORMANCE §5.2b.1. No core bump.
+>
+> **The follow-on backlog is analysed, not vague.** Four threads separate "landed" from "fully
+> converged + spec-complete" — the single reconciled board is
+> `docs/status/HANDOFF-2026-09-04-post-3.3-open-items-ledger.md`. go is conformant on every row
+> today; nothing blocks a release. In short:
+> - **Type-op 404** (`converge`/`adopt`/`reconcile` → `404 type_not_found`): go conformant; the
+>   ruling is still a DRAFT proposal with a §8.5 numbering collision, so the go wire gate is
+>   staged, not landed. py diverges on all three (two at the wrong *status*, 400 — bigger than
+>   arch's table shows).
+> - **`unsupported_mode`**: the 400 slot is cohort-aligned (needs a REGISTRY code-table row); the
+>   501 slot is a real §9.1-vs-§6a.9.2 spec-conflict — go+rust emit `unsupported_operation`, py
+>   holds `unsupported_mode` — **needs an arch ruling**.
+> - **SA-PY-35** (half-open `hello`-before-`authenticate` `ping`): unruled spec silence; go
+>   answers `409` (aligned with py). **Needs an arch ruling**; go acts only if arch says "serve 200".
+> - **Domain 500 codes**: 2 already conformant; 3 undefined tokens are **go-closeable** →
+>   `internal_error` (next session); `remote_empty` (status question) + discovery `backend_error`
+>   (spec owes a table row) route to arch.
+>
+> **Next session drives, in order:** (1) converge the 3 undefined domain-500 codes; (2) stage the
+> type-op 404 wire gate behind the arch fold; (3) send ONE consolidated arch packet (not tile-by-
+> tile) covering the type-op fold + py `×3` undercount, the 501 `unsupported_mode` conflict, the
+> owed code-tables, SA-PY-35, and `remote_empty`. Full detail + file:line pins in the ledger.
+>
+> ---
+>
+> **2026-08-22 (c): SIGNED OFF for publish. §5.2 compute depth-budget
 > fixed; the compute corpus LOCKs 362/362 go-on-go.** The 362-vector compute cross-bless had read
 > `361/362` for a week (`cv9a-map-depth-exceeded-contains`, `recurse/tail-sum` forked) — root cause was
 > the DEPTH limit reaching the peer through the wrong channel, on both sides: EXTENSION-COMPUTE §5.2

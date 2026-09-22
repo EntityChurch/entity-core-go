@@ -154,7 +154,7 @@ func (h *Handler) Handle(ctx context.Context, req *handler.Request) (*handler.Re
 	case OpUpdateTransports:
 		return h.handleUpdateTransports(ctx, req)
 	default:
-		return handler.NewErrorResponse(400, "unknown_operation",
+		return handler.NewErrorResponse(501, "unsupported_operation",
 			HandlerPattern+" does not support operation: "+req.Operation)
 	}
 }

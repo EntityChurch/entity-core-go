@@ -48,7 +48,7 @@ func (h *Handler) Handle(ctx context.Context, req *handler.Request) (*handler.Re
 	case "uninstall":
 		return h.handleUninstall(ctx, req)
 	default:
-		return handler.NewErrorResponse(400, "unknown_operation",
+		return handler.NewErrorResponse(501, "unsupported_operation",
 			"Unknown compute operation: "+req.Operation)
 	}
 }
@@ -93,7 +93,7 @@ func (h *Handler) handleEval(ctx context.Context, req *handler.Request) (*handle
 		if ce, ok := err.(*ComputeError); ok {
 			errEnt, entErr := ce.ToEntity()
 			if entErr != nil {
-				return handler.NewErrorResponse(500, "internal", "Failed to create error entity")
+				return handler.NewErrorResponse(500, "internal_error", "Failed to create error entity")
 			}
 			// PROPOSAL-COMPUTE-NAVIGATION-AND-ERROR-SURFACE F10: an evaluated
 			// compute/error is a value (§1.5 error-as-value), surfaced at 200
@@ -101,7 +101,7 @@ func (h *Handler) handleEval(ctx context.Context, req *handler.Request) (*handle
 			// failures — handler-not-found, pre-eval auth, malformed request.
 			return &handler.Response{Status: 200, Result: errEnt}, nil
 		}
-		return handler.NewErrorResponse(500, "internal", err.Error())
+		return handler.NewErrorResponse(500, "internal_error", err.Error())
 	}
 
 	// (B) v3.23: a compute/error arriving as the top-level VALUE (a root literal,
@@ -111,7 +111,7 @@ func (h *Handler) handleEval(ctx context.Context, req *handler.Request) (*handle
 	if ce, isErr := computeErrorFromValue(result); isErr {
 		errEnt, entErr := ce.ToEntity()
 		if entErr != nil {
-			return handler.NewErrorResponse(500, "internal", "Failed to create error entity")
+			return handler.NewErrorResponse(500, "internal_error", "Failed to create error entity")
 		}
 		return &handler.Response{Status: 200, Result: errEnt}, nil
 	}
@@ -121,12 +121,12 @@ func (h *Handler) handleEval(ctx context.Context, req *handler.Request) (*handle
 	// entity.Entity per M1 / V7 §1.4 (byte-identical to a hand-built one).
 	result, err = materialize(result, hctx.Store)
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal", "Failed to materialize result: "+err.Error())
+		return handler.NewErrorResponse(500, "internal_error", "Failed to materialize result: "+err.Error())
 	}
 
 	resultEnt, err := wrapResult(result, expression.ContentHash)
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal", "Failed to wrap result: "+err.Error())
+		return handler.NewErrorResponse(500, "internal_error", "Failed to wrap result: "+err.Error())
 	}
 
 	return &handler.Response{Status: 200, Result: resultEnt}, nil
@@ -134,14 +134,14 @@ func (h *Handler) handleEval(ctx context.Context, req *handler.Request) (*handle
 
 func (h *Handler) handleInstall(ctx context.Context, req *handler.Request) (*handler.Response, error) {
 	if h.engine == nil {
-		return handler.NewErrorResponse(501, "not_implemented", "Reactive mode not available")
+		return handler.NewErrorResponse(501, "unsupported_operation", "Reactive mode not available")
 	}
 	return h.engine.HandleInstall(ctx, req)
 }
 
 func (h *Handler) handleUninstall(ctx context.Context, req *handler.Request) (*handler.Response, error) {
 	if h.engine == nil {
-		return handler.NewErrorResponse(501, "not_implemented", "Reactive mode not available")
+		return handler.NewErrorResponse(501, "unsupported_operation", "Reactive mode not available")
 	}
 	return h.engine.HandleUninstall(ctx, req)
 }
@@ -442,7 +442,7 @@ func (h *Handler) EvaluateAtPath(ctx context.Context, exprPath string, req *hand
 		if ce, ok := err.(*ComputeError); ok {
 			errEnt, entErr := ce.ToEntity()
 			if entErr != nil {
-				return handler.NewErrorResponse(500, "internal", "Failed to create error entity")
+				return handler.NewErrorResponse(500, "internal_error", "Failed to create error entity")
 			}
 			// PROPOSAL-COMPUTE-NAVIGATION-AND-ERROR-SURFACE F10: evaluated
 			// compute/error → 200 with the entity as the result (error-as-value
@@ -450,7 +450,7 @@ func (h *Handler) EvaluateAtPath(ctx context.Context, exprPath string, req *hand
 			// failure, to propagate NaN-style).
 			return &handler.Response{Status: 200, Result: errEnt}, nil
 		}
-		return handler.NewErrorResponse(500, "internal", err.Error())
+		return handler.NewErrorResponse(500, "internal_error", err.Error())
 	}
 
 	// (B) v3.23: same as boundary 1 — a top-level compute/error VALUE surfaces via
@@ -458,7 +458,7 @@ func (h *Handler) EvaluateAtPath(ctx context.Context, exprPath string, req *hand
 	if ce, isErr := computeErrorFromValue(result); isErr {
 		errEnt, entErr := ce.ToEntity()
 		if entErr != nil {
-			return handler.NewErrorResponse(500, "internal", "Failed to create error entity")
+			return handler.NewErrorResponse(500, "internal_error", "Failed to create error entity")
 		}
 		return &handler.Response{Status: 200, Result: errEnt}, nil
 	}
@@ -467,7 +467,7 @@ func (h *Handler) EvaluateAtPath(ctx context.Context, exprPath string, req *hand
 	// non-compute caller. *constructedValue → bare entity.Entity per M1.
 	result, err = materialize(result, hctx.Store)
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal", "Failed to materialize result: "+err.Error())
+		return handler.NewErrorResponse(500, "internal_error", "Failed to materialize result: "+err.Error())
 	}
 
 	// E3: entity-native dispatch returns unwrapped results. The caller
@@ -478,7 +478,7 @@ func (h *Handler) EvaluateAtPath(ctx context.Context, exprPath string, req *hand
 	outputType := lookupOperationOutputType(hctx, req.Operation)
 	resultEnt, err := unwrapEntityNativeResult(result, outputType)
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal", "Failed to create result: "+err.Error())
+		return handler.NewErrorResponse(500, "internal_error", "Failed to create result: "+err.Error())
 	}
 	return &handler.Response{Status: 200, Result: resultEnt}, nil
 }

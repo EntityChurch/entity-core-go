@@ -83,7 +83,7 @@ func (h *Handler) Handle(ctx context.Context, req *handler.Request) (*handler.Re
 	case "unregister":
 		return h.handleUnregister(ctx, req)
 	default:
-		return handler.NewErrorResponse(400, "unknown_operation",
+		return handler.NewErrorResponse(501, "unsupported_operation",
 			"system/handler does not support operation: "+req.Operation)
 	}
 }
@@ -173,7 +173,7 @@ func (h *Handler) handleRegister(ctx context.Context, req *handler.Request) (*ha
 	}
 	grantEnt, err := grantData.ToEntity()
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to build grant entity: "+err.Error())
 	}
 
@@ -187,7 +187,7 @@ func (h *Handler) handleRegister(ctx context.Context, req *handler.Request) (*ha
 	}
 	sigEnt, err := sigData.ToEntity()
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to build signature entity: "+err.Error())
 	}
 
@@ -200,7 +200,7 @@ func (h *Handler) handleRegister(ctx context.Context, req *handler.Request) (*ha
 	}
 	ifaceEnt, err := ifaceData.ToEntity()
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to build interface entity: "+err.Error())
 	}
 
@@ -213,7 +213,7 @@ func (h *Handler) handleRegister(ctx context.Context, req *handler.Request) (*ha
 	}
 	handlerEnt, err := handlerData.ToEntity()
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to build handler entity: "+err.Error())
 	}
 
@@ -221,7 +221,7 @@ func (h *Handler) handleRegister(ctx context.Context, req *handler.Request) (*ha
 	// validation can resolve granter -> public key. The peer's identity is
 	// usually already there; this is idempotent (content-addressed put).
 	if _, err := hctx.Store.Put(identity); err != nil {
-		return handler.NewErrorResponse(500, "internal",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to store granter identity: "+err.Error())
 	}
 
@@ -229,29 +229,29 @@ func (h *Handler) handleRegister(ctx context.Context, req *handler.Request) (*ha
 	// ref resolves immediately), then grant + signature, then handler entity
 	// (which makes the pattern dispatch-resolvable last).
 	if err := putAt(hctx, ifacePath, ifaceEnt, "register-interface"); err != nil {
-		return handler.NewErrorResponse(500, "internal", err.Error())
+		return handler.NewErrorResponse(500, "internal_error", err.Error())
 	}
 	grantPath := "system/capability/grants/" + pattern
 	if err := putAt(hctx, grantPath, grantEnt, "register-grant"); err != nil {
-		return handler.NewErrorResponse(500, "internal", err.Error())
+		return handler.NewErrorResponse(500, "internal_error", err.Error())
 	}
 	signaturePath := types.LocalSignaturePath(grantEnt.ContentHash)
 	if err := putAt(hctx, signaturePath, sigEnt, "register-grant-signature"); err != nil {
-		return handler.NewErrorResponse(500, "internal", err.Error())
+		return handler.NewErrorResponse(500, "internal_error", err.Error())
 	}
 	if err := putAt(hctx, pattern, handlerEnt, "register-handler"); err != nil {
-		return handler.NewErrorResponse(500, "internal", err.Error())
+		return handler.NewErrorResponse(500, "internal_error", err.Error())
 	}
 
 	// Optional type installation. Type definitions land at system/type/{name}.
 	for typeName, typeDef := range rr.Types {
 		typeEnt, err := typeDef.ToEntity()
 		if err != nil {
-			return handler.NewErrorResponse(500, "internal",
+			return handler.NewErrorResponse(500, "internal_error",
 				"failed to build type entity for "+typeName+": "+err.Error())
 		}
 		if err := putAt(hctx, "system/type/"+typeName, typeEnt, "register-type"); err != nil {
-			return handler.NewErrorResponse(500, "internal", err.Error())
+			return handler.NewErrorResponse(500, "internal_error", err.Error())
 		}
 	}
 

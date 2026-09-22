@@ -236,7 +236,7 @@ func (h *Handler) Handle(ctx context.Context, req *handler.Request) (*handler.Re
 	case OpAnnounceStop:
 		return h.handleAnnounceStop(ctx, req)
 	default:
-		return handler.NewErrorResponse(400, "unknown_operation",
+		return handler.NewErrorResponse(501, "unsupported_operation",
 			"system/discovery does not support operation: "+req.Operation)
 	}
 }
@@ -284,11 +284,11 @@ func (h *Handler) handleScan(ctx context.Context, req *handler.Request) (*handle
 	for _, cd := range observed {
 		ent, err := cd.ToEntity()
 		if err != nil {
-			return handler.NewErrorResponse(500, "internal",
+			return handler.NewErrorResponse(500, "internal_error",
 				"failed to materialize candidate entity: "+err.Error())
 		}
 		if err := h.bindCandidate(req.Context, b.Kind(), ent); err != nil {
-			return handler.NewErrorResponse(500, "internal", err.Error())
+			return handler.NewErrorResponse(500, "internal_error", err.Error())
 		}
 		snapshot = append(snapshot, ent.ContentHash)
 	}

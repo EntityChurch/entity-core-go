@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"testing"
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
@@ -114,8 +115,12 @@ func TestHandle_UnknownOperation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if resp.Status != 400 {
-		t.Fatalf("status: want 400, got %d", resp.Status)
+	// §3.3 (0.8.2.6): registered handler, unimplemented op → 501 unsupported_operation.
+	if resp.Status != 501 {
+		t.Fatalf("status: want 501, got %d", resp.Status)
+	}
+	if code := decodeErrCode(t, resp); code != "unsupported_operation" {
+		t.Fatalf("code: want unsupported_operation, got %q", code)
 	}
 }
 
@@ -1279,6 +1284,48 @@ func TestForward_TerminalUnreachable_QueuesFallback(t *testing.T) {
 	// entry hash is discovered via poll cursor advance.
 	if fr.StoredAt != tFakeDest {
 		t.Fatalf("StoredAt %q: want bare namespace %q (§4.2 spec comment 'namespace, if queued-fallback')", fr.StoredAt, tFakeDest)
+	}
+}
+
+// §3.3 default-code teeth: a terminal dispatcher failure that is NOT
+// ErrDestinationUnreachable (so no fallback applies) is an internal 500.
+// RELAY declares no 500 error-code table, so the code MUST be the §3.3
+// default `internal_error` — this pins the convergence away from the
+// bespoke `dispatch_failed` spelling and guards a regression back to it.
+// The control (a healthy dispatcher → 200) proves the error is reached
+// only on failure, not by construction.
+func TestForward_TerminalDispatchFailure_IsInternalError(t *testing.T) {
+	mkReq := func(h *Handler, hctx *handler.HandlerContext) *handler.Response {
+		inner := makeInnerEnvelope(t, "terminal-failure-payload")
+		hctx.Included[inner.ContentHash] = inner
+		params, _ := types.ForwardRequestData{
+			Destination:   tFakeDest,
+			NextHop:       tFakeDest,
+			TTLHops:       3,
+			EnvelopeInner: inner.ContentHash,
+		}.ToEntity()
+		resp, _ := h.Handle(context.Background(), &handler.Request{
+			Operation: OpForward, Params: params, Context: hctx,
+		})
+		return resp
+	}
+
+	// Control: a healthy dispatcher delivers → 200 (no error path taken).
+	hOK := newTestHandler(t)
+	hOK.SetDispatcher(&fakeDispatcher{})
+	if resp := mkReq(hOK, newTestContext()); resp.Status != 200 {
+		t.Fatalf("control: healthy deliver want 200, got %d", resp.Status)
+	}
+
+	// Terminal failure that is not unreachable → 500 internal_error.
+	hErr := newTestHandler(t)
+	hErr.SetDispatcher(&fakeDispatcher{deliverErr: errors.New("backend exploded")})
+	resp := mkReq(hErr, newTestContext())
+	if resp.Status != 500 {
+		t.Fatalf("status: want 500, got %d", resp.Status)
+	}
+	if got := decodeErrCode(t, resp); got != "internal_error" {
+		t.Fatalf("code: want %q (§3.3 default; RELAY has no 500 table), got %q", "internal_error", got)
 	}
 }
 

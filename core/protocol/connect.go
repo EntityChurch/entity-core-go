@@ -335,7 +335,13 @@ func (h *ConnectHandler) Handle(ctx context.Context, req *handler.Request) (*han
 	case "ping":
 		return h.handlePing(req)
 	default:
-		return handler.NewErrorResponse(400, "unknown_operation", "unknown connect operation: "+req.Operation)
+		// §4.7: an unrecognized connect operation is a malformed request, not a
+		// missing handler op — 400 invalid_request, NOT the 501 unsupported_operation
+		// that a registered non-connect handler emits for an unimplemented op. On the
+		// wire this arm is unreachable (execute.go intercepts the same case ahead of
+		// dispatch with the identical code); it is kept spec-consistent for a direct
+		// in-process call. `unknown_operation` is a retired spelling (§3.3, MUST NOT emit).
+		return handler.NewErrorResponse(400, "invalid_request", "unknown connect operation: "+req.Operation)
 	}
 }
 

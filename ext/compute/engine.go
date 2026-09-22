@@ -244,11 +244,11 @@ func (e *Engine) HandleInstall(ctx context.Context, req *handler.Request) (*hand
 	}
 	subgraphEnt, err := subgraphData.ToEntity()
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal", "Failed to create subgraph entity")
+		return handler.NewErrorResponse(500, "internal_error", "Failed to create subgraph entity")
 	}
 	subgraphHash, err := hctx.Store.Put(subgraphEnt)
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal", "Failed to store subgraph entity")
+		return handler.NewErrorResponse(500, "internal_error", "Failed to store subgraph entity")
 	}
 	if _, err := hctx.TreeSet(store.QualifyPath(e.localPeerID, subgraphPath), subgraphHash, "install"); err != nil {
 		return handler.NewErrorResponse(500, "storage_error", "bind subgraph: "+err.Error())
@@ -270,7 +270,7 @@ func (e *Engine) HandleInstall(ctx context.Context, req *handler.Request) (*hand
 	}
 	resultEnt, err := resultData.ToEntity()
 	if err != nil {
-		return handler.NewErrorResponse(500, "internal", "Failed to create install result")
+		return handler.NewErrorResponse(500, "internal_error", "Failed to create install result")
 	}
 	return &handler.Response{Status: 200, Result: resultEnt}, nil
 }

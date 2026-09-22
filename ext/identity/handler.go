@@ -212,7 +212,7 @@ func (h *Handler) Handle(ctx context.Context, req *handler.Request) (*handler.Re
 	case "process_attestation":
 		return h.handleProcessAttestation(ctx, req)
 	default:
-		return handler.NewErrorResponse(400, "unknown_operation",
+		return handler.NewErrorResponse(501, "unsupported_operation",
 			"system/identity does not support operation: "+req.Operation)
 	}
 }

@@ -447,21 +447,16 @@ func runType(ctx context.Context, client *PeerClient) []CheckResult {
 		if err != nil {
 			return FailCheck("execute " + opName + ": " + err.Error())
 		}
-		if respData.Status == 400 {
-			// May be "unknown_operation" — peer doesn't ship the op.
-			return WarnCheck(opName + " not implemented (400 — acceptable for §12.2/§12.3 ops)")
-		}
-		if respData.Status != 200 {
-			return FailCheck(fmt.Sprintf("%s returned status %d", opName, respData.Status))
-		}
-		var resultEntity entity.Entity
-		if err := ecf.Decode(respData.Result, &resultEntity); err != nil {
-			return FailCheck("decode " + opName + " result: " + err.Error())
-		}
-		if resultType != "" && resultEntity.Type != resultType {
-			return FailCheck(fmt.Sprintf("%s result type %q (want %q)", opName, resultEntity.Type, resultType))
-		}
-		return PassCheck(opName + " round-trips (status 200, result type " + resultEntity.Type + ")")
+		// Decode the result entity (the success result on 200, the error entity
+		// on 501) and the §3.3 `code` field for the classifier. decodeResultErrorCode
+		// reads the `code` key only, so a code mislabeled under a different key
+		// comes back "" — the shape violation we FAIL rather than launder.
+		var re entity.Entity
+		_ = ecf.Decode(respData.Result, &re)
+		var errBody map[string]interface{}
+		_ = cbor.Unmarshal(re.Data, &errBody)
+		code, _ := decodeResultErrorCode(respData)
+		return classifyOptionalTypeOp(opName, resultType, respData.Status, code, re.Type, errBody)
 	}
 
 	// Install three small types for analysis-op probing.
@@ -548,6 +543,41 @@ func runType(ctx context.Context, client *PeerClient) []CheckResult {
 	})
 
 	return r.Results()
+}
+
+// classifyOptionalTypeOp maps a §12.2/§12.3 OPTIONAL (SHOULD/MAY) TYPE-op
+// response to an outcome. Pure so the WARN/FAIL boundary carries deterministic
+// teeth: go-on-go never reaches the 501 branches (go implements every type op),
+// so only a cross-impl run exercises them and the wire run alone cannot
+// regression-guard this.
+//
+//   - 200 with the declared result type → implemented, PASS.
+//   - 501 `unsupported_operation` → the peer conformantly does not ship this MAY
+//     op; the §3.3 501 slot's single spelling is present → acceptable, WARN.
+//   - 501 with any other (or empty) code → the op is unimplemented but the error
+//     body violates §3.3 (the `code` field is wrong or, e.g., mislabeled under a
+//     different key so it reads empty). FAIL, reporting the raw body — never read
+//     a mislabeled key, which would launder the defect.
+//   - anything else (incl. the retired 400 `unknown_operation`) → FAIL.
+func classifyOptionalTypeOp(opName, wantResultType string, status uint, errCode, gotResultType string, errBody map[string]interface{}) CheckOutcome {
+	switch {
+	case status == 200:
+		if wantResultType != "" && gotResultType != wantResultType {
+			return FailCheck(fmt.Sprintf("%s result type %q (want %q)", opName, gotResultType, wantResultType))
+		}
+		return PassCheck(opName + " round-trips (status 200, result type " + gotResultType + ")")
+	case status == 501 && errCode == "unsupported_operation":
+		return WarnCheck(opName + " not implemented (501/unsupported_operation — acceptable for the §12.2/§12.3 MAY op)")
+	case status == 501:
+		return FailCheck(fmt.Sprintf(
+			"%s answered 501 but result.data.code=%q, want 501/unsupported_operation "+
+				"(§3.3 501 slot 0.8.2.7; error body=%+v — a code under any key other than `code` is a §3.3 error-shape violation)",
+			opName, errCode, errBody))
+	default:
+		return FailCheck(fmt.Sprintf(
+			"%s returned status %d (want 200 implemented, or 501/unsupported_operation not-implemented; 400/unknown_operation retired 0.8.2.7)",
+			opName, status))
+	}
 }
 
 // standardConstraintKinds enumerates the 11 §11.1 constraint kinds.

@@ -159,7 +159,7 @@ func TestReceiveNoContinuationStores(t *testing.T) {
 	}
 }
 
-func TestUnknownOperationReturns400(t *testing.T) {
+func TestUnknownOperationReturns501(t *testing.T) {
 	h := NewHandler()
 	hctx := newTestContext()
 	hctx.Resource = &types.ResourceTarget{Targets: []string{"system/inbox/test"}}
@@ -175,8 +175,9 @@ func TestUnknownOperationReturns400(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Status != 400 {
-		t.Fatalf("expected status 400, got %d", resp.Status)
+	// §3.3 (0.8.2.6): registered handler, unimplemented op → 501 unsupported_operation.
+	if resp.Status != 501 {
+		t.Fatalf("expected status 501, got %d", resp.Status)
 	}
 }
 

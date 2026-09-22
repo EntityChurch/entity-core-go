@@ -55,5 +55,10 @@ func runConnectivity(ctx context.Context, client *PeerClient) ([]CheckResult, bo
 	// rung 2). Full profile only; runs on the established connection.
 	results = append(results, runKeepalivePingProbe(ctx, client)...)
 
+	// §3.3 status-code table, the two oracle-drivable rows (501 slot +
+	// 404 handler_not_found), generalized from the retired-synonym incident
+	// per §9.1 (0.8.2.7). Runs on the established connection.
+	results = append(results, runSection33CodeProbe(ctx, client)...)
+
 	return results, client.Connected()
 }

@@ -876,7 +876,8 @@ func TestWatchRequestDataToEntityRoundtrip(t *testing.T) {
 	}
 }
 
-// TestUnknownOperation verifies that unknown operations return 400.
+// TestUnknownOperation verifies that a registered handler emits
+// 501 unsupported_operation for an operation it does not implement (§3.3, 0.8.2.6).
 func TestUnknownOperation(t *testing.T) {
 	h := NewHandler(nil)
 	hctx := &handler.HandlerContext{}
@@ -888,7 +889,7 @@ func TestUnknownOperation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
-	if resp.Status != 400 {
-		t.Fatalf("expected 400, got %d", resp.Status)
+	if resp.Status != 501 {
+		t.Fatalf("expected 501, got %d", resp.Status)
 	}
 }

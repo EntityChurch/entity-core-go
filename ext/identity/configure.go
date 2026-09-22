@@ -465,7 +465,7 @@ func errorFromConfigureErr(err error) (*handler.Response, error) {
 	if ce, ok := err.(*configureErr); ok {
 		return handler.NewErrorResponse(ce.code, ce.kind, ce.msg)
 	}
-	return handler.NewErrorResponse(500, "internal", err.Error())
+	return handler.NewErrorResponse(500, "internal_error", err.Error())
 }
 
 func zeroResult() types.IdentityConfigureResultData {
