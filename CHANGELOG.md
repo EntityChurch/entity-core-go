@@ -53,6 +53,22 @@ read it as a fleet version.)
 
 Development lands on `dev`; `master` carries the last release.
 
+- **`system/tree:put` rejects an absent `content_hash` as `400 invalid_request`,
+  not `400 hash_mismatch`** (EXTENSION-TREE Appendix A `put` row 1, v4.5;
+  `ENTITY-NATIVE-TYPE-SYSTEM` §8.1 — content_hash is a required field of
+  `core/entity`). An absent required field is a structural defect decided in
+  step 1 of the §6.3 admission ladder, ahead of the step-2 hash-value compare;
+  a present-but-mismatching hash stays `hash_mismatch`. Previously go conflated
+  the two (both `hash_mismatch`). `put` is a receipt path: the hash is authored
+  by the SDK, never by the peer.
+- **`system/tree:put` answers a `content_hash` naming an unsupported format code
+  with `400 unsupported_content_hash_format`, not `400 invalid_request`**
+  (EXTENSION-TREE Appendix A `put` row 4, v4.5; `ENTITY-CORE-PROTOCOL` §4.7 row 5
+  / §1.2 ingest-dispatch). A well-formed hash byte string the peer cannot verify
+  by format is distinct from a structurally-malformed one; a mis-sized hash under
+  a *known* format stays `invalid_request`. Previously go flattened the
+  unknown-format decode error into `invalid_request`.
+
 ## [0.9.0] — 2026-08-24
 
 _Protocol: Entity Core Protocol **V7**, carried out-of-band per [ADR-0002]. The

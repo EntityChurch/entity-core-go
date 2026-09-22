@@ -133,7 +133,6 @@
     "reachability.reachability_dialback_posture": "UNRESOLVED",
     "reachability.reachability_observe_address": "UNRESOLVED",
     "reachability.reachability_observed_not_persisted": "UNRESOLVED",
-    "registry.v16_ttl_ceiling_reread": "PARTIAL",
     "relay_multi_peer.mp1_three_peer_setup": "NO_CITATION",
     "relay_multi_principal.\u003ccomputed\u003e": "DYNAMIC,DYNAMIC",
     "relay_offline_delivery_registry.\u003ccomputed\u003e": "DYNAMIC,DYNAMIC,DYNAMIC,DYNAMIC",

@@ -1358,6 +1358,13 @@ func runTreeOperations(ctx context.Context, client *PeerClient) []CheckResult {
 
 	results := r.Results()
 
+	// The EXTENSION-TREE Appendix A (v4.4) put error-code rows. `put` is a CORE
+	// §6.3 op, so these stay scored under --profile core (their names do not
+	// match the §9-op skip prefixes below). Added to close the coverage gap
+	// core-rust flagged: tree_operations was green about the put error rows it
+	// never drove. See tree_put_error_codes.go.
+	results = append(results, runTreePutErrorCodes(ctx, client)...)
+
 	// V7 v7.72 §9.0 / §9.5a / §3720 carve-out: EXTENSION-TREE §9 ops
 	// (snapshot, diff, extract, merge, roundtrip, tracked/tracking) are
 	// out-of-scope under --profile core. A true core peer correctly

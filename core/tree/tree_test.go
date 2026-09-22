@@ -294,6 +294,77 @@ func TestPutAndGet(t *testing.T) {
 	}
 }
 
+// putErrorCode drives a put-request carrying the given raw entity bytes and
+// returns (status, code). Used by the §3.3 / EXTENSION-TREE Appendix A (v4.4)
+// put error-code teeth below.
+func putErrorCode(t *testing.T, entityBytes cbor.RawMessage) (uint, string) {
+	t.Helper()
+	h, cs, li, pid := setup(t)
+	putReq := types.PutRequestData{Entity: entityBytes}
+	reqEntity, err := putReq.ToEntity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := makeRequest(cs, li, pid, "system/tree", "put", reqEntity,
+		&types.ResourceTarget{Targets: []string{"local/files/x.txt"}})
+	resp, err := h.Handle(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status == 200 {
+		t.Fatalf("expected a 4xx, got 200")
+	}
+	ed, err := types.ErrorDataFromEntity(resp.Result)
+	if err != nil {
+		t.Fatalf("decode error entity: %v", err)
+	}
+	return resp.Status, ed.Code
+}
+
+// TestPut_ErrorCodes_Section33AppendixA pins the put error-code slot to
+// EXTENSION-TREE Appendix A (v4.4): a non-decoding entity and a
+// structurally-invalid (empty-type) entity are the §3.3 400 default
+// `invalid_request`; a content-hash mismatch is the distinct `hash_mismatch`
+// (the EXTENSION-CONTENT §923 code). `put`/`get` are the two CORE tree ops
+// (ENTITY-CORE-PROTOCOL §6.3); §3.3 homes their error codes in Appendix A.
+//
+// The empty-type row is the mutation witness: entity.Validate() checks empty
+// type/data BEFORE the hash, so coding site 434 wholesale as hash_mismatch
+// (as the worklist prose read) would mis-code it. Both non-hash failures MUST
+// be invalid_request; only the true hash mismatch is hash_mismatch.
+func TestPut_ErrorCodes_Section33AppendixA(t *testing.T) {
+	// 1. Undecodable entity (valid CBOR, wrong shape — a bare integer).
+	badBytes, err := ecf.Encode(42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, code := putErrorCode(t, cbor.RawMessage(badBytes)); st != 400 || code != "invalid_request" {
+		t.Errorf("undecodable entity: got %d/%q, want 400/invalid_request", st, code)
+	}
+
+	// 2. Content-hash mismatch: a valid entity with a tampered ContentHash.
+	e := makeEntity(t, "test/doc", map[string]string{"v": "1"})
+	other := makeEntity(t, "test/doc", map[string]string{"v": "2"})
+	e.ContentHash = other.ContentHash // now claims a hash that does not match {type,data}
+	tampered, err := ecf.Encode(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, code := putErrorCode(t, cbor.RawMessage(tampered)); st != 400 || code != "hash_mismatch" {
+		t.Errorf("content-hash mismatch: got %d/%q, want 400/hash_mismatch", st, code)
+	}
+
+	// 3. Structurally invalid (empty type), NOT a hash mismatch → invalid_request.
+	empty := entity.Entity{Type: "", Data: e.Data, ContentHash: e.ContentHash}
+	emptyBytes, err := ecf.Encode(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, code := putErrorCode(t, cbor.RawMessage(emptyBytes)); st != 400 || code != "invalid_request" {
+		t.Errorf("empty-type entity: got %d/%q, want 400/invalid_request (structural, not hash_mismatch)", st, code)
+	}
+}
+
 func TestPutCASMatch(t *testing.T) {
 	h, cs, li, pid := setup(t)
 

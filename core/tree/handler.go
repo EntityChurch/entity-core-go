@@ -2,6 +2,7 @@ package tree
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -423,15 +424,64 @@ func (h *Handler) handlePut(ctx context.Context, req *handler.Request) (*handler
 		return &handler.Response{Status: 200, Result: resultEntity}, nil
 	}
 
-	// Decode the entity to store.
+	// Decode the entity to store. A non-decoding submission is the generic
+	// structurally-invalid case → §3.3's 400 default `invalid_request`
+	// (EXTENSION-TREE Appendix A `put`/`set` row 1, v4.4). Note `put`/`get` are
+	// the two CORE tree operations (ENTITY-CORE-PROTOCOL §6.3), and §3.3 routes
+	// all tree-handler error codes to EXTENSION-TREE Appendix A (§3.3 line 851).
 	var ent entity.Entity
 	if err := ecf.Decode(putReq.Entity, &ent); err != nil {
-		return handler.NewErrorResponse(400, "invalid_entity", fmt.Sprintf("could not decode entity: %v", err))
+		// A content_hash whose leading format code the peer does not support is
+		// the §1.2 ingest-dispatch case → 400 `unsupported_content_hash_format`
+		// (EXTENSION-TREE Appendix A `put` row 4 / ENTITY-CORE-PROTOCOL §4.7
+		// row 5), NOT the generic structural row: the value IS a well-formed
+		// hash byte string, the peer simply cannot verify its format. A
+		// mis-sized hash under a KNOWN format is ErrInvalidHash (not
+		// ErrUnknownAlgorithm), so it correctly falls through to invalid_request.
+		if errors.Is(err, hash.ErrUnknownAlgorithm) || errors.Is(err, hash.ErrUnsupportedContentHashFormat) {
+			return handler.NewErrorResponse(400, "unsupported_content_hash_format", fmt.Sprintf("content_hash names an unsupported format: %v", err))
+		}
+		return handler.NewErrorResponse(400, "invalid_request", fmt.Sprintf("could not decode entity: %v", err))
 	}
 
-	// Validate entity hash.
+	// STRUCTURAL admission (step 1 of ENTITY-CORE-PROTOCOL §6.3's two-step
+	// ladder): the submitted value MUST be a `core/entity`, whose three fields
+	// — type, data, content_hash — are ALL required (ENTITY-NATIVE-TYPE-SYSTEM
+	// §8.1, no `optional` marker; §2.8 "all three keys are required"). An ABSENT
+	// (or null) content_hash is a structural defect → 400 `invalid_request`
+	// (EXTENSION-TREE Appendix A `put` row 1, v4.5), NOT a hash mismatch. go's
+	// decode maps an absent key to the zero Hash, which `hash.Validate` cannot
+	// tell from a present-but-wrong hash (both mismatch), so presence is
+	// detected here from the raw CBOR. The hash *value* comparison is step 2
+	// (below): only a PRESENT, well-formed, non-matching hash is `hash_mismatch`.
+	if present, err := entityCarriesContentHash(putReq.Entity); err != nil {
+		return handler.NewErrorResponse(400, "invalid_request", fmt.Sprintf("could not decode entity: %v", err))
+	} else if !present {
+		return handler.NewErrorResponse(400, "invalid_request", "entity missing required content_hash field")
+	}
+
+	// Validate the decoded entity. entity.Validate() covers two distinct §3.3
+	// rows, so the code MUST branch on which failed (Validate checks empty
+	// type/data BEFORE the hash — flipping wholesale to hash_mismatch, as the
+	// worklist prose read, would mis-code the structural cases):
+	//   - content-hash mismatch → 400 `hash_mismatch` (Appendix A row 2; the
+	//     same code EXTENSION-CONTENT §923 uses for this failure).
+	//   - empty type/data (structurally invalid) → §3.3's 400 default
+	//     `invalid_request`.
+	// (The 409 `hash_mismatch` CAS-race rows above are a different failure and
+	// were already conformant.)
 	if err := ent.Validate(); err != nil {
-		return handler.NewErrorResponse(400, "invalid_entity", fmt.Sprintf("entity validation failed: %v", err))
+		if errors.Is(err, hash.ErrHashMismatch) {
+			return handler.NewErrorResponse(400, "hash_mismatch", fmt.Sprintf("entity content hash does not match: %v", err))
+		}
+		// Defensive: a format that decoded (FromBytes accepted its length) but
+		// cannot be computed → unsupported_content_hash_format (row 4). Not
+		// reachable while FromBytes rejects every unallocated code first, but
+		// kept so the row's code is minted wherever the format is refused.
+		if errors.Is(err, hash.ErrUnknownAlgorithm) || errors.Is(err, hash.ErrUnsupportedContentHashFormat) {
+			return handler.NewErrorResponse(400, "unsupported_content_hash_format", fmt.Sprintf("content_hash names an unsupported format: %v", err))
+		}
+		return handler.NewErrorResponse(400, "invalid_request", fmt.Sprintf("entity validation failed: %v", err))
 	}
 
 	// Store and bind.
@@ -528,4 +578,29 @@ func CreatePutRequestCAS(path string, ent *entity.Entity, expectedHash *hash.Has
 		return entity.Entity{}, nil, err
 	}
 	return reqEntity, &types.ResourceTarget{Targets: []string{path}}, nil
+}
+
+// entityCarriesContentHash reports whether the raw put-request entity CBOR
+// carries a present, non-null `content_hash` field — the structural presence
+// test for step 1 of §6.3's admission ladder (ENTITY-NATIVE-TYPE-SYSTEM §8.1:
+// content_hash is a required field of core/entity). It returns (false, nil)
+// when the key is absent or CBOR-null (a required field cannot be either), and
+// (false, err) when the value is not even a decodable CBOR map — both routes
+// resolve to `invalid_request` at the call site. A present, well-formed value
+// (even a wrong one) returns (true, nil); the hash *value* is then compared in
+// step 2, where a real mismatch is `hash_mismatch`.
+func entityCarriesContentHash(raw cbor.RawMessage) (bool, error) {
+	var m map[string]cbor.RawMessage
+	if err := ecf.Decode(raw, &m); err != nil {
+		return false, err
+	}
+	v, ok := m["content_hash"]
+	if !ok {
+		return false, nil
+	}
+	// CBOR null (0xf6) / undefined (0xf7): present-but-null is not a value.
+	if len(v) == 1 && (v[0] == 0xf6 || v[0] == 0xf7) {
+		return false, nil
+	}
+	return true, nil
 }
