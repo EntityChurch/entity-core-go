@@ -123,10 +123,19 @@ func (h *Handler) handleRegister(ctx context.Context, req *handler.Request) (*ha
 	}
 
 	// V7 §3.2 path-as-resource: pattern derives from
-	// EXECUTE.resource.targets[0] = system/handler/{pattern}.
-	if hctx.Resource == nil || len(hctx.Resource.Targets) != 1 {
-		return handler.NewErrorResponse(400, "ambiguous_resource",
+	// EXECUTE.resource.targets[0] = system/handler/{pattern}. §3245/§3.3 400
+	// row (0.8.2.18) split the two inputs: an ABSENT resource is path_required
+	// (remedy: supply a resource), MORE THAN ONE is ambiguous_resource (remedy:
+	// disambiguate). register derives its install path from targets[0], so it is
+	// an operation whose spec requires a resource — the absent case is
+	// path_required, not the collapsed ambiguous_resource the earlier text used.
+	if hctx.Resource == nil || len(hctx.Resource.Targets) == 0 {
+		return handler.NewErrorResponse(400, "path_required",
 			"register requires resource = system/handler/{pattern}")
+	}
+	if len(hctx.Resource.Targets) > 1 {
+		return handler.NewErrorResponse(400, "ambiguous_resource",
+			"register requires exactly one resource = system/handler/{pattern}")
 	}
 	pattern, ok := patternFromHandlerResource(hctx.Resource.Targets[0])
 	if !ok {
@@ -279,9 +288,16 @@ func (h *Handler) handleUnregister(ctx context.Context, req *handler.Request) (*
 	// V7 §3.2 path-as-resource: pattern derives from
 	// EXECUTE.resource.targets[0] = system/handler/{pattern}. Unregister
 	// takes no params (empty primitive/any per the empty-params wire shape).
-	if hctx.Resource == nil || len(hctx.Resource.Targets) != 1 {
-		return handler.NewErrorResponse(400, "ambiguous_resource",
+	// §3245 covers register and unregister in one sentence, so the 0.8.2.18
+	// split applies here too: ABSENT → path_required, MORE THAN ONE →
+	// ambiguous_resource.
+	if hctx.Resource == nil || len(hctx.Resource.Targets) == 0 {
+		return handler.NewErrorResponse(400, "path_required",
 			"unregister requires resource = system/handler/{pattern}")
+	}
+	if len(hctx.Resource.Targets) > 1 {
+		return handler.NewErrorResponse(400, "ambiguous_resource",
+			"unregister requires exactly one resource = system/handler/{pattern}")
 	}
 	pattern, ok := patternFromHandlerResource(hctx.Resource.Targets[0])
 	if !ok {

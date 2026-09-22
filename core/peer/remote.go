@@ -730,7 +730,7 @@ func (p *Peer) remoteExecute(ctx context.Context, uri, operation string, params 
 	// so the keepalive loop skips its next idle ping.
 	p.markPeerActivity(peerID)
 
-	return decodeExecuteResponse(respEnv)
+	return decodeExecuteResponse(respEnv, p.Store(), p.LocationIndex())
 }
 
 // SendRawFrameTo writes pre-encoded envelope bytes verbatim onto the outbound
@@ -811,7 +811,7 @@ func (p *Peer) RemoteExecuteWithIncluded(ctx context.Context, uri, operation str
 			return nil, fmt.Errorf("remote execute with included to %s (tcp): %w", peerID, err)
 		}
 		p.markPeerActivity(peerID)
-		return decodeExecuteResponse(respEnv)
+		return decodeExecuteResponse(respEnv, p.Store(), p.LocationIndex())
 	case *HTTPConnection:
 		respEnv, err := c.ExecuteWithIncluded(ctx, uri, operation, params, resource, extras)
 		if err != nil {
@@ -819,7 +819,7 @@ func (p *Peer) RemoteExecuteWithIncluded(ctx context.Context, uri, operation str
 			return nil, fmt.Errorf("remote execute with included to %s (http): %w", peerID, err)
 		}
 		p.markPeerActivity(peerID)
-		return decodeExecuteResponse(respEnv)
+		return decodeExecuteResponse(respEnv, p.Store(), p.LocationIndex())
 	default:
 		return nil, fmt.Errorf("remote execute with included to %s: unsupported transport type %T", peerID, conn)
 	}
@@ -1405,7 +1405,18 @@ func parseTCPEndpointURL(endpoint string) (string, error) {
 
 // decodeExecuteResponse converts a wire EXECUTE_RESPONSE envelope into a
 // handler.Response.
-func decodeExecuteResponse(env entity.Envelope) (*handler.Response, error) {
+//
+// E4 / F64 (0.8.2.19): envelope-included ingestion is generalized to ANY
+// received envelope carrying an `included` map — not just inbound EXECUTE
+// (execute.go) and the connect/authenticate response (connection.go). An
+// EXECUTE_RESPONSE is a received envelope: a delegate result or a re-attenuated
+// cap chain arrives here, and its signatures/identities MUST land in the store
+// so a later local chain-walk (MintReattenuated, VerifyChain) resolves instead
+// of hitting chain_unreachable. Soft-fail on ingest error, matching the inbound
+// EXECUTE and connect paths — a signature conflict must not fail an otherwise
+// successful response. cs/li are nil only in unit callers that decode without a
+// peer; ingestion is skipped then.
+func decodeExecuteResponse(env entity.Envelope, cs store.ContentStore, li store.LocationIndex) (*handler.Response, error) {
 	respData, err := types.ExecuteResponseDataFromEntity(env.Root)
 	if err != nil {
 		return nil, fmt.Errorf("decode execute response: %w", err)
@@ -1415,6 +1426,15 @@ func decodeExecuteResponse(env entity.Envelope) (*handler.Response, error) {
 	if len(respData.Result) > 0 {
 		if err := ecf.Decode(respData.Result, &resultEntity); err != nil {
 			return nil, fmt.Errorf("decode result entity: %w", err)
+		}
+	}
+
+	if cs != nil && li != nil && len(env.Included) > 0 {
+		if ingestErr := protocol.IngestEnvelopeSignatures(cs, li, env.Included); ingestErr != nil {
+			// Soft-fail (as the inbound EXECUTE / connect-response paths do):
+			// a received response envelope must not be rejected on a signature
+			// ingest conflict; later chain-walks fail-closed if they needed it.
+			_ = ingestErr
 		}
 	}
 

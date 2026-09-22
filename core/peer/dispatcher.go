@@ -7,6 +7,7 @@ import (
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
 	"go.entitychurch.org/entity-core-go/core/handler"
+	"go.entitychurch.org/entity-core-go/core/protocol"
 	"go.entitychurch.org/entity-core-go/core/store"
 	"go.entitychurch.org/entity-core-go/core/types"
 )
@@ -50,6 +51,14 @@ func (d connectionDispatcher) Execute(ctx context.Context, req handler.ExecuteRe
 	respData, err := types.ExecuteResponseDataFromEntity(env.Root)
 	if err != nil {
 		return handler.ExecuteResponse{}, fmt.Errorf("decode execute response: %w", err)
+	}
+	// E4 / F64 (0.8.2.19): an EXECUTE_RESPONSE is a received envelope — ingest
+	// its included signatures/identities so a later chain-walk resolves. Soft-
+	// fail, matching the inbound EXECUTE and connect-response ingest sinks.
+	if len(env.Included) > 0 {
+		if ingestErr := protocol.IngestEnvelopeSignatures(d.c.peer.Store(), d.c.peer.LocationIndex(), env.Included); ingestErr != nil {
+			_ = ingestErr
+		}
 	}
 	var resultEnt entity.Entity
 	if len(respData.Result) > 0 {

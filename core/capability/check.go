@@ -102,12 +102,37 @@ func CheckPermission(execute types.ExecuteData, cap types.CapabilityTokenData, h
 	return ok
 }
 
+// CheckPermissionRelaxPeers is CheckPermission with Dimension 4 (peers)
+// optionally exempted. It exists for ONE caller — the §6.8 / 0.8.2.19 (E1)
+// outbound sub-dispatch gate: the executing handler's grant decides
+// Dimensions 1-3 (operations, handlers, resources) unconditionally, and a
+// valid credential minted BY the target peer relaxes Dimension 4 — and only
+// Dimension 4 — to the peers that credential covers. When relaxPeers is true
+// the peers dimension is treated as satisfied for the target under test; the
+// other three dimensions are checked exactly as CheckPermission does.
+//
+// This is NOT a general-purpose skip: the relaxation is sound only when the
+// caller has independently verified a target-minted credential that authorizes
+// reaching the target (see core/protocol.presentedAuthorizes). With relaxPeers
+// false it is identical to CheckPermission.
+func CheckPermissionRelaxPeers(execute types.ExecuteData, cap types.CapabilityTokenData, handlerPattern string, localPeerID, granterPeerID crypto.PeerID, relaxPeers bool) bool {
+	_, ok := findMatchingGrant(execute, cap, handlerPattern, localPeerID, granterPeerID, relaxPeers)
+	return ok
+}
+
 // FindMatchingGrant performs the 4-dimensional capability check and returns
 // the first matching grant entry. Handlers that need to inspect the grant's
 // constraints field (e.g., the query handler) use this instead of CheckPermission.
 //
 // granterPeerID applies to peer-relative cap resource patterns (PR-8).
 func FindMatchingGrant(execute types.ExecuteData, cap types.CapabilityTokenData, handlerPattern string, localPeerID, granterPeerID crypto.PeerID) (types.GrantEntry, bool) {
+	return findMatchingGrant(execute, cap, handlerPattern, localPeerID, granterPeerID, false)
+}
+
+// findMatchingGrant is the shared 4-dimensional check body. relaxPeers exempts
+// Dimension 4 for the E1 outbound gate (see CheckPermissionRelaxPeers); every
+// other caller passes false, which is the full four-dimension check.
+func findMatchingGrant(execute types.ExecuteData, cap types.CapabilityTokenData, handlerPattern string, localPeerID, granterPeerID crypto.PeerID, relaxPeers bool) (types.GrantEntry, bool) {
 	// Check temporal validity.
 	now := uint64(time.Now().UnixMilli())
 	if cap.NotBefore != nil && now < *cap.NotBefore {
@@ -151,12 +176,19 @@ func FindMatchingGrant(execute types.ExecuteData, cap types.CapabilityTokenData,
 		// local namespace only, it does not skip the peer dimension. The peer
 		// tested is the request's target peer (extract_peer above), so a
 		// local-scoped grant cannot authorize a foreign namespace.
-		peersScope := types.CapabilityScope{Include: []string{string(localPeerID)}}
-		if grant.Peers != nil {
-			peersScope = *grant.Peers
-		}
-		if !MatchesPeerScope(string(targetPeer), peersScope, localPeerID) {
-			continue
+		//
+		// relaxPeers (0.8.2.19 E1) exempts this dimension for the target under
+		// test, when a valid target-minted credential has been verified to
+		// authorize reaching the target. It relaxes ONLY Dimension 4 — the
+		// three dimensions above still gate.
+		if !relaxPeers {
+			peersScope := types.CapabilityScope{Include: []string{string(localPeerID)}}
+			if grant.Peers != nil {
+				peersScope = *grant.Peers
+			}
+			if !MatchesPeerScope(string(targetPeer), peersScope, localPeerID) {
+				continue
+			}
 		}
 
 		return grant, true

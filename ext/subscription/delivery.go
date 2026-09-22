@@ -102,6 +102,23 @@ func MakeDeliveryFunc(
 			env.Include(ent)
 		}
 
+		// PD-2 / D4 — INTERIM (SUPERSEDED by arch's ruling, OWED fix below).
+		// This path bypasses the makeLocalExecute outbound gate: cross-peer
+		// subscription delivery originates here via DispatchLocalEnvelope and
+		// never reaches the §5.2 check. spec-issue 2026-09-10-a (which framed
+		// this as "the spec names no peers site") was DECLINED: EXTENSION-
+		// SUBSCRIPTION §1.2 line 106 already mandates the deliver_token be
+		// A-ROOTED (rooted at the peer that owns the target inbox), so a
+		// conformant token's chain root granter == the delivery target and E1
+		// (0.8.2.19) relaxes Dimension 4 for it — no new peers value. go's
+		// deliver_token is instead B-ROOTED (CreateDeliveryTokenWithTTL parents
+		// it on the connection grant), non-conformant against §1.2, which is why
+		// the interim bypass "worked". OWED (see the handoff): (1) mint A-rooted
+		// deliver_tokens; (2) route this delivery THROUGH the outbound gate, where
+		// the A-rooted token authorizes it and a non-target-rooted token is
+		// refused (the compose-vs-bypass discriminator). Until then the live
+		// enforcement is subscribe-time in-chain CheckCreatorAuthority +
+		// delivery-time expiry + the receiver's own §5.2 check on receipt.
 		_, err = dispatcher.DispatchLocalEnvelope(ctx, env)
 		return err
 	}

@@ -394,7 +394,7 @@ func TestKeepalivePingPong(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ping execute: %v", err)
 	}
-	resp, err := decodeExecuteResponse(env)
+	resp, err := decodeExecuteResponse(env, nil, nil)
 	if err != nil {
 		t.Fatalf("decode ping response: %v", err)
 	}

@@ -318,6 +318,15 @@ func (d *Dispatcher) makeLocalExecute(parentCtx context.Context, callerCtx *hand
 			// the peer acting as itself and is authorized by the TARGET on
 			// receipt, not pre-gated here (the §5.2 SELF authority case, whose
 			// authority is the caller capability verified at the far end).
+			//
+			// D4 (0.8.2.18) scope note: caller-directed AND continuation
+			// (advance/resume) originations reach this gate — both carry a
+			// HandlerPattern (continuation runs via hctx.Execute, a
+			// makeLocalExecute closure). Handler-AUTONOMOUS subscription
+			// delivery does NOT: it originates via DispatchLocalEnvelope →
+			// RemoteExecute (ext/subscription/delivery.go) and never enters this
+			// closure. Its PD-2 classification is unruled and 3-way divergent —
+			// see the pinned interim + spec-issue 2026-09-10-a at that call site.
 			if callerCtx.HandlerPattern != "" {
 				if code, msg, ok := d.authorizeOutboundSubdispatch(uri, operation, resource, execOpts.Capability, execOpts.IncludedChain, callerCtx.HandlerGrant); !ok {
 					resp, _ := handler.NewErrorResponse(403, code, msg)
