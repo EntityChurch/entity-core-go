@@ -67,9 +67,9 @@ func TestRegDispatchGrammar(t *testing.T) {
 // than passing silently. Each row's path.Match result differs from ours.
 func TestRegDispatchGrammarDivergesFromPathMatch(t *testing.T) {
 	rows := []struct{ pattern, name string }{
-		{"a?c", "abc"},          // path.Match: '?' matches 'b' → true; ours: false
-		{"a[bc]d", "abd"},       // path.Match: '[bc]' matches 'b' → true; ours: false
-		{"x*z", "x/y/z"},        // path.Match: '*' stops at '/' → false; ours: true
+		{"a?c", "abc"},    // path.Match: '?' matches 'b' → true; ours: false
+		{"a[bc]d", "abd"}, // path.Match: '[bc]' matches 'b' → true; ours: false
+		{"x*z", "x/y/z"},  // path.Match: '*' stops at '/' → false; ours: true
 	}
 	for _, r := range rows {
 		pm, err := path.Match(r.pattern, r.name)

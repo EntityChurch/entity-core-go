@@ -176,20 +176,47 @@ type storedEntry struct {
 	Inner     entity.Entity // opaque inner envelope per §9 — never decoded
 	Seq       uint64
 	ExpiresAt uint64 // 0 == no expiry
+	cost      uint64 // §8.2 byte cost = store-entry payload + inner-envelope payload
+}
+
+// entryCost is the §8.2 storage metric for one entry: the payload bytes the
+// relay physically holds — the store-entry entity's data plus the opaque inner
+// envelope's data. Deterministic (ECF byte-identity, V7 §1.5) and dedup-stable,
+// so two hash-equal puts cost the same and the second adds nothing.
+func entryCost(entryEnt, innerEnt entity.Entity) uint64 {
+	return uint64(len(entryEnt.Data)) + uint64(len(innerEnt.Data))
 }
 
 // namespaceStore partitions Mode-S entries per namespace. Insertion order
 // is the only order we expose; the cursor is a monotonic uint64 over the
 // per-namespace seq counter.
 type namespaceStore struct {
-	mu      sync.Mutex
-	nextSeq uint64
-	entries []*storedEntry
-	byHash  map[hash.Hash]*storedEntry
+	mu       sync.Mutex
+	nextSeq  uint64
+	entries  []*storedEntry
+	byHash   map[hash.Hash]*storedEntry
+	curBytes uint64 // §8.2 live byte total for this namespace (sum of entry.cost)
 }
 
 func newNamespaceStore() *namespaceStore {
 	return &namespaceStore{byHash: make(map[hash.Hash]*storedEntry)}
+}
+
+// contains reports whether an entry with this hash is already stored — the
+// §8.2 idempotency gate: a re-put of a hash-equal entry adds no bytes and MUST
+// NOT be refused on a full store.
+func (ns *namespaceStore) contains(h hash.Hash) bool {
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	_, ok := ns.byHash[h]
+	return ok
+}
+
+// bytes returns this namespace's live byte total.
+func (ns *namespaceStore) bytes() uint64 {
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	return ns.curBytes
 }
 
 // put inserts (or replaces by hash) a stored entry; returns its seq.
@@ -201,7 +228,7 @@ func (ns *namespaceStore) put(e *storedEntry) {
 		// the existing seq is preserved so pollers don't see it as a "new"
 		// entry on a later poll. The inner envelope bytes are byte-identical
 		// for hash-equal entries (V7 §1.5 + ECF determinism), so no rewrite
-		// is needed.
+		// is needed — and no bytes are added (§8.2 dedup stability).
 		_ = existing
 		return
 	}
@@ -209,6 +236,7 @@ func (ns *namespaceStore) put(e *storedEntry) {
 	e.Seq = ns.nextSeq
 	ns.entries = append(ns.entries, e)
 	ns.byHash[e.EntryHash] = e
+	ns.curBytes += e.cost
 }
 
 // gc removes entries whose ExpiresAt has passed; called on each :poll and
@@ -224,6 +252,7 @@ func (ns *namespaceStore) gc(now uint64) {
 	for _, e := range ns.entries {
 		if e.ExpiresAt != 0 && e.ExpiresAt <= now {
 			delete(ns.byHash, e.EntryHash)
+			ns.curBytes -= e.cost // §8.2: expiry frees bytes (this is NOT eviction-to-make-room)
 			continue
 		}
 		kept = append(kept, e)
@@ -296,6 +325,8 @@ type Handler struct {
 	dispatcher             OutboundDispatcher // §3.1.1 outbound seam; defaults to noop
 	resolver               InboxRelayResolver // §3.5 declaration resolver; defaults to nop
 	disableDefaultFallback bool               // when true + no declared inbox-relay → no_inbox_relay/502
+	relayStoreRetention    uint64             // §8.1 retention CEILING in ms; 0 = no ceiling (hold to expires_at)
+	maxStorageBytes        uint64             // §8.2 relay-wide store bound in bytes; 0 = unbounded
 }
 
 // NewHandler returns a substrate with empty Mode-S store + default clock /
@@ -346,6 +377,68 @@ func (h *Handler) SetMaxPollLimit(n int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.maxPollLimit = n
+}
+
+// SetRelayStoreRetention sets the §8.1 retention ceiling in milliseconds. A
+// :put whose store-entry.expires_at exceeds now+ceiling (or is null) is
+// CLAMPED to the ceiling, never refused. 0 disables the ceiling (entries are
+// held to their own expires_at). When enabled, the operator MUST also publish
+// it as limits.max_retention_ms in the relay's advertise (§4.1).
+func (h *Handler) SetRelayStoreRetention(ms uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.relayStoreRetention = ms
+}
+
+// SetMaxStorageBytes sets the §8.2 relay-wide store bound in bytes. A :put that
+// would push the live total over the bound is REFUSED with storage_full/507;
+// the relay MUST NOT evict an accepted entry to make room. 0 disables the
+// bound. When enabled, the operator MUST also publish it as
+// limits.max_storage_bytes in the relay's advertise (§4.1).
+func (h *Handler) SetMaxStorageBytes(n uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.maxStorageBytes = n
+}
+
+// HasStoreBounds reports whether any §8 store bound is configured. §4.1 makes
+// publishing the bound in the relay's advertise a MUST *when enforced*, so this
+// is the predicate the peer-builder seam uses to decide whether to auto-publish
+// a self-advertise (a relay with no bound is not obliged to advertise one).
+func (h *Handler) HasStoreBounds() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.relayStoreRetention > 0 || h.maxStorageBytes > 0
+}
+
+// ConfiguredLimits returns the §4.1 advertise limits sub-map reflecting the
+// relay's configured store bounds. Only the fields with a configured value are
+// set (omitempty drops the rest), so the advertise carries max_retention_ms
+// and/or max_storage_bytes exactly when they are enforced — the MUST-when-
+// present rule §4.1 states on each field.
+func (h *Handler) ConfiguredLimits() types.AdvertiseLimits {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return types.AdvertiseLimits{
+		MaxRetentionMs:  h.relayStoreRetention,
+		MaxStorageBytes: h.maxStorageBytes,
+	}
+}
+
+// totalStoredBytes sums the live byte total across every namespace store —
+// the §8.2 bound is relay-wide, not per-namespace.
+func (h *Handler) totalStoredBytes() uint64 {
+	h.mu.RLock()
+	stores := make([]*namespaceStore, 0, len(h.stores))
+	for _, ns := range h.stores {
+		stores = append(stores, ns)
+	}
+	h.mu.RUnlock()
+	var total uint64
+	for _, ns := range stores {
+		total += ns.bytes()
+	}
+	return total
 }
 
 // SetupStore marks the substrate ready. localPeerIDBase58 is the local
@@ -596,6 +689,16 @@ func (h *Handler) handleForward(ctx context.Context, req *handler.Request) (*han
 		NextHop:       nextHopForRelayed,
 		TTLHops:       rd.TTLHops - 1,
 		EnvelopeInner: rd.EnvelopeInner,
+		// §3.1 (SA-PY-30): carry the originator's deadline verbatim onto the
+		// next hop — the same move ttl_hops already makes. Dropping it here
+		// (the pre-v1.3 shape) erases the bound one hop in: a downstream relay
+		// whose forward fails then writes its §6.2.1 fallback with NO deadline,
+		// which is "extend a deadline the originator set" reached by omission.
+		// NOT clamped in transit: this relay's §8.1 ceiling bounds only what IT
+		// stores (queueFallback); clamping a request we merely transit would let
+		// each hop ratchet the deadline down by its own capacity policy and is
+		// indistinguishable at the next hop from the originator asking for less.
+		ExpiresAt: rd.ExpiresAt,
 	}
 	_, err = dispatcher.ForwardToNextHop(ctx, next, relayed, innerEnt)
 	if err == nil {
@@ -816,12 +919,18 @@ func (h *Handler) queueFallback(req *handler.Request, rd types.ForwardRequestDat
 		return "", code, nil // §3.5 + §6.2.1 fail-closed surface (no silent drop)
 	}
 	now := h.now()
+	// D7 (§3.1, v1.3): the relay constructs the fallback store-entry, so it
+	// picks the expiry for a message it holds on the originator's behalf. The
+	// inner envelope's bounds.ttl_absolute is unreachable (§9 opacity), so the
+	// originator's deadline rides the OUTER forward-request as expires_at. Honor
+	// it, CLAMPED to the §8.1 ceiling (clampExpiry never extends and, with no
+	// ceiling, returns it verbatim — a null 0 stays "hold until polled" per v1).
+	expiry := h.clampExpiry(now, rd.ExpiresAt)
 	se := types.StoreEntryData{
 		Namespace:     namespace,   // §6.2.1: resolved target (declared or default)
 		PutBy:         localPeerID, // relay placing on origin's behalf
 		EnvelopeInner: rd.EnvelopeInner,
-		// ExpiresAt: 0 — operator may set a default retention later (§8);
-		// for v1 the fallback queue holds until polled.
+		ExpiresAt:     expiry,
 	}
 	entryEnt, err := se.ToEntity()
 	if err != nil {
@@ -832,7 +941,7 @@ func (h *Handler) queueFallback(req *handler.Request, rd types.ForwardRequestDat
 		EntryEnt:  entryEnt,
 		EntryHash: entryEnt.ContentHash,
 		Inner:     innerEnt,
-		ExpiresAt: 0,
+		ExpiresAt: expiry,
 	}
 	ns := h.namespaceFor(namespace)
 	ns.gc(now)
@@ -886,6 +995,17 @@ func (h *Handler) handlePut(_ context.Context, req *handler.Request) (*handler.R
 		return handler.NewErrorResponse(400, types.RelayErrExpiredOnArrival,
 			"store-entry.expires_at already past at put time")
 	}
+	// §8.1 retention ceiling (v1.3): CLAMP a long or null expires_at to
+	// now+ceiling — never refuse (refusing turns a capacity policy into an
+	// outage the sender cannot distinguish). Done BEFORE the store-entry entity
+	// is built so the clamped deadline is what is hashed, stored, and returned.
+	// clampExpiry is the ONE implementation of the ceiling, shared with the
+	// §6.2.1 fallback store path (queueFallback) — the two producers of the
+	// store shape MUST NOT drift on how the bound is applied.
+	rd.ExpiresAt = h.clampExpiry(now, rd.ExpiresAt)
+	h.mu.RLock()
+	maxBytes := h.maxStorageBytes
+	h.mu.RUnlock()
 	// §9: inner envelope MUST ride in included set, keyed by EnvelopeInner.
 	innerEnt, ok := lookupIncluded(req, rd.EnvelopeInner)
 	if !ok {
@@ -932,9 +1052,25 @@ func (h *Handler) handlePut(_ context.Context, req *handler.Request) (*handler.R
 		EntryHash: entryEnt.ContentHash,
 		Inner:     innerEnt,
 		ExpiresAt: rd.ExpiresAt,
+		cost:      entryCost(entryEnt, innerEnt),
 	}
 	ns := h.namespaceFor(rd.Namespace)
 	ns.gc(now)
+	// §8.2 storage bound (v1.3): a :put that would push the live total over the
+	// advertised max_storage_bytes is REFUSED with storage_full/507, and the
+	// relay MUST NOT evict an accepted entry to make room. The gc above only
+	// removes entries whose own expires_at has passed — never eviction-to-make-
+	// room. A re-put of an already-stored (hash-equal) entry is idempotent and
+	// adds no bytes, so it is NEVER refused on a full store (dedup gate). The
+	// check-then-put is not atomic under concurrent puts; a slight overshoot is
+	// within v1's in-memory-floor posture and never violates the no-evict MUST.
+	if maxBytes > 0 && !ns.contains(se.EntryHash) {
+		if h.totalStoredBytes()+se.cost > maxBytes {
+			return handler.NewErrorResponse(507, types.RelayErrStorageFull,
+				fmt.Sprintf("store full: accepting %d bytes would exceed max_storage_bytes %d (§8.2 — relay refuses, does not evict)",
+					se.cost, maxBytes))
+		}
+	}
 	ns.put(se)
 
 	// Per EXTENSION-RELAY §3.2 + RULING-RELAY-RECEIVE-SIDE-FETCH-SURFACE:
@@ -1112,6 +1248,31 @@ func (h *Handler) now() uint64 {
 	c := h.clock
 	h.mu.RUnlock()
 	return c()
+}
+
+// clampExpiry applies the §8.1 retention ceiling (v1.3) to a store-entry
+// expires_at. It is the single implementation of the ceiling, called from
+// BOTH store-write producers — the direct :put path (handlePut) and the
+// §6.2.1 Mode-F→Mode-S fallback path (queueFallback) — so the bound cannot
+// drift between them. With no ceiling configured it is the identity (a null 0
+// stays unbounded, a set deadline survives verbatim), which is why the D7
+// fallback path can call it unconditionally: it honors the originator's
+// deadline when there is no ceiling, and clamps it down (min, never up) when
+// there is. The clamp only ever LOWERS a future expiry toward now+ceiling
+// (> now), so it can never re-create an expired-on-arrival entry, and it can
+// never EXTEND a deadline the originator set (D7 MUST-NOT-extend).
+func (h *Handler) clampExpiry(now, expiresAt uint64) uint64 {
+	h.mu.RLock()
+	retention := h.relayStoreRetention
+	h.mu.RUnlock()
+	if retention == 0 {
+		return expiresAt
+	}
+	ceiling := now + retention
+	if expiresAt == 0 || expiresAt > ceiling {
+		return ceiling
+	}
+	return expiresAt
 }
 
 // namespaceFor returns (or creates) the namespace store for `ns`.

@@ -162,6 +162,8 @@ func cmdStart(args []string) {
 	files := fs.String("files", "", "expose filesystem directory (format: name:/path:tree/prefix/) — supported by all three impls' --files flag")
 	history := fs.String("history", "*", "history recording pattern (default: \"*\" records all; use \"\" to disable)")
 	clockTickMs := fs.Uint64("clock-tick-ms", 0, "EXTENSION-CLOCK §2.5 tick_interval: emit a periodic clock tick every N ms (Go peers only; 0 = disabled, the spec default). Forwarded as --clock-tick-ms to entity-peer.")
+	relayStoreRetentionMs := fs.Uint64("relay-store-retention-ms", 0, "EXTENSION-RELAY §8.1 (v1.3) Mode-S store retention ceiling in ms (Go relay only; 0 = no ceiling). When set, the relay clamps a long/null store-entry expires_at to now+ceiling and publishes it as limits.max_retention_ms in its advertise. Forwarded as --relay-store-retention-ms to entity-peer.")
+	relayMaxStorageBytes := fs.Uint64("relay-max-storage-bytes", 0, "EXTENSION-RELAY §8.2 (v1.3) Mode-S relay-wide store bound in bytes (Go relay only; 0 = unbounded). A :put over the bound is refused with storage_full/507; published as limits.max_storage_bytes in the advertise. Forwarded as --relay-max-storage-bytes to entity-peer.")
 	remote := fs.String("remote", "", "register a remote peer by name (must already be running)")
 	httpAddr := fs.String("http-addr", "", "additional HTTP-live listener address (e.g. 127.0.0.1:0 for random; empty disables). Chunk D / Amendment 3. Honored by all three: Go -http-addr, Rust --http-listen (`http_listen` in cmd/entity-peer/src/main.rs), Python --http-addr (packages/entity-cli/src/entity_cli/main.py argparse). peer-manager already forwards to both siblings below — the prior \"CLI wiring pending\" note contradicted the forwarding code in this same file."+siblingSurfaceVerifiedAt())
 	httpPath := fs.String("http-path", "/entity", "URL path the HTTP-live listener accepts POSTs at (when --http-addr set)")
@@ -311,19 +313,19 @@ func cmdStart(args []string) {
 
 	switch *peerType {
 	case "go":
-		entry = startGoPeer(*name, *addr, *debug, *openAccess, *files, *history, *storage, *httpAddr, *httpPath, *wsAddr, *wsPath, *keyType, *hashType, registryPeerIDs, *clockTickMs, ka, pollFlags, logFile, seedPolicyFile, lf)
+		entry = startGoPeer(*name, *addr, *debug, *openAccess, *files, *history, *storage, *httpAddr, *httpPath, *wsAddr, *wsPath, *keyType, *hashType, registryPeerIDs, *clockTickMs, *relayStoreRetentionMs, *relayMaxStorageBytes, ka, pollFlags, logFile, seedPolicyFile, lf)
 	case "rust":
 		// [historical] Rust 474bb11 (Chunk D), 58d9188 (Chunk E flags), 0616727 (v7.70 home-format).
 		// Rust ships --ws-listen for NETWORK §6.5.2b; cohort flag string is
 		// --ws-addr at the peer-manager boundary, translated below.
-		entry = startRustPeer(*name, *addr, *debug, *storage, *history, *files, *httpAddr, *httpPath, *wsAddr, *keyType, *hashType, ka, pollFlags, logFile, seedPolicyFile, lf)
+		entry = startRustPeer(*name, *addr, *debug, *storage, *history, *files, *httpAddr, *httpPath, *wsAddr, *keyType, *hashType, *relayStoreRetentionMs, *relayMaxStorageBytes, ka, pollFlags, logFile, seedPolicyFile, lf)
 	case "python":
 		// [historical] Python aligned with Chunk D and 74b3335 (Chunk E flags); Python
 		// ships --key-type from f231406 and --hash-type from ff6d1e2 (v7.70).
 		if *wsAddr != "" {
 			fmt.Fprintf(os.Stderr, "Note: --ws-addr has no Python equivalent; ignored for Python peer %q\n", *name)
 		}
-		entry = startPythonPeer(*name, *addr, *debug, *openAccess, *history, *files, *httpAddr, *httpPath, *keyType, *hashType, ka, pollFlags, logFile, seedPolicyFile, lf)
+		entry = startPythonPeer(*name, *addr, *debug, *openAccess, *history, *files, *httpAddr, *httpPath, *keyType, *hashType, *relayStoreRetentionMs, *relayMaxStorageBytes, ka, pollFlags, logFile, seedPolicyFile, lf)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown peer type: %s (supported: go, rust, python)\n", *peerType)
 		os.Exit(1)
@@ -465,7 +467,7 @@ func (ka keepaliveSpec) args(dash string) []string {
 
 // --- Go peer ---
 
-func startGoPeer(name, addr string, debug, openAccess bool, files, history, storage, httpAddr, httpPath, wsAddr, wsPath, keyType, hashType, inboxRelayRegistry string, clockTickMs uint64, keepalive keepaliveSpec, poll chunkEFlags, logFile, seedPolicyFile string, lf *os.File) *PeerEntry {
+func startGoPeer(name, addr string, debug, openAccess bool, files, history, storage, httpAddr, httpPath, wsAddr, wsPath, keyType, hashType, inboxRelayRegistry string, clockTickMs, relayStoreRetentionMs, relayMaxStorageBytes uint64, keepalive keepaliveSpec, poll chunkEFlags, logFile, seedPolicyFile string, lf *os.File) *PeerEntry {
 	readyFile := filepath.Join(os.TempDir(), fmt.Sprintf("entity-peer-%s-%d.ready", name, time.Now().UnixNano()))
 
 	// Pass -name so the Go peer loads (or creates) its keypair at
@@ -503,6 +505,12 @@ func startGoPeer(name, addr string, debug, openAccess bool, files, history, stor
 	}
 	if history != "" {
 		cmdArgs = append(cmdArgs, "-history", history)
+	}
+	if relayStoreRetentionMs > 0 {
+		cmdArgs = append(cmdArgs, "-relay-store-retention-ms", strconv.FormatUint(relayStoreRetentionMs, 10))
+	}
+	if relayMaxStorageBytes > 0 {
+		cmdArgs = append(cmdArgs, "-relay-max-storage-bytes", strconv.FormatUint(relayMaxStorageBytes, 10))
 	}
 	if clockTickMs > 0 {
 		cmdArgs = append(cmdArgs, "-clock-tick-ms", strconv.FormatUint(clockTickMs, 10))
@@ -653,7 +661,7 @@ func findGoBinary() string {
 
 // --- Rust peer ---
 
-func startRustPeer(name, addr string, debug bool, storage, history, files, httpAddr, httpPath, wsAddr, keyType, hashType string, keepalive keepaliveSpec, poll chunkEFlags, logFile, seedPolicyFile string, lf *os.File) *PeerEntry {
+func startRustPeer(name, addr string, debug bool, storage, history, files, httpAddr, httpPath, wsAddr, keyType, hashType string, relayStoreRetentionMs, relayMaxStorageBytes uint64, keepalive keepaliveSpec, poll chunkEFlags, logFile, seedPolicyFile string, lf *os.File) *PeerEntry {
 	requirePodman()
 	rustDir := findRustDir()
 	rustImage := envOr("ENTITY_RUST_IMAGE", defaultRustImage)
@@ -735,6 +743,16 @@ func startRustPeer(name, addr string, debug bool, storage, history, files, httpA
 		// configurable --ws-path is a Go-side extension. For interop we
 		// just pass --ws-listen.
 		cmdArgs = append(cmdArgs, "--ws-listen", wsAddr)
+	}
+	// EXTENSION-RELAY §8.1/§8.2 (v1.3) store bounds. Rust matched the Go flag
+	// strings deliberately (rust 411bee4 §3), so the forward is mechanical —
+	// double-dash `--flag value` form. Arming a rust relay lets validate-complete.sh
+	// PASS 4 (relay_store_bounds) score it instead of a trivial go-only skip.
+	if relayStoreRetentionMs > 0 {
+		cmdArgs = append(cmdArgs, "--relay-store-retention-ms", strconv.FormatUint(relayStoreRetentionMs, 10))
+	}
+	if relayMaxStorageBytes > 0 {
+		cmdArgs = append(cmdArgs, "--relay-max-storage-bytes", strconv.FormatUint(relayMaxStorageBytes, 10))
 	}
 	// Chunk E flags ([historical] Rust 58d9188 — same flag names as cohort convergence).
 	if poll.pollAddr != "" {
@@ -934,7 +952,7 @@ func discoverPeerID(addr string) string {
 
 // --- Python peer ---
 
-func startPythonPeer(name, addr string, debug, openAccess bool, history, files, httpAddr, httpPath, keyType, hashType string, keepalive keepaliveSpec, poll chunkEFlags, logFile, seedPolicyFile string, lf *os.File) *PeerEntry {
+func startPythonPeer(name, addr string, debug, openAccess bool, history, files, httpAddr, httpPath, keyType, hashType string, relayStoreRetentionMs, relayMaxStorageBytes uint64, keepalive keepaliveSpec, poll chunkEFlags, logFile, seedPolicyFile string, lf *os.File) *PeerEntry {
 	// Identity provisioning. [historical] Python 91f8f77 ships the algorithm-tagged PEM
 	// loader, so the prior Ed448 skip can drop.
 	if err := ensureIdentity(name, keyType); err != nil {
@@ -1014,6 +1032,16 @@ func startPythonPeer(name, addr string, debug, openAccess bool, history, files, 
 	if httpAddr != "" {
 		// Python aligned with --http-addr / --http-path (Amendment 3).
 		cmdArgs = append(cmdArgs, "--http-addr", httpAddr, "--http-path", httpPath)
+	}
+	// EXTENSION-RELAY §8.1/§8.2 (v1.3) store bounds. Python matched the Go flag
+	// strings deliberately (py ROUTING-2026-09-01-b §2.1), so the forward is
+	// mechanical — double-dash `--flag value` form. Arming a python relay lets
+	// validate-complete.sh PASS 4 (relay_store_bounds) score it.
+	if relayStoreRetentionMs > 0 {
+		cmdArgs = append(cmdArgs, "--relay-store-retention-ms", strconv.FormatUint(relayStoreRetentionMs, 10))
+	}
+	if relayMaxStorageBytes > 0 {
+		cmdArgs = append(cmdArgs, "--relay-max-storage-bytes", strconv.FormatUint(relayMaxStorageBytes, 10))
 	}
 	// Chunk E flags ([historical] Python 74b3335 — same flag names as cohort convergence).
 	if poll.pollAddr != "" {

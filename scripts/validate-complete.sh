@@ -381,6 +381,13 @@ T4_UNSATISFIABLE="serving_mode.content_get_out_of_scope_404,serving_mode.content
 # of scoring the fixture's.
 PASS3_ONLY="registry_issuer,substitute"
 
+# relay_store_bounds is EXTENSION-RELAY §8.1 (v1.3), default-off: a relay with no
+# configured retention ceiling enforces none, so these checks SKIP could-not-look
+# against the bare pass-1 target. They are scored in PASS 4 against a peer started
+# with --relay-store-retention-ms. Excluding here keeps pass 1's zero-skip bar
+# honest — the surface is UNARMED on this target, not covered.
+PASS4_ONLY="relay_store_bounds"
+
 echo "==> PASS 1/2 — every surface, closure-of-signed-root scope"
 set +e
 go run ./cmd/validate-peer \
@@ -390,7 +397,7 @@ go run ./cmd/validate-peer \
     "${PI_ARGS_VALIDATE[@]}" \
     "${HASH_ARGS_VALIDATE[@]}" \
     -keepalive-envelope-ms 6000 \
-    -exclude "$T4_UNSATISFIABLE,$PASS3_ONLY" \
+    -exclude "$T4_UNSATISFIABLE,$PASS3_ONLY,$PASS4_ONLY" \
     ${EXTRA:-}
 RC1=$?
 set -e
@@ -424,7 +431,7 @@ go run ./cmd/validate-peer \
     "${HASH_ARGS_VALIDATE[@]}" \
     -keepalive-envelope-ms 6000 \
     -profile core \
-    -exclude "$T4_UNSATISFIABLE,$PASS3_ONLY" \
+    -exclude "$T4_UNSATISFIABLE,$PASS3_ONLY,$PASS4_ONLY" \
     ${EXTRA:-}
 RC1B=$?
 set -e
@@ -519,9 +526,42 @@ if [ "${KEEP:-0}" != "1" ]; then
     go run ./cmd/peer-manager stop "$REG_TARGET" >/dev/null 2>&1 || true
 fi
 
+# PASS 4 — relay_store_bounds against a peer armed with a §8.1 retention ceiling.
+#
+# EXTENSION-RELAY §8.1 (v1.3) is default-off, so these checks SKIP could-not-look
+# against every pass-1 target; they are scored here against a peer started with
+# --relay-store-retention-ms. RELAY v1.3 was Go-first, but rust (411bee4) and py
+# (ROUTING-2026-09-01-b) have now landed it and matched the Go flag strings, and
+# peer-manager forwards --relay-store-retention-ms to all three runners, so this
+# pass now GATES all three. Formerly `if TYPE = go`: that exit-0-for-rust/py was a
+# fail-open control — a pass that never ran reported the same exit 0 as a pass
+# (rust 411bee4 §4). An armed peer that does not clamp FAILs (not SKIPs), which is
+# the honest signal for a regression or a not-yet-built surface.
+RC4=0
 echo
-echo "PASS 0 exit $RC0 (conformance corpora, static) · PASS 0b exit $RC0B (conformance register, static) · PASS 1 exit $RC1 (all surfaces, closure scope) · PASS 1b exit $RC1B (core profile, same target) · PASS 2 exit $RC2 (serving_mode, namespace scope) · PASS 3 exit $RC3 (registry_issuer, registry posture)"
-echo "Zero failures AND zero skips is the bar for passes 1, 2 and 3 — read each COVERAGE"
+echo "==> PASS 4/4 — relay_store_bounds against a $TYPE peer with a §8.1 retention ceiling (default-off)"
+RSB_TARGET="vcrsb-${STAMP}"
+# A comfortable ceiling (1h): well above the check's runtime so the clamped
+# entries do not expire mid-check, and well below the ~100y far probe so the
+# clamp is unmistakable.
+RSB_ADDR=$(go run ./cmd/peer-manager start --name "$RSB_TARGET" --type "$TYPE" --debug \
+    --relay-store-retention-ms 3600000 \
+    "${HASH_ARGS_PEER[@]}" \
+    | sed -n 's/.*addr=\([^ ]*\).*/\1/p')
+set +e
+go run ./cmd/validate-peer \
+    -addr "$RSB_ADDR" \
+    "${HASH_ARGS_VALIDATE[@]}" \
+    -category relay_store_bounds
+RC4=$?
+set -e
+if [ "${KEEP:-0}" != "1" ]; then
+    go run ./cmd/peer-manager stop "$RSB_TARGET" >/dev/null 2>&1 || true
+fi
+
+echo
+echo "PASS 0 exit $RC0 (conformance corpora, static) · PASS 0b exit $RC0B (conformance register, static) · PASS 1 exit $RC1 (all surfaces, closure scope) · PASS 1b exit $RC1B (core profile, same target) · PASS 2 exit $RC2 (serving_mode, namespace scope) · PASS 3 exit $RC3 (registry_issuer, registry posture) · PASS 4 exit $RC4 (relay_store_bounds, §8.1 armed)"
+echo "Zero failures AND zero skips is the bar for passes 1, 2, 3 and 4 — read each COVERAGE"
 echo "block for anything that did not run, and close it rather than allowlisting it."
 echo
 echo "PASS 1b is the one pass that legitimately reports skips (~100), and the distinction"
@@ -529,5 +569,5 @@ echo "matters: they are PROFILE-KEYED skips — the extension surface that sits 
 echo "v7.72 §9.0 core tier by definition, exempted in HasFailures via isProfileKeyedSkip,"
 echo "NOT by an -allow-skip allowlist. A skip there that is not profile-keyed still fails"
 echo "the pass. Read 1b's exit code, not its skip count."
-[ "$RC0" -eq 0 ] && [ "$RC0B" -eq 0 ] && [ "$RC1" -eq 0 ] && [ "$RC1B" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 0 ] || exit 1
+[ "$RC0" -eq 0 ] && [ "$RC0B" -eq 0 ] && [ "$RC1" -eq 0 ] && [ "$RC1B" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 0 ] && [ "$RC4" -eq 0 ] || exit 1
 exit 0

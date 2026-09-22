@@ -73,7 +73,7 @@ func TestBuiltinRange(t *testing.T) {
 
 	t.Run("huge-n-exhausts-budget-not-memory", func(t *testing.T) {
 		apply := mustE(types.ComputeApplyData{Path: BuiltinRange, Operation: "eval",
-			Args: map[string]hash.Hash{"n": litHash(t, cs, int64(1) << 40)}}.ToEntity())
+			Args: map[string]hash.Hash{"n": litHash(t, cs, int64(1)<<40)}}.ToEntity())
 		_, err := Evaluate(apply, NewScope(), NewBudget(1000, 64), ctx)
 		mustComputeErr(t, err, ErrBudgetExhausted, "range(2^40)")
 	})

@@ -707,6 +707,46 @@ func TestForward_IntermediateHop_DecrementsTTL(t *testing.T) {
 	}
 }
 
+// §3.1 (SA-PY-30): the originator's deadline rides the onward hop VERBATIM.
+// Dropping it here (the pre-v1.3 shape — five fields, no ExpiresAt) erased the
+// bound one hop in: a downstream relay whose forward fails then writes its
+// §6.2.1 fallback with no deadline, extending the originator's bound by omission.
+// It must NOT be clamped in transit either — this relay's §8.1 ceiling bounds
+// only what IT stores, not what it transits. Both siblings (rust 411bee4, py)
+// carry it verbatim; this is the go teeth for the drop go had shipped.
+func TestForward_IntermediateHop_CarriesExpiresAt(t *testing.T) {
+	h := newTestHandler(t)
+	disp := &fakeDispatcher{}
+	h.SetDispatcher(disp)
+
+	hctx := newTestContext()
+	inner := makeInnerEnvelope(t, "deadline-payload")
+	hctx.Included[inner.ContentHash] = inner
+
+	// A far-future deadline the originator set, well above any §8.1 ceiling the
+	// transiting relay might carry — so a "verbatim" carry and a "clamped in
+	// transit" carry are distinguishable.
+	const originatorDeadline = uint64(4_102_444_800_000) // 2100-01-01, ms
+	params, _ := types.ForwardRequestData{
+		Destination:   tFakeDest,
+		NextHop:       tFakeRelay, // intermediate — next_hop != destination
+		TTLHops:       5,
+		EnvelopeInner: inner.ContentHash,
+		ExpiresAt:     originatorDeadline,
+	}.ToEntity()
+	resp, _ := h.Handle(context.Background(), &handler.Request{
+		Operation: OpForward, Params: params, Context: hctx,
+	})
+	if resp.Status != 200 {
+		t.Fatalf("status: want 200, got %d (code=%q)", resp.Status, decodeErrCode(t, resp))
+	}
+	if disp.forwardedReq.ExpiresAt != originatorDeadline {
+		t.Fatalf("onward ExpiresAt: want %d carried verbatim, got %d — the originator's deadline was %s",
+			originatorDeadline, disp.forwardedReq.ExpiresAt,
+			map[bool]string{true: "DROPPED (pre-v1.3 SA-PY-30 shape)", false: "clamped in transit"}[disp.forwardedReq.ExpiresAt == 0])
+	}
+}
+
 // bindRoute persists a route entity and binds it under the local route
 // subtree at RoutePath(hash). Used by the table-read resolver tests to
 // hand-populate the table (EXTENSION-ROUTE producers are deferred per the
@@ -1690,4 +1730,255 @@ func decodeErrCode(t *testing.T, resp *handler.Response) string {
 		t.Fatalf("decode error: %v", err)
 	}
 	return ed.Code
+}
+
+// -----------------------------------------------------------------------
+// v1.3 store bounds — §8.1 retention ceiling (clamp), §8.2 storage full
+// (refuse, no evict). D4/D5/D7 of PROPOSAL-RELAY-COMPLETE-THE-MODE-SET.
+// -----------------------------------------------------------------------
+
+const tFrozenNow = uint64(1_730_000_000_000)
+
+// putEntry drives one :put and returns the response. Payload distinguishes
+// entries by content hash (and byte cost).
+func putEntry(t *testing.T, h *Handler, hctx *handler.HandlerContext, ns, payload string, expiresAt uint64) *handler.Response {
+	t.Helper()
+	inner := makeInnerEnvelope(t, payload)
+	hctx.Included[inner.ContentHash] = inner
+	params, err := types.StoreEntryData{
+		Namespace:     ns,
+		PutBy:         tFakeRelay,
+		EnvelopeInner: inner.ContentHash,
+		ExpiresAt:     expiresAt,
+	}.ToEntity()
+	if err != nil {
+		t.Fatalf("build store-entry: %v", err)
+	}
+	resp, err := h.Handle(context.Background(), &handler.Request{
+		Path: HandlerPattern, Operation: OpPut, Params: params, Context: hctx,
+	})
+	if err != nil {
+		t.Fatalf("Handle put: %v", err)
+	}
+	return resp
+}
+
+func putResultExpiry(t *testing.T, resp *handler.Response) uint64 {
+	t.Helper()
+	res, err := types.PutResultDataFromEntity(resp.Result)
+	if err != nil {
+		t.Fatalf("decode put-result: %v", err)
+	}
+	return res.ExpiresAt
+}
+
+// §8.1: a far-future expires_at is CLAMPED to now+ceiling, not refused.
+func TestPut_RetentionClamp_NonNullExpiresAtClamped(t *testing.T) {
+	h := newTestHandler(t)
+	h.SetRelayStoreRetention(60_000)
+	ceiling := tFrozenNow + 60_000
+
+	resp := putEntry(t, h, newTestContext(), tFakeDest, "clamp-me", tFrozenNow+10*3600*1000)
+	if resp.Status != 200 {
+		t.Fatalf("clamp must ACCEPT (never refuse), got %d", resp.Status)
+	}
+	if got := putResultExpiry(t, resp); got != ceiling {
+		t.Fatalf("expires_at: want clamped to ceiling %d, got %d", ceiling, got)
+	}
+}
+
+// §8.1: a NULL expires_at (0) is set to the ceiling — min(x, ceiling) has no
+// arm for null, so it is stated normatively and pinned here.
+func TestPut_RetentionClamp_NullExpiresAtSetToCeiling(t *testing.T) {
+	h := newTestHandler(t)
+	h.SetRelayStoreRetention(60_000)
+	ceiling := tFrozenNow + 60_000
+
+	resp := putEntry(t, h, newTestContext(), tFakeDest, "null-expiry", 0)
+	if resp.Status != 200 {
+		t.Fatalf("null-expiry clamp must ACCEPT, got %d", resp.Status)
+	}
+	if got := putResultExpiry(t, resp); got != ceiling {
+		t.Fatalf("null expires_at: want set to ceiling %d, got %d", ceiling, got)
+	}
+}
+
+// §8.1: an expires_at already under the ceiling is left UNCHANGED — the clamp
+// is min(x, ceiling), not a rewrite.
+func TestPut_RetentionClamp_ShortExpiresAtUnchanged(t *testing.T) {
+	h := newTestHandler(t)
+	h.SetRelayStoreRetention(60_000)
+	want := tFrozenNow + 10_000 // < ceiling
+
+	resp := putEntry(t, h, newTestContext(), tFakeDest, "short", want)
+	if resp.Status != 200 {
+		t.Fatalf("status: want 200, got %d", resp.Status)
+	}
+	if got := putResultExpiry(t, resp); got != want {
+		t.Fatalf("under-ceiling expires_at must be unchanged: want %d, got %d", want, got)
+	}
+}
+
+// §8.1 negative control: with NO ceiling configured, a far-future expires_at
+// survives verbatim — proving the clamp is what changes it above.
+func TestPut_RetentionClamp_DisabledLeavesExpiryVerbatim(t *testing.T) {
+	h := newTestHandler(t) // no SetRelayStoreRetention
+	want := tFrozenNow + 10*3600*1000
+
+	resp := putEntry(t, h, newTestContext(), tFakeDest, "clamp-me", want)
+	if got := putResultExpiry(t, resp); got != want {
+		t.Fatalf("no ceiling: expires_at must be verbatim %d, got %d", want, got)
+	}
+}
+
+// §8.2: a :put that would exceed max_storage_bytes is REFUSED with
+// storage_full/507, and the already-accepted entry is NOT evicted.
+func TestPut_StorageFull_RefusesAndDoesNotEvict(t *testing.T) {
+	// Measure the exact byte cost of entry A on an unbounded handler.
+	probe := newTestHandler(t)
+	putEntry(t, probe, newTestContext(), tFakeDest, "entry-A", 0)
+	costA := probe.totalStoredBytes()
+	if costA == 0 {
+		t.Fatal("probe measured zero bytes — cost metric is broken")
+	}
+
+	h := newTestHandler(t)
+	h.SetMaxStorageBytes(costA) // room for exactly A
+
+	if r := putEntry(t, h, newTestContext(), tFakeDest, "entry-A", 0); r.Status != 200 {
+		t.Fatalf("first put (fits) must be 200, got %d", r.Status)
+	}
+	// B would push the total over the bound.
+	rB := putEntry(t, h, newTestContext(), tFakeDest, "entry-B-different-payload", 0)
+	if rB.Status != 507 {
+		t.Fatalf("over-bound put: want 507, got %d", rB.Status)
+	}
+	if code := decodeErrCode(t, rB); code != types.RelayErrStorageFull {
+		t.Fatalf("code: want %q, got %q", types.RelayErrStorageFull, code)
+	}
+	// MUST NOT evict A to make room for B.
+	if h.totalStoredBytes() != costA {
+		t.Fatalf("no-evict: total bytes changed from %d to %d after a refused put", costA, h.totalStoredBytes())
+	}
+}
+
+// §8.2 dedup gate: a re-put of an already-stored (hash-equal) entry adds no
+// bytes and MUST NOT be refused on a full store.
+func TestPut_StorageFull_DedupReputNotRefused(t *testing.T) {
+	probe := newTestHandler(t)
+	putEntry(t, probe, newTestContext(), tFakeDest, "entry-A", 0)
+	costA := probe.totalStoredBytes()
+
+	h := newTestHandler(t)
+	h.SetMaxStorageBytes(costA) // exactly full after A
+
+	if r := putEntry(t, h, newTestContext(), tFakeDest, "entry-A", 0); r.Status != 200 {
+		t.Fatalf("first put must be 200, got %d", r.Status)
+	}
+	// Identical entry again — idempotent, not a new allocation.
+	if r := putEntry(t, h, newTestContext(), tFakeDest, "entry-A", 0); r.Status != 200 {
+		t.Fatalf("idempotent re-put on a full store must be 200, got %d", r.Status)
+	}
+	if h.totalStoredBytes() != costA {
+		t.Fatalf("dedup re-put must not add bytes: want %d, got %d", costA, h.totalStoredBytes())
+	}
+}
+
+// -----------------------------------------------------------------------
+// D7 (§3.1, v1.3): forward-request.expires_at reaches the §6.2.1 fallback
+// store-entry, CLAMPED to the retention ceiling, never extended. The
+// fallback path (queueFallback) is the SECOND producer of the store shape;
+// these pin that it shares handlePut's ceiling via clampExpiry.
+// -----------------------------------------------------------------------
+
+// forwardFallbackExpiry forwards to an unreachable destination (forcing the
+// §6.2.1 fallback) carrying the given outer forward-request expires_at, then
+// reads back the stored fallback entry's expires_at. Clock frozen at tFrozenNow.
+func forwardFallbackExpiry(t *testing.T, h *Handler, fwdExpiresAt uint64) uint64 {
+	t.Helper()
+	h.SetDispatcher(&fakeDispatcher{deliverErr: ErrDestinationUnreachable})
+	cs, li := sharedStores()
+	hctx := newSharedContext(cs, li)
+	inner := makeInnerEnvelope(t, "fallback-expiry-payload")
+	hctx.Included[inner.ContentHash] = inner
+	params, _ := types.ForwardRequestData{
+		Destination:   tFakeDest,
+		NextHop:       tFakeDest,
+		TTLHops:       3,
+		EnvelopeInner: inner.ContentHash,
+		ExpiresAt:     fwdExpiresAt,
+	}.ToEntity()
+	if resp, _ := h.Handle(context.Background(), &handler.Request{
+		Operation: OpForward, Params: params, Context: hctx,
+	}); resp.Status != 200 {
+		t.Fatalf("forward setup: want 200 (queued-fallback), got %d", resp.Status)
+	}
+	pollParams, _ := types.PollRequestData{Namespace: tFakeDest}.ToEntity()
+	pollResp, _ := h.Handle(context.Background(), &handler.Request{
+		Operation: OpPoll, Params: pollParams, Context: newSharedContext(cs, li),
+	})
+	pr, _ := types.PollResultDataFromEntity(pollResp.Result)
+	if len(pr.Entries) != 1 {
+		t.Fatalf("poll: want 1 fallback entry, got %d", len(pr.Entries))
+	}
+	entryEnt, _, ok := h.EntryByHash(tFakeDest, pr.Entries[0])
+	if !ok {
+		t.Fatal("EntryByHash: fallback entry not resolvable")
+	}
+	se, err := types.StoreEntryDataFromEntity(entryEnt)
+	if err != nil {
+		t.Fatalf("decode fallback store-entry: %v", err)
+	}
+	return se.ExpiresAt
+}
+
+// D7 + §8.1: a forward-request whose expires_at is beyond the ceiling is stored
+// on the fallback path CLAMPED to now+ceiling (the fallback inherits handlePut's
+// clamp — it was ExpiresAt: 0 unconditionally before v1.3).
+func TestForward_Fallback_ExpiresAtClamped(t *testing.T) {
+	h := newTestHandler(t)
+	h.SetRelayStoreRetention(60_000)
+	ceiling := tFrozenNow + 60_000
+
+	if got := forwardFallbackExpiry(t, h, tFrozenNow+10*3600*1000); got != ceiling {
+		t.Fatalf("fallback expires_at: want clamped to ceiling %d, got %d", ceiling, got)
+	}
+}
+
+// §8.1 null arm on the fallback path: a forward-request with NO expires_at (0)
+// takes the ceiling — the relay picks the deadline for a message it holds on
+// the originator's behalf, and a configured ceiling bounds it.
+func TestForward_Fallback_NullExpiresAtTakesCeiling(t *testing.T) {
+	h := newTestHandler(t)
+	h.SetRelayStoreRetention(60_000)
+	ceiling := tFrozenNow + 60_000
+
+	if got := forwardFallbackExpiry(t, h, 0); got != ceiling {
+		t.Fatalf("fallback null expires_at: want set to ceiling %d, got %d", ceiling, got)
+	}
+}
+
+// D7 honor + MUST-NOT-extend: an originator deadline UNDER the ceiling survives
+// verbatim — the relay honors it and does not stretch it to the ceiling.
+func TestForward_Fallback_HonorsOriginatorDeadlineNoExtend(t *testing.T) {
+	h := newTestHandler(t)
+	h.SetRelayStoreRetention(60_000)
+	want := tFrozenNow + 10_000 // < ceiling
+
+	if got := forwardFallbackExpiry(t, h, want); got != want {
+		t.Fatalf("fallback under-ceiling expires_at must be honored (never extended): want %d, got %d", want, got)
+	}
+}
+
+// Negative control: with NO ceiling, the fallback preserves v1.2 behaviour —
+// a null expires_at stays 0 (held until polled), and an originator deadline is
+// honored verbatim. Proves the clamp above is what changes the value.
+func TestForward_Fallback_NoCeilingHonorsVerbatim(t *testing.T) {
+	if got := forwardFallbackExpiry(t, newTestHandler(t), 0); got != 0 {
+		t.Fatalf("no ceiling, null expires_at: want 0 (hold until polled), got %d", got)
+	}
+	want := tFrozenNow + 10_000
+	if got := forwardFallbackExpiry(t, newTestHandler(t), want); got != want {
+		t.Fatalf("no ceiling, set expires_at: want verbatim %d, got %d", want, got)
+	}
 }

@@ -35,8 +35,8 @@ const (
 	// MUST be system/registry/resolution-result on the wire with flat data
 	// fields — MUST NOT wrap under system/protocol/status. The Go const name
 	// is retained as ResolveResult for source-compat; the wire string moved.
-	TypeRegistryResolveResult             = "system/registry/resolution-result"
-	TypeRegistryInvalidateCacheRequest    = "system/registry/invalidate-cache-request"
+	TypeRegistryResolveResult          = "system/registry/resolution-result"
+	TypeRegistryInvalidateCacheRequest = "system/registry/invalidate-cache-request"
 	// TypeRegistrySetResolverConfigRequest is the §4.3 [v1.18] wrapper for
 	// set-resolver-config: it carries the resolver-config entity plus the
 	// operator's acknowledge_name_disclosure act. The acknowledgement rides
@@ -44,7 +44,7 @@ const (
 	// whoever writes the bytes (so a distribution could set it) and would move
 	// the content-addressed resolver-config's hash to carry an unsecurable
 	// claim (§4.3 [MUST]). get-resolver-config takes no params (§3.2 empty).
-	TypeRegistrySetResolverConfigRequest = "system/registry/set-resolver-config-request"
+	TypeRegistrySetResolverConfigRequest  = "system/registry/set-resolver-config-request"
 	TypeRegistryLocalNameBindRequest      = "system/registry/local-name/bind-request"
 	TypeRegistryLocalNameBindResult       = "system/registry/local-name/bind-result"
 	TypeRegistryLocalNameUnbindRequest    = "system/registry/local-name/unbind-request"

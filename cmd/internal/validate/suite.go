@@ -662,6 +662,11 @@ func (s *ValidationSuite) Run(ctx context.Context) (*Report, error) {
 	// fallback) is exercised by the unit tests in ext/relay; live cross-
 	// peer dispatch needs an OutboundDispatcher wired (R5+).
 	runCat(catRelay, func() []CheckResult { return runRelay(ctx, client) })
+	// EXTENSION-RELAY §8.1 (v1.3) retention-ceiling wire checks. Posture-gated
+	// like registry_issuer: SKIP could-not-look against a bare peer, scored in
+	// their own validate-complete.sh pass against a --relay-store-retention-ms
+	// peer.
+	runCat(catRelayStoreBounds, func() []CheckResult { return runRelayStoreBounds(ctx, client) })
 
 	// Category 38: Tier-1 publish→fetch end-to-end over http-poll
 	// (`docs/RELEASE-READINESS.md` Thread B + arch three-tier reframe).
@@ -954,6 +959,8 @@ func (s *ValidationSuite) RunCategory(ctx context.Context, category string) (*Re
 		report.AddAll(runSubstitute(ctx, client))
 	case catRelay:
 		report.AddAll(runRelay(ctx, client))
+	case catRelayStoreBounds:
+		report.AddAll(runRelayStoreBounds(ctx, client))
 	case catPublishFetchHTTPPoll:
 		report.AddAll(runPublishFetchHTTPPoll(ctx))
 	case catPeerIssued:

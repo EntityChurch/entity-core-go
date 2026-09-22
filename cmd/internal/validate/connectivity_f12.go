@@ -148,6 +148,11 @@ func runHandshakeProofChecks(ctx context.Context, addr string) []CheckResult {
 	// sent, so there is no consumed nonce to attribute a close to.
 	checks = append(checks, probePreHelloAuthenticate(ctx, addr))
 
+	// §4.7 connection-error rows 7/8/9 (G-28). See connectivity_conn_errors.go
+	// for the row-by-row disposition and the four rows routed as spec-issue
+	// 2026-09-01-b rather than gated here.
+	checks = append(checks, runConnectErrorChecks(ctx, addr)...)
+
 	return checks
 }
 

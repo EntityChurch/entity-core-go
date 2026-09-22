@@ -171,12 +171,23 @@ const (
 //     The actual inner-envelope ENTITY rides in the V7 envelope's
 //     `included` set keyed by EnvelopeInner; the handler resolves it via
 //     hctx.Included[EnvelopeInner].
+//   - ExpiresAt: integer ms since epoch; 0 == null (omitempty drops). D7
+//     (§3.1, v1.3): the originator's deadline for the message. The inner
+//     envelope's bounds.ttl_absolute is unreachable to the relay under §9
+//     opacity, so on the §6.2.1 store fallback — where the relay itself
+//     constructs the store-entry — this outer copy is what the relay honors
+//     as the fallback store-entry's expiry, CLAMPED to the retention ceiling
+//     (§8.1). A relay MUST NOT extend a deadline the originator set. This is
+//     the same move ttl_hops makes: the outer envelope carries its own copy
+//     of a bounding concept because the inner one is opaque. A request
+//     without it encodes byte-identically to v1.2 (omitempty).
 type ForwardRequestData struct {
 	Destination   string    `cbor:"destination"`
 	Route         []string  `cbor:"route,omitempty"`
 	NextHop       string    `cbor:"next_hop,omitempty"`
 	TTLHops       uint32    `cbor:"ttl_hops"`
 	EnvelopeInner hash.Hash `cbor:"envelope_inner"`
+	ExpiresAt     uint64    `cbor:"expires_at,omitempty"`
 }
 
 func (d ForwardRequestData) ToEntity() (entity.Entity, error) {
@@ -251,8 +262,14 @@ func StoreEntryDataFromEntity(e entity.Entity) (StoreEntryData, error) {
 // advertise entity MUST carry a `limits` field — its sub-fields are the
 // optional bits.
 type AdvertiseLimits struct {
-	MaxEnvelopeSize  uint64 `cbor:"max_envelope_size,omitempty"`
-	MaxStorageBytes  uint64 `cbor:"max_storage_bytes,omitempty"`
+	MaxEnvelopeSize uint64 `cbor:"max_envelope_size,omitempty"`
+	MaxStorageBytes uint64 `cbor:"max_storage_bytes,omitempty"`
+	// MaxRetentionMs is the §8.1 retention CEILING (v1.3): how long a Mode-S
+	// relay will hold an entry. §4.1 [MUST when present]: a relay enforcing a
+	// ceiling MUST publish it here; absent means the relay declares no ceiling
+	// (NOT unbounded — §8.1). Duration is the number a sender/inbox-relay
+	// chooser depends on and cannot otherwise learn.
+	MaxRetentionMs   uint64 `cbor:"max_retention_ms,omitempty"`
 	ForwardRateLimit uint32 `cbor:"forward_rate_limit,omitempty"`
 }
 

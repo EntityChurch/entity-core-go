@@ -106,6 +106,8 @@ func main() {
 	publishPrefix := flag.String("publish-prefix", publishedroot.PrefixForLocalPeer, "EXTENSION-TREE §3.3a: the subtree --publish-root commits to, and the `prefix` the published root declares. Keys in the published trie are relative to this, and the served closure covers only what is under it — so this is how a peer publishes a SUBSET of its tree rather than all of it, which is the common deployment. Three admissible shapes (§3.3): a peer-relative subtree (\"system/\", the default; \"system/content/\" to publish only shareable content), the peer-qualified \"/{peer_id}/\" (this peer's whole namespace), or \"/\" (the universal tree — every peer-id this peer holds). MUST end with \"/\". Entity content hashes are path-independent, so narrowing the prefix changes which entities are reachable, never their hashes; the trie ROOT does change, because keys are relative to the prefix.")
 	discoveryAnnounce := flag.String("discovery-announce", "", "EXTENSION-DISCOVERY §3: announce self on the mDNS backend (`_entity-core._udp.local.`). Value is the transport profile_ref to advertise (the {profile-id} under system/peer/transport/{peer}/...). Empty disables. Requires --addr (TCP profile) or --http-addr (HTTP-live profile) to provide a reachable port.")
 	inboxRelayRegistry := flag.String("inbox-relay-registry", "", "EXTENSION-RELAY §3.5 REGISTRY-served inbox-relay decl chain: comma-separated peer-ids to consult (in order) before the local-tree fallback. Each registry peer must have a published transport profile in this peer's tree so the remote tree:get can dial. Empty disables (local-tree only).")
+	relayStoreRetentionMs := flag.Uint64("relay-store-retention-ms", 0, "EXTENSION-RELAY §8.1 (v1.3) — Mode-S retention CEILING in milliseconds. A :put whose store-entry.expires_at exceeds now+ceiling (or is null) is CLAMPED to the ceiling, never refused. 0 = no ceiling (hold to the entry's own expires_at). When set, also advertise it as limits.max_retention_ms (§4.1).")
+	relayMaxStorageBytes := flag.Uint64("relay-max-storage-bytes", 0, "EXTENSION-RELAY §8.2 (v1.3) — Mode-S relay-wide store bound in bytes. A :put that would push the live total over the bound is REFUSED with storage_full/507; the relay MUST NOT evict an accepted entry to make room. 0 = unbounded. When set, also advertise it as limits.max_storage_bytes (§4.1). This is the operator knob the storage-full conformance row requires.")
 	peerIssuedRegistry := flag.String("peer-issued-registry", "", "PROPOSAL-PEER-ISSUED-REGISTRY-BACKEND §2 — pin one or more peer-issued registries (comma-separated, each `peer_id@tree_url_prefix`). The peer-id MUST be identity-multihash form (ed25519) so the receiver can derive the registry's pinned key. URL prefix is the http-poll TreeURLPrefix the registry serves at; allow http:// requires --substitute-allow-http. Empty disables (no peer-issued backend registered). The substrate IS opt-in / default-off per handoff §1.1 — a common peer's footprint is unchanged.")
 	issuerPolicyMode := flag.String("issuer-policy-mode", "", "EXTENSION-REGISTRY §6a.9 — run this peer as a peer-issued live registry. Value selects the issuer-policy mode: `open` (any layer-1-valid request is signed; first-come-first-serve), `allowlist` (requires --issuer-policy-allowlist), `manual` (requests queue as pending_review). Empty disables — the register-request handler is not wired and publishers must use the curated `registry-issue-binding` CLI. `domain-control` is rejected (deferred per §6a.10).")
 	issuerPolicyAllowlist := flag.String("issuer-policy-allowlist", "", "EXTENSION-REGISTRY §6a.9.1 — comma-separated target_peer_ids permitted to register when --issuer-policy-mode=allowlist. Ignored in other modes.")
@@ -675,6 +677,15 @@ func main() {
 	// mDNS layer logs the issue; user can still :scan via dispatch.
 	discoveryH.SetupStore(discovery.NewPeerBinder(p.Store(), p.LocationIndex()))
 	relayH.SetupStore(string(p.PeerID()))
+	// EXTENSION-RELAY §8.1/§8.2 (v1.3): the Mode-S store bounds. Both default
+	// to 0 (no ceiling / unbounded). --relay-max-storage-bytes is the operator
+	// knob the §8.2 storage-full conformance row needs to reach the bound.
+	if *relayStoreRetentionMs > 0 {
+		relayH.SetRelayStoreRetention(*relayStoreRetentionMs)
+	}
+	if *relayMaxStorageBytes > 0 {
+		relayH.SetMaxStorageBytes(*relayMaxStorageBytes)
+	}
 	// EXTENSION-RELAY §3.1.1 production wiring: install the OutboundDispatcher
 	// over the peer's connection pool + the §3.5 InboxRelayResolver backed
 	// by the local tree (V7 §5.2 signature-verifying — forged-redirection
@@ -699,6 +710,18 @@ func main() {
 			relaypeer.NewRemoteTreeInboxRelayResolver(p, registries...),
 			relaypeer.NewTreeInboxRelayResolver(p),
 		))
+	}
+	// EXTENSION-RELAY §4.1 (v1.3): when a §8 store bound is enforced, the
+	// relay MUST publish it as limits.max_retention_ms / max_storage_bytes in
+	// its own signed advertise, so a sender or an inbox-relay-choosing peer can
+	// read the ceiling before depending on it. The signing seam lives here (the
+	// peer holds the keypair), not in the handler. Non-fatal: enforcement is
+	// already active from the setters above; a publish failure leaves the bound
+	// unadvertised — a discovery gap, not an enforcement one.
+	if relayH.HasStoreBounds() {
+		if _, err := relaypeer.PublishSelfAdvertise(p, relayH); err != nil {
+			log.Printf("relay self-advertise (§4.1) failed: %v", err)
+		}
 	}
 	// The TCP addr is resolved LAZILY, at announce time, because the
 	// configured value may be a wildcard port. `--addr 127.0.0.1:0` is the
