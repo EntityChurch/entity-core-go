@@ -425,6 +425,55 @@ func DerivePeerFromPeerID(p PeerID) (pub []byte, keyType byte, ok bool) {
 	return out, dec.KeyType, true
 }
 
+// CanonicalizePeerID returns the §1.5 canonical form of a peer-id string and
+// ok=true when it can be derived, or ok=false when the value CANNOT be
+// canonicalized. This is the comparison-time canonicalization ENTITY-CORE-PROTOCOL
+// §3.6 rule 4 (0.8.2.29) requires before comparing a received `peers:` IdScope
+// pattern against a peer under test.
+//
+// Canonicalization is form-only (§1.5), never §5.4 path canonicalization:
+//   - a value already in canonical form for its key_type (CanonicalHashType)
+//     is returned unchanged, after a well-formedness check;
+//   - a non-canonical IDENTITY-form value (digest IS the public_key) is
+//     re-derived to canonical form — computable because the pubkey is embedded
+//     (e.g. an identity-form Ed448 handle whose canonical form is SHA-256-form);
+//   - a non-canonical SHA-256-form value whose canonical form is identity, a
+//     path-shaped or otherwise malformed value, and an unknown key_type all
+//     return ok=false: the pubkey is a one-way digest away and cannot be
+//     recovered without prior contact, so the value CANNOT be canonicalized.
+//
+// The caller applies the §3.6 rule-4 fail-closed dispositions to ok=false: an
+// `include` entry that cannot be canonicalized MUST NOT match (grant withheld);
+// an `exclude` entry that cannot be canonicalized MUST match (peer excluded).
+func CanonicalizePeerID(p PeerID) (PeerID, bool) {
+	dec, err := p.Decode()
+	if err != nil {
+		return "", false
+	}
+	ct, err := CanonicalHashType(dec.KeyType)
+	if err != nil {
+		return "", false // unknown / unallocated key_type
+	}
+	if dec.HashType == ct {
+		// Already canonical for its key_type — accept iff well-formed.
+		if p.Validate() != nil {
+			return "", false
+		}
+		return p, true
+	}
+	// Non-canonical form. Recoverable only from an identity-form value, where
+	// the digest is the public_key; DerivePeerFromPeerID returns ok only there.
+	pub, keyType, ok := DerivePeerFromPeerID(p)
+	if !ok {
+		return "", false
+	}
+	cp, err := PeerIDFromPublicKey(pub, keyType)
+	if err != nil {
+		return "", false
+	}
+	return cp, true
+}
+
 // Validate checks that the PeerID is well-formed under v7.64/v7.65/v7.66
 // (accepts both hash_type=0x00 identity and hash_type=0x01 SHA-256;
 // recognizes allocated key_types 0x01 Ed25519 and 0xFE experimental-test).

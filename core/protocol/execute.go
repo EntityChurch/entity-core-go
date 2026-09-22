@@ -297,21 +297,16 @@ func (d *Dispatcher) handleExecute(ctx context.Context, env entity.Envelope, con
 	}
 	d.debugf("execute: resolved handler=%s entity_native=%t", pattern, entityNative)
 
-	// V7 v7.62 §6.2 status-code semantic note: 501 unsupported_operation
-	// MUST distinguish from 404 handler_not_found and 403 capability_denied.
-	// Per the note's literal wording — "the caller's authority is
-	// irrelevant; the operation does not exist on this handler" — the op-
-	// existence check fires BEFORE the cap check. Otherwise a caller whose
-	// cap doesn't authorize a bogus op gets 403 (masking the fact that the
-	// op doesn't exist at all). The dispatcher consults the handler's
-	// manifest; if the op isn't declared, return 501. Compiled handlers
-	// expose this via ManifestProvider; entity-native handlers' interface
-	// is read off res.handlerData.Interface — neither path is required by
-	// older handlers, so we fall through if neither source is available.
-	if env501, has := d.checkOpInManifest(execData.RequestID, pattern, execData.Operation, h, res); has {
-		return env501, nil
-	}
-
+	// CQ-30 (ENTITY-CORE-PROTOCOL 0.8.2.30): the 501 operation-existence check
+	// is POST-check_permission — it runs BELOW the capability check, after the
+	// caller has been authorized for the operation. §6.2's "the caller's
+	// authority is irrelevant" is a CODE rule (do not report an undefined
+	// operation as 403 when the caller IS authorized), not an ORDERING rule.
+	// §6.7's refutation of the operation-enumeration leak depends on 501 being
+	// unreachable until the caller is authorized for the operation: were the
+	// manifest consulted first, 501-vs-403 would be a two-valued oracle over the
+	// handler's operation set for any caller holding a grant on the path. See
+	// the check below, after the capability check.
 	capEntity, capOk := env.FindIncluded(execData.Capability)
 	if !capOk {
 		return d.makeErrorResponse(execData.RequestID, 403, "capability_not_found", "capability entity not in envelope")
@@ -339,6 +334,20 @@ func (d *Dispatcher) handleExecute(ctx context.Context, env entity.Envelope, con
 			execData, "capability_denied", execData.URI, requestingPeerIDFromExec(execData, env))
 		return d.makeErrorResponseWithRejectedMarker(execData.RequestID, 403, "capability_denied",
 			"insufficient capability for handler scope", rejectedMarker)
+	}
+
+	// CQ-30 (0.8.2.30): operation-existence (501) is checked ONLY now — after
+	// the capability check above has authorized the operation. A request that is
+	// both unauthorized and unimplemented answered 403 above and never reaches
+	// here, so 501-vs-403 cannot enumerate the handler's operation set for a
+	// caller authorized for none of it (§6.7). A caller who IS authorized for
+	// the operation (e.g. a wildcard-ops grant) that names an undefined op still
+	// gets 501, which leaks nothing they could not already probe. The dispatcher
+	// consults the handler's manifest; entity-native handlers' interface is read
+	// off res.handlerData.Interface. Neither source is required by older
+	// handlers, so we fall through if neither is available.
+	if env501, has := d.checkOpInManifest(execData.RequestID, pattern, execData.Operation, h, res); has {
+		return env501, nil
 	}
 
 	// Build handler context.

@@ -13,6 +13,12 @@ import (
 // §9.1 conformance rows landed at 0.8.2.7 that give them a wire citation.
 const catSection33Ref = "V7 §3.3 / §9.1 (0.8.2.7)"
 
+// catCQ30Ref cites the 501-ordering ruling: 501 operation-existence is checked
+// only AFTER check_permission, so an unauthorized+unimplemented operation is
+// 403, never 501 (the operation-enumeration leak §6.7 refutes on the strength
+// of this ordering).
+const catCQ30Ref = "V7 §6.2 / §6.7 (CQ-30, 0.8.2.30)"
+
 // totalHandlerSkipMarker is the stable phrase the §3.3 404-row check stamps on a
 // SKIP taken because the peer registers a catch-all handler (the total-handler
 // exception, ENTITY-CORE-PROTOCOL §3.3 0.8.2.8). isTotalHandlerSkip keys the
@@ -57,6 +63,7 @@ func runSection33CodeProbe(ctx context.Context, client *PeerClient) []CheckResul
 	r := NewCheckRunner(catConnectivity)
 	r.Declare("unsupported_operation_on_registered_handler", catSection33Ref)
 	r.Declare("handler_not_found_on_unregistered_path", catSection33Ref)
+	r.Declare("undefined_op_unauthorized_is_403_not_501", catCQ30Ref)
 
 	if !client.Connected() {
 		skip := func() CheckOutcome {
@@ -64,6 +71,7 @@ func runSection33CodeProbe(ctx context.Context, client *PeerClient) []CheckResul
 		}
 		r.Run("unsupported_operation_on_registered_handler", skip)
 		r.Run("handler_not_found_on_unregistered_path", skip)
+		r.Run("undefined_op_unauthorized_is_403_not_501", skip)
 		return r.Results()
 	}
 
@@ -126,6 +134,79 @@ func runSection33CodeProbe(ctx context.Context, client *PeerClient) []CheckResul
 			return FailCheck("control send/recv: " + err.Error())
 		}
 		return classifyHandlerNotFound(status, code, ctlStatus, ctlCode)
+	})
+
+	r.Run("undefined_op_unauthorized_is_403_not_501", func() CheckOutcome {
+		// CQ-30 (0.8.2.30): 501 operation-existence is POST-check_permission. A
+		// request that is BOTH unauthorized and unimplemented MUST answer 403
+		// capability_denied, never 501 — otherwise 501-vs-403 is a two-valued
+		// oracle enumerating the handler's operation set for any caller holding a
+		// grant on the path (§6.7 refutes that leak on the strength of this order).
+		//
+		// Driven under a SCOPED child cap covering system/tree × {get} ONLY, so the
+		// undefined op is NOT covered (the caller is unauthorized for it). The
+		// validate connection cap is wildcard (peer-manager OpenAccessGrants), so
+		// the 501-slot check above measures the row under a COVERING grant while
+		// THIS check measures the ordering under a NON-covering one — the pair is
+		// what arch's "drive the 501 row under a covering grant" note requires
+		// (ROUTING-2026-09-16-k §1). Resources are wide so ONLY the operation
+		// dimension gates, isolating the refusal to the missing op grant.
+		getOnly := types.GrantEntry{
+			Handlers:   types.CapabilityScope{Include: []string{"system/tree"}},
+			Resources:  types.CapabilityScope{Include: []string{"*", "/*/*"}},
+			Operations: types.CapabilityScope{Include: []string{"get"}},
+		}
+		childCap, childSig, err := mintRegChildCap(client, getOnly)
+		if err != nil {
+			return FailCheck("mint get-only child cap: " + err.Error())
+		}
+		params, resource, err := tree.CreateGetRequest("system/tree", "entity")
+		if err != nil {
+			return FailCheck("build tree:get params: " + err.Error())
+		}
+		// Positive control: the DEFINED, COVERED op under the scoped cap must be
+		// authorized and reach the handler (non-403, non-501). If not, the child
+		// cap is broken and a 403 on the probe is unattributable → SKIP.
+		ctlEnv, _, err := client.SendExecuteWithCap(ctx, registeredURI, "get", params, resource, childCap, childSig, nil)
+		if err != nil {
+			return FailCheck("scoped-cap control get send/recv: " + err.Error())
+		}
+		ctlStatus, ctlCode, _, _ := extractStatusAndCode(ctlEnv)
+		if ctlStatus == 403 || ctlStatus == 501 {
+			return SkipCheck(fmt.Sprintf("control: scoped get-only cap did not authorize system/tree:get (%d/%q) — cannot attribute the probe's refusal to the missing operation grant", ctlStatus, ctlCode))
+		}
+		// Probe: the UNDEFINED op under the SAME scoped cap — unauthorized (op not
+		// in {get}) AND unimplemented → MUST be 403 capability_denied, NOT 501.
+		probeEnv, _, err := client.SendExecuteWithCap(ctx, registeredURI, bogusOp, params, resource, childCap, childSig, nil)
+		if err != nil {
+			return FailCheck("scoped-cap probe send/recv: " + err.Error())
+		}
+		status, code, _, _ := extractStatusAndCode(probeEnv)
+		if status == 501 {
+			return FailCheck(fmt.Sprintf(
+				"undefined op under a non-covering grant answered 501/%q — operation-existence checked BEFORE authority, re-opening the §6.7 operation-enumeration oracle (CQ-30, 0.8.2.30: an unauthorized+unimplemented op MUST answer 403); scoped-cap control get=%d/%q",
+				code, ctlStatus, ctlCode))
+		}
+		if status != 403 {
+			return FailCheck(fmt.Sprintf(
+				"undefined op under a non-covering grant answered %d/%q, want 403 capability_denied (CQ-30); scoped-cap control get=%d/%q",
+				status, code, ctlStatus, ctlCode))
+		}
+		// Contrast: the SAME undefined op under the WILDCARD connection cap is
+		// authorized for the op-space, so 501 IS reachable there — proof the 403
+		// above is the authority gate (not a universal refusal of the op name) and
+		// that CQ-30 did not suppress the 501 slot for an authorized caller.
+		wcEnv, _, err := client.SendExecute(ctx, registeredURI, bogusOp, params, resource)
+		if err != nil {
+			return FailCheck("wildcard-cap contrast send/recv: " + err.Error())
+		}
+		wcStatus, wcCode, _, _ := extractStatusAndCode(wcEnv)
+		if wcStatus != 501 {
+			return SkipCheck(fmt.Sprintf(
+				"contrast: undefined op under the wildcard connection cap answered %d/%q, expected 501 — the 501 slot is not observable in this posture, so 403-vs-501 discrimination is unproven (the probe did correctly return 403)", wcStatus, wcCode))
+		}
+		return PassCheck(fmt.Sprintf(
+			"undefined op → 403 under a non-covering grant, 501 under the wildcard cap (contrast) — 501 is post-check_permission (CQ-30); scoped control get=%d/%q", ctlStatus, ctlCode))
 	})
 
 	return r.Results()

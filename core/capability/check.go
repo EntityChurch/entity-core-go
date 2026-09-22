@@ -460,8 +460,77 @@ func matchesIDScope(value string, scope types.CapabilityScope) bool {
 // (R11). localPeerID is unused (peers are literal identifiers, not path
 // patterns) and retained only for signature stability with the path-scope
 // matchers.
+//
+// Unlike the shared operations matcher, the peers dimension applies §3.6 rule 4
+// (0.8.2.29): a received pattern is canonicalized for the comparison, and a
+// value that CANNOT be canonicalized fails closed per position — this is what
+// closes the exclude fail-open where a non-canonical `peers.exclude` silently
+// failed to match the peer it named. It is a SEPARATE matcher from
+// matchesIDScope so the operations dimension (op-name strings, not peer-ids) is
+// never subjected to peer-id canonicalization.
 func MatchesPeerScope(peerID string, scope types.CapabilityScope, localPeerID crypto.PeerID) bool {
-	return matchesIDScope(peerID, scope)
+	return matchesPeerScope(peerID, scope)
+}
+
+// peerMatch is the tri-state result of comparing one `peers:` pattern against
+// the peer under test, per §3.6 rule 4.
+type peerMatch int
+
+const (
+	peerMatchNo           peerMatch = iota // a canonical peer-id of a different peer
+	peerMatchYes                           // `*`, an exact literal, or a same-identity cross-form match
+	peerMatchUnresolvable                  // the value cannot be canonicalized (fail closed per position)
+)
+
+// peerPatternMatches compares one `peers:` IdScope pattern against the (canonical)
+// peer under test with §3.6 rule-4 comparison-time canonicalization.
+//
+// The exact-literal and `*` fast paths preserve the prior behaviour byte for
+// byte (the overwhelming common case: both sides already §1.5-canonical). Only a
+// non-literal, non-wildcard pattern reaches canonicalization: a same-identity
+// cross-form value matches, a different canonical peer-id does not, and a value
+// that cannot be canonicalized (SHA-256-form of an uncontacted peer, path-shaped,
+// malformed) is reported unresolvable for the caller to fail closed on.
+func peerPatternMatches(pattern, comparand string) peerMatch {
+	if pattern == "*" || pattern == comparand {
+		return peerMatchYes
+	}
+	cpat, ok := crypto.CanonicalizePeerID(crypto.PeerID(pattern))
+	if !ok {
+		return peerMatchUnresolvable
+	}
+	if ccmp, okc := crypto.CanonicalizePeerID(crypto.PeerID(comparand)); okc && cpat == ccmp {
+		return peerMatchYes
+	}
+	return peerMatchNo
+}
+
+// matchesPeerScope implements the §5.2 peers id-scope check: matched by some
+// include AND not matched by any exclude, with the §3.6 rule-4 fail-closed
+// dispositions — an include entry that cannot be canonicalized MUST NOT match
+// (grant withheld); an exclude entry that cannot be canonicalized MUST match
+// (peer excluded). comparand is the peer under test, canonical per §5.2
+// (extract_peer + the wire-acceptance canonicalize-on-storage rule).
+func matchesPeerScope(comparand string, scope types.CapabilityScope) bool {
+	included := false
+	for _, p := range scope.Include {
+		// Only a definite match includes; an unresolvable include is withheld.
+		if peerPatternMatches(p, comparand) == peerMatchYes {
+			included = true
+			break
+		}
+	}
+	if !included {
+		return false
+	}
+	for _, p := range scope.Exclude {
+		// A definite match OR an unresolvable exclude both exclude (fail closed).
+		switch peerPatternMatches(p, comparand) {
+		case peerMatchYes, peerMatchUnresolvable:
+			return false
+		}
+	}
+	return true
 }
 
 // IsPattern returns true if the string contains wildcard characters.

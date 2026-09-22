@@ -701,20 +701,23 @@ func (c *Connection) serve(ctx context.Context) {
 			if respEnv, berr := buildDecodeRefusalResponse(bestEffortRequestID(env.Root), err); berr == nil {
 				_ = c.SendEnvelope(respEnv)
 			}
-			// DR-3 (0.8.2.26 §6.3): a non-canonical ECF frame (a CBOR tag) decoded
-			// WHOLE — ecf.Decode succeeded and ValidateAll then found the tag — so
-			// the stream is synchronized on the next boundary and the connection
-			// MUST survive (§4.9(c): a close would destroy unrelated admitted
-			// requests on a multiplexed connection). Same disposition as the
-			// pre-admission undecodable arm and the dialer-side reader, and it
-			// matches entity-core-{rust,py}, whose tag rejection keeps the
-			// connection. A hash/key-binding failure keeps N4's close (its own
-			// ruling); whether that whole-decoded failure should ALSO continue is
-			// routed, not decided here.
-			if errors.Is(err, ecerrors.ErrNonCanonicalECF) {
-				continue
-			}
-			return
+			// 0.8.2.29 item B (ROUTING-2026-09-16-j): EVERY validateRecv failure at
+			// this point is whole-decoded — RecvEnvelope already succeeded, so
+			// ecf.Decode passed and ValidateAll then found the fault (a CBOR tag
+			// §6.3, a root-entity-hash self-inconsistency, or a mis-keyed included
+			// entry). The length prefix completed and the stream is synchronized on
+			// the next frame boundary, so the cause of the refusal says nothing
+			// about our ability to read the next frame. §4.9(c) owes every admitted
+			// in-flight request a response and §4.10 forbids degrading service to
+			// them, so on a multiplexed connection the peer MUST NOT close — CONTINUE
+			// on ALL of them, matching the pre-admission undecodable arm, the
+			// dialer-side reader, and entity-core-{rust,py}. This binds every
+			// whole-decoded member of the class identically; the earlier per-cause
+			// split (close on hash/key-binding, continue on tag) inferred a
+			// disposition from N4's CODE fold, which pinned no disposition. The only
+			// forced close is a DESYNCHRONIZED stream (truncated/oversize), handled
+			// in the classifyRecvError switch above — never here.
+			continue
 		}
 
 		// Handshake frames mutate connState and require strict ordering.
