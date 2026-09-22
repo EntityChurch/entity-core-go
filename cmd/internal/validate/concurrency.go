@@ -668,12 +668,12 @@ func (c *PeerClient) SendDispatchOutboundProbeConcurrent(ctx context.Context, va
 	validatorURI := fmt.Sprintf("entity://%s/%s",
 		c.identityPeerIDString(), conformance.PatternEcho)
 	paramsRaw, err := ecf.Encode(map[string]interface{}{
-		"target":                validatorURI,
-		"operation":             "echo",
-		"value":                 cbor.RawMessage(echoParamsRaw),
-		"reentry_capability":    cbor.RawMessage(capRaw),
-		"reentry_granter":       cbor.RawMessage(granterRaw),
-		"reentry_cap_signature": cbor.RawMessage(sigRaw),
+		"target":                 validatorURI,
+		"operation":              "echo",
+		"value":                  cbor.RawMessage(echoParamsRaw),
+		"reentry_capability":     cbor.RawMessage(capRaw),
+		"reentry_granters":       []cbor.RawMessage{cbor.RawMessage(granterRaw)},
+		"reentry_cap_signatures": []cbor.RawMessage{cbor.RawMessage(sigRaw)},
 	})
 	if err != nil {
 		return fmt.Errorf("encode dispatch-outbound params: %w", err)

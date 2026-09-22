@@ -103,6 +103,12 @@ func TestIngestReturnsPathRequiredWhenResourceAbsent(t *testing.T) {
 	}
 }
 
+// NOTE: the more-than-one → ambiguous_resource arm is deliberately NOT tested
+// here — F68 (arch ROUTING-2026-09-10-d §2) ruled the §3.3 count is on the
+// EFFECTIVE target set (targets minus caller excludes), and a raw-len(Targets)
+// guard is superseded by the 0.8.2.20 sweep. The vector for this arm is a
+// check-set requirement folded into that revision, not a per-site guard.
+
 // putKnownEntity stores a known entity and returns its hash. Used in get
 // tests to seed the store.
 func (e *testEnv) putKnownEntity(t *testing.T) hash.Hash {

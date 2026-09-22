@@ -19,10 +19,11 @@
 //     EXECUTE via the §6.11 reentry seam back to the caller over the same
 //     inbound connection; return {status, result}.
 //
-// Cap-passing convention (§7a.2a, ruled by Go): the three
-// reentry-authority entities travel **in-band, nested in params**
-// (reentry_capability / reentry_granter / reentry_cap_signature) — NOT
-// via the envelope `included` set.
+// Cap-passing convention (§7a.2a, ruled by Go — shape (a) in-band params):
+// the reentry-authority entities travel **in-band, nested in params**
+// (reentry_capability / reentry_granters / reentry_cap_signatures) — NOT
+// via the envelope `included` set. The granter/signature carriers are
+// plural arrays (0.8.2.19 §7a.1) so a K-of-2 multi-sig root can be driven.
 package conformance
 
 import (
@@ -84,17 +85,30 @@ func (h *EchoHandler) Handle(ctx context.Context, req *handler.Request) (*handle
 }
 
 // DispatchOutboundData is the §7a.1 dispatch-outbound params shape, with
-// the three reentry-authority entities carried in-band per the §7a.2a
-// Go ruling. Each authority field is a CBOR-encoded entity nested inside
-// the primitive/any params object — decoded here as cbor.RawMessage so
-// the entity round-trips byte-fidelity.
+// the reentry-authority entities carried in-band per the §7a.2a Go ruling.
+// Each authority entity is a CBOR-encoded entity nested inside the
+// primitive/any params object — decoded here as cbor.RawMessage so the
+// entity round-trips byte-fidelity.
+//
+// reentry_granters and reentry_cap_signatures are PLURAL carriers as of
+// 0.8.2.19 (§7a.1): arrays, single-granter being an array of one. A K-of-2
+// multi-sig root credential needs two granter identities and two signatures
+// to drive the E3/F66 fail-closed rule; the singular carrier could not
+// express that input, so every seat drove E3 in-process only. The
+// reentry_capability stays singular — the credential is one entity; its ROOT
+// granter is what may be multi-signed.
+//
+// All-or-none (§7a.1): supplying the credential + at least one granter + at
+// least one signature selects the PRESENTED arm; omitting all three selects
+// the AMBIENT arm; a partial set is malformed (400 invalid_params) — a
+// partial credential is not "ambient", it is broken.
 type DispatchOutboundData struct {
-	Target              string          `cbor:"target"`
-	Operation           string          `cbor:"operation"`
-	Value               cbor.RawMessage `cbor:"value"`
-	ReentryCapability   cbor.RawMessage `cbor:"reentry_capability"`
-	ReentryGranter      cbor.RawMessage `cbor:"reentry_granter"`
-	ReentryCapSignature cbor.RawMessage `cbor:"reentry_cap_signature"`
+	Target               string            `cbor:"target"`
+	Operation            string            `cbor:"operation"`
+	Value                cbor.RawMessage   `cbor:"value"`
+	ReentryCapability    cbor.RawMessage   `cbor:"reentry_capability"`
+	ReentryGranters      []cbor.RawMessage `cbor:"reentry_granters"`
+	ReentryCapSignatures []cbor.RawMessage `cbor:"reentry_cap_signatures"`
 }
 
 // DispatchOutboundResult is the §7a.1 result shape — the downstream
@@ -123,12 +137,43 @@ func NewDispatchOutboundHandler() *DispatchOutboundHandler {
 func (*DispatchOutboundHandler) Name() string { return "validate/dispatch-outbound" }
 
 // Manifest describes the handler for system/handler indexing.
+//
+// InternalScope is NARROW, and this is a GUIDE-CONFORMANCE §7a.1 scaffold-
+// contract REQUIREMENT, not a hardening choice. §7a.1's ⛔ block: the
+// dispatch-outbound handler's own grant (the ceiling the §6.8/§5.2 outbound
+// gate enforces on Dimensions 1-3) MUST be scoped to a fixed, declared
+// operation set — NOT the peer's wide default self-grant (`/*/*`, ops `*`).
+//
+// Why it must be narrow: ENTITY-CORE-PROTOCOL §1.4's outbound gate admits two
+// authority contributions — the executing handler's grant (Dims 1-3, always)
+// and a target-minted credential (Dim 4 only, 0.8.2.19 E1). A check set must
+// discriminate COMPOSE from BYPASS, and the discriminating vector is *a valid
+// credential presented to a handler whose own grant does not cover the request
+// → MUST refuse*. Against a WIDE grant that vector is unconstructible: the
+// composed and bypassed readings return the same answer for every input, which
+// is exactly how the F67 confused-deputy bypass passed two green wire vectors
+// cohort-wide. The narrow grant is what makes the F63 discriminator observable
+// on the wire (validate's dispatch_outbound_narrow_grant_refuses_out_of_scope).
+//
+// The declared minimum is `echo` on system/validate/echo — the only operation
+// the §7a.2a reentry contract needs. The reentry (in-scope op=echo) still
+// passes: Dims 1-2 covered here, Dim 3 skipped (echo carries no resource
+// target), Dim 4 relaxed by the caller-minted reentry credential. An
+// out-of-scope operation fails Dimension 1 unless the credential is (wrongly)
+// treated as a standalone authorizer.
 func (*DispatchOutboundHandler) Manifest() types.HandlerManifestData {
 	return types.HandlerManifestData{
 		Pattern: PatternDispatchOutbound,
 		Name:    "validate/dispatch-outbound",
 		Operations: map[string]types.HandlerOperationSpec{
 			"dispatch": {InputType: "primitive/any", OutputType: "primitive/any"},
+		},
+		InternalScope: []types.GrantEntry{
+			{
+				Handlers:   types.CapabilityScope{Include: []string{PatternEcho}},
+				Operations: types.CapabilityScope{Include: []string{"echo"}},
+				Resources:  types.CapabilityScope{Include: []string{"/*/" + PatternEcho}},
+			},
 		},
 	}
 }
@@ -158,94 +203,95 @@ func (h *DispatchOutboundHandler) Handle(ctx context.Context, req *handler.Reque
 			"dispatch-outbound requires target and operation")
 		return resp, nil
 	}
-	// The §7a.2a authority triple is optional as of the PD-2 (§5.2) check.
-	// PRESENTED: all three present → the sub-dispatch presents a target-minted
-	// capability (the standard reentry probe). AMBIENT: all three absent → the
-	// sub-dispatch rides only the executing handler's grant, which is exactly
-	// the input the PD-2 negative-arm check needs (a foreign outbound with no
-	// presented authority MUST be refused). Partial presence is malformed.
-	capCount := 0
-	if len(d.ReentryCapability) > 0 {
-		capCount++
-	}
-	if len(d.ReentryGranter) > 0 {
-		capCount++
-	}
-	if len(d.ReentryCapSignature) > 0 {
-		capCount++
-	}
-	ambient := capCount == 0
-	if !ambient && capCount != 3 {
+	// The §7a.2a authority set is optional as of the PD-2 (§5.2) check, and its
+	// granter/signature carriers are PLURAL (§7a.1, 0.8.2.19).
+	// PRESENTED: credential + ≥1 granter + ≥1 signature → the sub-dispatch
+	// presents a target-minted capability (the reentry probe, and the E3
+	// multi-sig probe). AMBIENT: all three omitted → the sub-dispatch rides only
+	// the executing handler's grant, which is exactly the input the PD-2
+	// negative-arm check needs. A PARTIAL set is malformed (a partial credential
+	// is not "ambient" — it is broken).
+	hasCap := len(d.ReentryCapability) > 0
+	nGranters := len(d.ReentryGranters)
+	nSigs := len(d.ReentryCapSignatures)
+	present := hasCap || nGranters > 0 || nSigs > 0
+	ambient := !present
+	if present && (!hasCap || nGranters == 0 || nSigs == 0) {
 		resp, _ := handler.NewErrorResponse(400, "invalid_params",
-			"dispatch-outbound: reentry_capability + reentry_granter + reentry_cap_signature must be supplied together (§7a.2a) or all omitted (ambient PD-2 probe)")
+			"dispatch-outbound: reentry_capability + at least one reentry_granters + at least one reentry_cap_signatures must be supplied together (§7a.1) or all omitted (ambient PD-2 probe)")
 		return resp, nil
 	}
 
-	// Decode the three in-band authority entities (presented arm only). Their
-	// byte fidelity is preserved because each field rode as cbor.RawMessage.
-	var capEnt, granterEnt, sigEnt entity.Entity
-	if !ambient {
-		if err := ecf.Decode(d.ReentryCapability, &capEnt); err != nil {
-			resp, _ := handler.NewErrorResponse(400, "invalid_params",
-				"decode reentry_capability: "+err.Error())
-			return resp, nil
-		}
-		if err := ecf.Decode(d.ReentryGranter, &granterEnt); err != nil {
-			resp, _ := handler.NewErrorResponse(400, "invalid_params",
-				"decode reentry_granter: "+err.Error())
-			return resp, nil
-		}
-		if err := ecf.Decode(d.ReentryCapSignature, &sigEnt); err != nil {
-			resp, _ := handler.NewErrorResponse(400, "invalid_params",
-				"decode reentry_cap_signature: "+err.Error())
-			return resp, nil
-		}
-	}
-
 	// Build the outbound EXECUTE options. On the presented arm the reentry
-	// capability + its authority chain travel via WithCapability +
-	// WithIncludedChain so the far peer's verifier (and the local PD-2
-	// presented-arm check) find them. On the ambient arm no capability is
-	// attached — the sub-dispatch rides the executing handler's grant, which
-	// PD-2 (§5.2) evaluates on Dimension 4.
+	// capability + its authority chain (all granter identities + all signatures)
+	// travel via WithCapability + WithIncludedChain so the far peer's verifier
+	// (and the local PD-2 presented-arm check) find them. On the ambient arm no
+	// capability is attached — the sub-dispatch rides the executing handler's
+	// grant, which PD-2 (§5.2) evaluates on Dimension 4.
 	var execOpts []handler.ExecuteOption
 	if !ambient {
 		// Re-canonicalize so each entity carries the right ContentHash before
 		// dispatch — ECF decode populates type+data; NewEntity recomputes the
 		// hash deterministically.
+		var capEnt entity.Entity
+		if err := ecf.Decode(d.ReentryCapability, &capEnt); err != nil {
+			resp, _ := handler.NewErrorResponse(400, "invalid_params",
+				"decode reentry_capability: "+err.Error())
+			return resp, nil
+		}
 		cap, err := entity.NewEntity(capEnt.Type, capEnt.Data)
 		if err != nil {
 			resp, _ := handler.NewErrorResponse(400, "invalid_params",
 				"rebuild reentry_capability entity: "+err.Error())
 			return resp, nil
 		}
-		// The granter is a `system/peer`, so it is rebuilt at the ECFv1-SHA-256
-		// FLOOR rather than under the process-global authoring default:
-		// ENTITY-CORE-PROTOCOL §4.5a item 1a pins the identity entity to the
-		// floor unconditionally, whatever this peer's home format. NewEntity
-		// here was a latent defect on a `--hash-type sha384` peer — it rebuilt
-		// the caller's identity under 0x01, manufacturing the second
-		// content_hash for one identity that item 1a exists to collapse, and it
-		// did so on the exact surface where §5.2's `grantee == author` equality
-		// is evaluated. It never failed a check because both sides of every
-		// comparison downstream were wrong the same way (the Go-on-Go deception
-		// `AGENTS.md` warns about); core/entity now refuses the construction
-		// outright, which is what turned it from invisible into a 400.
-		granter, err := entity.NewEntityFormat(hash.AlgorithmSHA256, granterEnt.Type, granterEnt.Data)
-		if err != nil {
-			resp, _ := handler.NewErrorResponse(400, "invalid_params",
-				"rebuild reentry_granter entity: "+err.Error())
-			return resp, nil
+
+		chain := make([]entity.Entity, 0, nGranters+nSigs)
+		// Each granter is a `system/peer` identity, so it is rebuilt at the
+		// ECFv1-SHA-256 FLOOR rather than under the process-global authoring
+		// default: ENTITY-CORE-PROTOCOL §4.5a item 1a pins the identity entity
+		// to the floor unconditionally, whatever this peer's home format.
+		// NewEntity here was a latent defect on a `--hash-type sha384` peer — it
+		// rebuilt the caller's identity under 0x01, manufacturing a second
+		// content_hash for the one identity that item 1a exists to collapse, on
+		// the exact surface where §5.2's grantee/granter equality is evaluated.
+		// It never failed a check because both sides of every comparison
+		// downstream were wrong the same way (the Go-on-Go deception AGENTS.md
+		// warns about); core/entity now refuses the construction outright.
+		for i, raw := range d.ReentryGranters {
+			var granterEnt entity.Entity
+			if err := ecf.Decode(raw, &granterEnt); err != nil {
+				resp, _ := handler.NewErrorResponse(400, "invalid_params",
+					fmt.Sprintf("decode reentry_granters[%d]: %v", i, err))
+				return resp, nil
+			}
+			granter, err := entity.NewEntityFormat(hash.AlgorithmSHA256, granterEnt.Type, granterEnt.Data)
+			if err != nil {
+				resp, _ := handler.NewErrorResponse(400, "invalid_params",
+					fmt.Sprintf("rebuild reentry_granters[%d] entity: %v", i, err))
+				return resp, nil
+			}
+			chain = append(chain, granter)
 		}
-		sig, err := entity.NewEntity(sigEnt.Type, sigEnt.Data)
-		if err != nil {
-			resp, _ := handler.NewErrorResponse(400, "invalid_params",
-				"rebuild reentry_cap_signature entity: "+err.Error())
-			return resp, nil
+		for i, raw := range d.ReentryCapSignatures {
+			var sigEnt entity.Entity
+			if err := ecf.Decode(raw, &sigEnt); err != nil {
+				resp, _ := handler.NewErrorResponse(400, "invalid_params",
+					fmt.Sprintf("decode reentry_cap_signatures[%d]: %v", i, err))
+				return resp, nil
+			}
+			sig, err := entity.NewEntity(sigEnt.Type, sigEnt.Data)
+			if err != nil {
+				resp, _ := handler.NewErrorResponse(400, "invalid_params",
+					fmt.Sprintf("rebuild reentry_cap_signatures[%d] entity: %v", i, err))
+				return resp, nil
+			}
+			chain = append(chain, sig)
 		}
+
 		execOpts = append(execOpts,
 			handler.WithCapability(cap),
-			handler.WithIncludedChain([]entity.Entity{granter, sig}),
+			handler.WithIncludedChain(chain),
 		)
 	}
 

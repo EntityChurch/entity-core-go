@@ -38,6 +38,8 @@ func runOriginationCore(ctx context.Context, target *PeerClient, referenceAddr s
 	r.Declare("reference_ready", "harness precondition (not a spec vector) — the reference peer completed its connectivity checks and is usable as the handshake half")
 	r.Declare("dispatch_outbound_reentry", "GUIDE-CONFORMANCE §7a.1 + §7a.2a; PROPOSAL v7.74 §10.2")
 	r.Declare("dispatch_outbound_ambient_refused", "ENTITY-CORE-PROTOCOL §5.2 PD-2 (0.8.2.17) negative arm — an outbound sub-dispatch to a foreign peer on ambient handler authority (no target-minted capability presented) MUST be refused")
+	r.Declare("dispatch_outbound_narrow_grant_refuses_out_of_scope", "GUIDE-CONFORMANCE §7a.1 ⛔ + §7a.1a + ENTITY-CORE-PROTOCOL §6.8 (0.8.2.19 E1/F67) — the F63 compose-vs-bypass discriminator: a valid target-minted credential presented to dispatch-outbound (narrow grant = echo only) MUST NOT authorize an OUT-OF-SCOPE sub-dispatch. The credential relaxes Dimension 4 (WHERE); the handler grant still gates operations (WHAT). Paired with an in-scope positive control on the SAME credential so the refusal is attributable to the narrow grant, not a bad credential")
+	r.Declare("dispatch_outbound_multisig_root_refused", "GUIDE-CONFORMANCE §7a.1 plural carrier + §2.4b + §7a.1a + ENTITY-CORE-PROTOCOL §1.4 (0.8.2.19 E3/F66) — a K-of-2 multi-sig-rooted credential (the target is one of two signers) is NOT the target's sole authority and MUST NOT relax Dimension 4, even though VerifyChain accepts the root; the sub-dispatch falls to ambient and the foreign target is refused. That antecedent — VerifyChain accepting the root — is ESTABLISHED, not merely asserted, by the single-sig target-minted positive control on the SAME probe (granter form the only variable): the credential is otherwise valid and covering, so the deny is attributable to the multi-sig root and not to any unrelated defect in the mint. A deny-only check MUST establish its own antecedent, and this row names the arm that does (the single-sig control)")
 
 	var subResults []CheckResult
 
@@ -125,6 +127,114 @@ func runOriginationCore(ctx context.Context, target *PeerClient, referenceAddr s
 			// defect: SKIP (a param-validation refusal is not a Dimension-4
 			// refusal; the "early refusal reads as unmeasurability" trap).
 			return SkipCheck(fmt.Sprintf("target keeps the §7a.2a triple mandatory (omitted-triple probe refused at param validation: outer status %d code %q) — PD-2 ambient arm not reachable over this probe; the cohort scaffold makes the triple optional (outer 403 relayed, or outer 200 + inner 403) so the arm is measured there", outerStatus, outerCode))
+		})
+
+		// F63 compose-vs-bypass discriminator (0.8.2.19 E1, the missing wire
+		// evidence). The two arms above cannot see a bypass: dispatch_outbound_
+		// reentry is "all sources agree → allow" and dispatch_outbound_ambient_
+		// refused is "no source at all → refuse". This one presents a VALID
+		// target-minted credential to a handler whose NARROW grant does not
+		// cover the sub-dispatched operation, with an in-scope positive control
+		// on the same credential — the vector that stayed absent while the F67
+		// confused-deputy bypass passed the two blind arms cohort-wide.
+		r.Run("dispatch_outbound_narrow_grant_refuses_out_of_scope", func() CheckOutcome {
+			if !target.HasConformanceHandlers(ctx) {
+				return SkipCheck("target peer not run with --validate (system/validate/dispatch-outbound absent; §7a.4 falls back to code-attestation floor)")
+			}
+			st := target.ArmReentryEcho()
+			defer target.DisarmReentryEcho()
+			o, err := target.SendDispatchOutboundF63Discriminator(ctx, st)
+			if err != nil {
+				return FailCheck(err.Error())
+			}
+			// Positive control: the in-scope op must succeed and reach the
+			// validator exactly once — proving the credential is valid and
+			// covering, so the out-of-scope refusal below is attributable to the
+			// narrow grant and not to a bad credential (the negative-authz-test
+			// false-pass trap, 0.8.2.19 close-out).
+			if o.inScopeOuterStatus != 200 || o.inScopeInnerStatus != 200 || o.hitsAfterInScope != 1 {
+				return FailCheck(fmt.Sprintf("F63 positive control failed: in-scope echo outer=%d inner=%d hits=%d, want 200/200/1 — the target-minted credential must relax Dimension 4 for the in-scope op, else the out-of-scope refusal is not attributable to the narrow grant", o.inScopeOuterStatus, o.inScopeInnerStatus, o.hitsAfterInScope))
+			}
+			// Bypass = defect: the out-of-scope op succeeded through the credential.
+			if o.oosOuterStatus == 200 && o.oosInnerStatus == 200 {
+				return FailCheck(fmt.Sprintf("F63 §7a.1 ⛔ violation: an out-of-scope sub-dispatch (op=%s) SUCCEEDED while presenting a target-minted credential. Two causes, same remediation: (a) the pre-E1 confused-deputy BYPASS — the credential was treated as a standalone authorizer, steering dispatch-outbound past its grant (§6.8); or (b) the dispatch-outbound handler grant is NOT narrow (§7a.1 ⛔) — a wide grant covers the op, so compose and bypass agree and the discriminator cannot fire. Fix: scope the dispatch-outbound grant to echo only, then confirm no bypass", reentryOutOfScopeOp))
+			}
+			// Carry-the-teeth: the refusal must fire BEFORE reentry — the
+			// validator must not have been contacted a second time.
+			if o.hitsAfterOOS != 1 {
+				return FailCheck(fmt.Sprintf("F63: the out-of-scope sub-dispatch reached the validator (reentry hits went %d→%d) — the refusal did not fire before the outbound left the peer", o.hitsAfterInScope, o.hitsAfterOOS))
+			}
+			// Refused, either scaffold shape.
+			if o.oosOuterStatus == 403 && o.oosOuterCode == "capability_denied" {
+				return PassCheck("F63 compose-vs-bypass: out-of-scope sub-dispatch refused (outer 403 capability_denied, relayed) while the in-scope op on the SAME credential succeeded — the narrow handler grant gates operations, the credential relaxes only Dimension 4 (§6.8 E1)")
+			}
+			if o.oosOuterStatus == 200 && o.oosInnerStatus == 403 {
+				return PassCheck("F63 compose-vs-bypass: out-of-scope sub-dispatch refused (inner 403 capability_denied, wrapped) while the in-scope op on the SAME credential succeeded — the narrow handler grant gates operations, the credential relaxes only Dimension 4 (§6.8 E1)")
+			}
+			// The sub-dispatch was refused (no bypass — the in-scope control
+			// succeeded and hits stayed at 1), but the outer shape is neither the
+			// relayed 403 capability_denied nor the wrapped inner 403. Per §7a.1a
+			// (0.8.2.19d fold) a §1.4/§6.8 refusal is an authorization DENY
+			// whichever dimension raised it, and a handler that wraps it in a
+			// generic catch-all (e.g. a 5xx reentry_dispatch_failed) launders an
+			// authorization verdict into a transport fault — §2.4b's
+			// unattributability one layer over. WARN, never a silent PASS: the
+			// property may hold, but the code does not say so, and go does not
+			// discriminate on a code it cannot attribute.
+			return WarnCheck(fmt.Sprintf("out-of-scope sub-dispatch refused with a NON-AUTHORIZATION code (outer=%d code=%q inner=%d) — F63 not measured over this shape. Per GUIDE-CONFORMANCE §7a.1a the refusal must surface capability_denied (or a defined authorization code), relayed as outer 403 or wrapped as inner 403; a generic catch-all launders the §6.8 verdict into a transport fault", o.oosOuterStatus, o.oosOuterCode, o.oosInnerStatus))
+		})
+
+		// E3/F66 fail-closed wire vector (0.8.2.19, unblocked by the §7a.1
+		// plural carrier), now a differential with its own positive control per
+		// the F70 ruling (keystone option (b), §2.4b). A K-of-2 multi-sig root
+		// that merely includes the target as one signer must not relax Dimension
+		// 4 — but a bare refusal proves nothing about WHY it was refused. The
+		// single-sig control (granter form the only variable) establishes the
+		// antecedent: the credential family IS otherwise valid and covering.
+		r.Run("dispatch_outbound_multisig_root_refused", func() CheckOutcome {
+			if !target.HasConformanceHandlers(ctx) {
+				return SkipCheck("target peer not run with --validate (system/validate/dispatch-outbound absent; §7a.4 falls back to code-attestation floor)")
+			}
+			st := target.ArmReentryEcho()
+			defer target.DisarmReentryEcho()
+			o, err := target.SendDispatchOutboundE3MultiSig(ctx, st)
+			if err != nil {
+				return FailCheck(err.Error())
+			}
+			// Positive control (§2.4b): the single-sig target-minted covering
+			// credential must relax Dimension 4 for the SAME echo op and reach the
+			// validator exactly once. If it does not, the credential family is not
+			// valid+covering at this seat, so the multi-sig refusal below is NOT
+			// attributable to the granter form — the deny would measure nothing.
+			if o.singleSigOuterStatus != 200 || o.singleSigInnerStatus != 200 || o.hitsAfterSingleSig != 1 {
+				return FailCheck(fmt.Sprintf("E3 positive control failed: single-sig target-minted echo outer=%d inner=%d hits=%d, want 200/200/1 — the single-sig credential (granter form the only variable vs the multi-sig arm) must relax Dimension 4, else the multi-sig refusal is not attributable to the multi-sig root (§2.4b: a deny-only check MUST establish its own antecedent)", o.singleSigOuterStatus, o.singleSigInnerStatus, o.hitsAfterSingleSig))
+			}
+			// A multi-sig root must NOT relax Dimension 4 → the in-scope echo
+			// sub-dispatch falls to ambient and is refused (foreign target, no
+			// peers scope). If it SUCCEEDED, the multi-sig root wrongly relaxed.
+			if o.multiSigOuterStatus == 200 && o.multiSigInnerStatus == 200 {
+				return FailCheck(fmt.Sprintf("E3/F66 over-acceptance: a K-of-2 multi-sig-rooted credential relaxed Dimension 4 and the sub-dispatch SUCCEEDED (outer 200 inner 200, reentry hits went 1→%d) while the single-sig control over the identical request also succeeded — the granter form is the only variable, so the multi-sig root wrongly authorized; a multi-sig root is not 'minted BY the target peer', it must fail closed (§1.4)", o.hitsAfterMultiSig))
+			}
+			// Carry-the-teeth: the refusal must fire BEFORE reentry — hits must
+			// still be 1 (the single-sig control's), not 2.
+			if o.hitsAfterMultiSig != o.hitsAfterSingleSig {
+				return FailCheck(fmt.Sprintf("E3/F66: the multi-sig-rooted sub-dispatch reached the validator (reentry hits went %d→%d) — the credential relaxed Dimension 4 before the fail-closed check", o.hitsAfterSingleSig, o.hitsAfterMultiSig))
+			}
+			if o.multiSigOuterStatus == 403 && o.multiSigOuterCode == "capability_denied" {
+				return PassCheck("E3/F66 fail-closed: a K-of-2 multi-sig-rooted credential (target is one signer) did NOT relax Dimension 4 while the single-sig control over the identical request (granter form the only variable) succeeded; the multi-sig sub-dispatch fell to ambient and was refused (outer 403 capability_denied, relayed) — a multi-sig root is not the target's sole authority (§1.4)")
+			}
+			if o.multiSigOuterStatus == 200 && o.multiSigInnerStatus == 403 {
+				return PassCheck("E3/F66 fail-closed: a K-of-2 multi-sig-rooted credential (target is one signer) did NOT relax Dimension 4 while the single-sig control over the identical request (granter form the only variable) succeeded; the multi-sig sub-dispatch fell to ambient and was refused (inner 403 capability_denied, wrapped) — a multi-sig root is not the target's sole authority (§1.4)")
+			}
+			// Refused (single-sig control succeeded, hits stayed at 1 — no
+			// over-acceptance) but with a non-authorization code. §7a.1a: the
+			// §1.4 refusal must surface capability_denied, not a generic
+			// catch-all. A further caveat rides E3 specifically (§7a.1 multi-sig
+			// note): a seat that cannot ACCEPT a valid multi-signature root
+			// anywhere (fail-closed-by-absence) has not been measured by E3 at
+			// all — read that seat's convergence.msp_2of3_verifier_signed_ALLOW
+			// before reading this row's green.
+			return WarnCheck(fmt.Sprintf("multi-sig-rooted sub-dispatch refused with a NON-AUTHORIZATION code (outer=%d code=%q inner=%d hits=%d) while the single-sig control succeeded — E3 not measured over this shape. Per GUIDE-CONFORMANCE §7a.1a the §1.4 refusal must surface capability_denied (relayed outer 403 or wrapped inner 403); a generic catch-all launders the authorization verdict into a transport fault", o.multiSigOuterStatus, o.multiSigOuterCode, o.multiSigInnerStatus, o.hitsAfterMultiSig))
 		})
 
 		// reference is connected to keep the gate's input shape
