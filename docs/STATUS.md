@@ -337,7 +337,8 @@ live-HTTP transport surfaces.
 >   derived values: `spec-issues/2026-08-11-d-*`. `core_register_gate`'s negative
 >   half has shipped. Snapshot kept as authored per the immutability rule.]**
 > - **Owed to arch: migrate the `v767` corpus.** It is **not** missing — it is at
->   `entity-lab-legacy-meta/entity-core-architecture/docs/architecture/v7.0-core-revision/…/test-vectors/v767/`,
+>   `entity-core-architecture/docs/architecture/v7.0-core-revision/…/test-vectors/v767/`,
+>   in the archived pre-V8 architecture repository,
 >   sha `8e7c5232…` matching the pin exactly. The V8 split carried its two
 >   siblings (`ecf-conformance`, `crypto-agility`) into `entity-core-protocol`
 >   and left `v767` behind — visible even in the legacy repo's own `V8/` staging
@@ -353,8 +354,8 @@ live-HTTP transport surfaces.
 > - **Correction, same day:** the first version of that spec-issue claimed the
 >   corpus "exists nowhere." Wrong, and wrong because the search was insufficient
 >   — `find -maxdepth 6` against a path 8 levels deep, over the church-meta
->   siblings only. `entity-core-architecture` is the **pre-V8 arch repo and lives
->   under `entity-lab-legacy-meta`**, not beside this repo. Second insufficient
+>   — `find -maxdepth 6` against a path 8 levels deep, over the church-meta
+>   siblings only. `entity-core-architecture` is the **pre-V8 arch repo and is
 >   build-state claim from here in two days; both were caught by a person, not by
 >   the process.
 > - **Correction to our 08-11 packet.** It claimed EXTENSION-SUBSCRIPTION §2.2's

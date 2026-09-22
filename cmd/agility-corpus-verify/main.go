@@ -43,7 +43,8 @@ import (
 
 const (
 	// LANDED 2026-08-11. The v767 corpus missed the V8 split and sat in the
-	// pre-V8 arch repo under entity-lab-legacy-meta; it now lives beside its
+	// pre-V8 architecture repo, which is archived and not part of the
+	// active working set; it now lives beside its
 	// two siblings (`ecf-conformance`, `crypto-agility`) in
 	// entity-core-protocol/specs/test-vectors/ — core-protocol `56d4de4`,
 	// copied verbatim, legacy tree untouched.
