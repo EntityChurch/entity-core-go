@@ -18,54 +18,62 @@ This document defines the standard documentation structure for entity-systems pr
 │   │   └── implemented/             # Adopted (retained as audit trail)
 │   └── guides/                      # How-to, patterns, principles (living)
 │
-├── research/                        # Non-canonical: explorations, evaluations, design reviews
-│   └── {topic}/                     # Subdirectories by domain when >10 docs
+├── agents/                          # Agent context
+│   └── memory/                      # Canonical: durable engineering memory (INDEX.md + one file per topic)
 │
-├── status/                          # Current state: tracking, health, planning
+├── status/                          # Current state: dated tracking, health, planning; TRACKER-* (living, internal)
+│
+├── outbox/                          # Internal: routing packets this repo has SENT (addressee block + tip)
 │
 ├── validation/                      # Conformance: does what we built match?
 │   ├── reports/                     # Dated conformance snapshots and JSON artifacts
-│   ├── spec-issues/                 # Spec ambiguities discovered during validation
-│   └── peer-tracking/               # Per-implementation violation tracking
+│   └── spec-issues/                 # Spec ambiguities discovered during validation
 │
-└── legacy/                          # Archived: previous versions, superseded work
+└── reviews/                         # Dated audits and reviews (internal)
 ```
+
+> The authoritative cross-repo doc, memory and routing standard is
+> **`AGENTS-STANDARD.md`** (injected fleet-wide) plus the repo's own
+> `CANONICAL-DOCS.toml`, which declares what each directory *is*. This document
+> is the repo-local elaboration; where they differ, the standard wins.
 
 ### Tier rules
 
 Each tier has a clear purpose. Files must not mix across tiers.
 
-**`architecture/`** — canonical, living design documents. Specs define stable contracts the project commits to. Guides teach how to use those contracts. Proposals track the change lifecycle. Everything here is maintained and kept current. If a document drifts, it belongs in `research/` or `legacy/`, not here.
+**`architecture/`** — canonical, living design documents. Specs define stable contracts the project commits to. Guides teach how to use those contracts. Proposals track the change lifecycle. Everything here is maintained and kept current.
 
-**`research/`** — non-canonical explorations, evaluations, and design reviews. Point-in-time analysis that informed decisions but is not itself a decision. Allowed to drift. Organized by topic when the volume warrants it.
+**`agents/memory/`** — canonical, durable engineering memory: the hard-won lessons a competent newcomer would otherwise rediscover the hard way. One file per part of the system, entered through `INDEX.md`, findable by symptom. Superseded in place, never appended with dates. An entry that could become a test or a gate should become one — and then leaves memory.
 
-**`status/`** — current project state. Implementation tracking, code health reports, proposal adoption status, planning documents. Point-in-time snapshots that answer "where are we now?"
+**`status/`** — current project state, as **dated** snapshots (`HANDOFF-`, `CHECKPOINT-`, `STATUS-`) that answer "where are we now?" and age out. `TRACKER-*.md` (per-counterpart) is the exception: durable, edited in place, internal (never published).
 
-**`validation/`** — conformance testing artifacts. Reports are dated snapshots. Spec issues feed back to the architecture repo as proposals. Peer tracking monitors each implementation's conformance over time.
+**`outbox/`** — routing packets this repo has **sent**, each opening with a `To:`/`From:`/`Tip:` addressee block. Internal; never published. (Acknowledged packets move to `archive/outbox/`.)
 
-**`legacy/`** — archived material from previous versions or superseded work. Not maintained. Kept for historical reference.
+**`validation/`** — conformance testing artifacts. `reports/` are dated snapshots; `spec-issues/` feed back to the architecture repo as proposals.
+
+**`reviews/`** — dated audits and process reviews. Internal.
 
 ### What does NOT belong in `architecture/`
 
-- Explorations and evaluations → `research/`
+- Durable engineering lessons → `agents/memory/`
 - Status trackers and health reports → `status/`
-- Point-in-time reviews → `research/`
-- Backlogs and bug reports → `status/` or issue tracker
+- Point-in-time reviews and audits → `reviews/`
+- Sent routing packets → `outbox/`
 - Validation artifacts → `validation/`
 
-This is the rule that v1.0 failed to enforce. `architecture/` is the canonical tier — only living specs, guides, and active proposals belong there.
+`architecture/` is a canonical tier — only living specs, guides, and active proposals belong there.
 
 ## Relationship to Canonical Architecture
 
-The `entity-core-architecture` repo owns the canonical protocol specifications:
+The protocol specifications live upstream, in two sibling spec repos — this repo
+**references** them and never duplicates them:
 
 ```
-entity-core-architecture/docs/architecture/v7.0-core-revision/
-├── core-protocol-domain/specs/      # V7 protocol, extensions, types, encoding
-├── sdk-domain/specs/                # SDK operations, extension operations
-├── proposals/{implemented,deferred} # Protocol-level change proposals
-└── reviews/{core,network,sync,...}  # Protocol-level research
+../entity-core-protocol/specs/            # ENTITY-CORE-PROTOCOL, ENTITY-CBOR-ENCODING, ENTITY-NATIVE-TYPE-SYSTEM
+../entity-system-architecture/            # specs/extensions/EXTENSION-*, docs/proposals/PROPOSAL-*
 ```
+
+(The pre-split `entity-core-architecture` repo is **stale** — do not read specs from it.)
 
 Implementation projects **reference** these specs — they do not duplicate them. Each implementation project **owns** its own:
 - Project-level specs (tool interfaces, extension architecture, platform decisions)

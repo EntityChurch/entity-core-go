@@ -180,3 +180,100 @@ path  = "docs/README.md"
 title = "Documentation map"
 blurb = "Navigation for this repo's docs, and which tiers are canonical."
 group = "Overview"
+
+# ── Area declarations (2026-09 doc standard) ─────────────────────────────────
+# Tell the checks what each directory IS, rather than leaving them to a hardcoded
+# idea of where docs live. Undeclared prose under a doc dir is dropped at a cut;
+# these areas scope dated/internal trees correctly so a right-organised tree is
+# not flagged and internal material is not published.
+
+[[area]]
+path      = "docs/status"
+kind      = "status"      # dated HANDOFF/CHECKPOINT/STATUS snapshots — working memory, ages out
+publishes = false
+
+[[area]]
+path      = "docs/outbox"
+kind      = "outbox"      # routing packets we have SENT — internal, never published
+publishes = false
+
+[[area]]
+path      = "docs/reviews"
+kind      = "status"      # dated audits/reviews — internal working record
+publishes = false
+
+[[area]]
+path      = "docs/validation/reports"
+kind      = "status"      # dated conformance/validation reports — internal
+publishes = false
+
+[[area]]
+path      = "docs/validation/spec-issues"
+kind      = "status"      # dated spec-ambiguity write-ups routed upstream — internal
+publishes = false
+
+[[area]]
+path      = "docs/agents/memory"
+kind      = "memory"      # durable, indexed engineering memory — publishes
+publishes = true
+
+# The counterpart trackers are durable and edited in place, but must NEVER
+# publish — routing is internal. This is the case that had no honest answer
+# before: the only way to silence the nag used to be "declare it canonical",
+# which publishes it.
+[[living]]
+glob     = "docs/status/TRACKER-*.md"
+internal = true
+
+# ── Engineering memory (docs/agents/memory) ──────────────────────────────────
+# Durable, hard-won lessons split out of AGENTS.md in the 2026-09 cleanup. The
+# area above (kind = "memory") publishes them; each file is declared so the
+# index and the tree agree in both directions.
+
+[[doc]]
+path  = "docs/agents/memory/INDEX.md"
+title = "Engineering memory — index"
+blurb = "Entry point for the durable, hard-won lessons; find an entry by the symptom you arrived with."
+group = "Memory"
+
+[[doc]]
+path  = "docs/agents/memory/CONFORMANCE-GATE-AND-ORACLE-AUTHORING.md"
+title = "Running the conformance gate & authoring oracle checks"
+blurb = "Reading validate-complete.sh's true exit, pass-0b drift, port collisions, test-starved, and writing wire/oracle checks that discriminate."
+group = "Memory"
+
+[[doc]]
+path  = "docs/agents/memory/PROTOCOL-WIRE-INVARIANTS.md"
+title = "Protocol wire invariants"
+blurb = "Receive-boundary / hash / ECF / dispatch-context traps whose violation is a silent hash mismatch or a blind gate."
+group = "Memory"
+
+[[doc]]
+path  = "docs/agents/memory/CAPABILITY-AUTHORIZATION.md"
+title = "Capability authorization"
+blurb = "Grants, scope matchers, exclude semantics, and presented/delegated authority (PD-2)."
+group = "Memory"
+
+[[doc]]
+path  = "docs/agents/memory/COMPUTE-ERROR-SEMANTICS.md"
+title = "Compute error semantics"
+blurb = "The compute/error two-form rule and every consuming site and crossing."
+group = "Memory"
+
+[[doc]]
+path  = "docs/agents/memory/SPEC-READING-AND-CROSS-IMPL-ROUTING.md"
+title = "Spec reading & cross-impl routing"
+blurb = "Build-state claims, sibling claims, routing packets, and error-code census — reading the live worktree before you assert."
+group = "Memory"
+
+[[doc]]
+path  = "docs/agents/memory/PUBLISHED-SURFACE-CITATIONS.md"
+title = "Citations on the published surface"
+blurb = "Pointer vs receipt: citing on files that ship, where an internal SHA resolves nowhere for a public reader."
+group = "Memory"
+
+[[doc]]
+path  = "docs/agents/memory/THE-RATCHET-AND-DIVERGENCE-RULE.md"
+title = "The ratchet & the divergence rule, in practice"
+blurb = "Worked examples behind the methodology's ratchet and the cross-impl divergence rule as they play out here."
+group = "Memory"
