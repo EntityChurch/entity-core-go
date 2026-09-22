@@ -506,7 +506,7 @@ func (c *Connection) reader() {
 				// correlates; emit the coded frame rather than dropping silently.
 				// This dialer-side reader keeps the connection (its own choice per
 				// N4); it does not close.
-				if respEnv, berr := buildDecodeRefusalResponse(bestEffortRequestID(env.Root)); berr == nil {
+				if respEnv, berr := buildDecodeRefusalResponse(bestEffortRequestID(env.Root), vErr); berr == nil {
 					_ = c.SendEnvelope(respEnv)
 				}
 				continue
@@ -697,9 +697,22 @@ func (c *Connection) serve(ctx context.Context) {
 			// root still decodes (the mis-keyed-included forgery case: only an
 			// included entry is bad, the root is a valid EXECUTE), else a
 			// best-effort empty-id frame. A bare close (the pre-N4 behaviour) is
-			// non-conformant. The deferred Close below still runs.
-			if respEnv, berr := buildDecodeRefusalResponse(bestEffortRequestID(env.Root)); berr == nil {
+			// non-conformant.
+			if respEnv, berr := buildDecodeRefusalResponse(bestEffortRequestID(env.Root), err); berr == nil {
 				_ = c.SendEnvelope(respEnv)
+			}
+			// DR-3 (0.8.2.26 §6.3): a non-canonical ECF frame (a CBOR tag) decoded
+			// WHOLE — ecf.Decode succeeded and ValidateAll then found the tag — so
+			// the stream is synchronized on the next boundary and the connection
+			// MUST survive (§4.9(c): a close would destroy unrelated admitted
+			// requests on a multiplexed connection). Same disposition as the
+			// pre-admission undecodable arm and the dialer-side reader, and it
+			// matches entity-core-{rust,py}, whose tag rejection keeps the
+			// connection. A hash/key-binding failure keeps N4's close (its own
+			// ruling); whether that whole-decoded failure should ALSO continue is
+			// routed, not decided here.
+			if errors.Is(err, ecerrors.ErrNonCanonicalECF) {
+				continue
 			}
 			return
 		}
@@ -1571,15 +1584,25 @@ func (c *Connection) ExecuteWithIncluded(
 // coded response correlated by request_id where the id is available, and
 // otherwise MUST make a best-effort coded frame before closing — dropping the
 // frame with no response and no close is non-conformant, and so is closing with
-// no coded frame. F79 pins this boundary's code to 400 hash_mismatch (every
-// ValidateAll failure is a hash-binding failure). requestID is the best-effort
-// id read from the still-decoded root (empty for a handshake frame or a root we
-// could not read); the frame is emitted either way. Whether the peer closes
-// afterwards remains its own choice (serve()'s deferred Close does).
-func buildDecodeRefusalResponse(requestID string) (entity.Envelope, error) {
+// no coded frame. F79 pins the hash/key-binding failure to 400 hash_mismatch
+// (every §1.8 ValidateAll failure is a hash-binding failure); the §6.3 tag
+// failure (0.8.2.26 DR-3) is a distinct 400 non_canonical_ecf — the bytes
+// decode and self-verify, so the remedy is "re-encode without the tag", a
+// different code the caller can only reach by inspecting the cause. requestID
+// is the best-effort id read from the still-decoded root (empty for a handshake
+// frame or a root we could not read); the frame is emitted either way. Whether
+// the peer closes afterwards remains its own choice (serve()'s deferred Close
+// does).
+func buildDecodeRefusalResponse(requestID string, cause error) (entity.Envelope, error) {
+	code := "hash_mismatch"
+	msg := "envelope failed receive-boundary hash/key-binding validation (§1.8)"
+	if errors.Is(cause, ecerrors.ErrNonCanonicalECF) {
+		code = "non_canonical_ecf"
+		msg = "received frame carries a CBOR tag — re-encode in canonical ECF (ENTITY-CBOR-ENCODING §6.3)"
+	}
 	errData := types.ErrorData{
-		Code:    "hash_mismatch",
-		Message: "envelope failed receive-boundary hash/key-binding validation (§1.8)",
+		Code:    code,
+		Message: msg,
 	}
 	errEntity, err := errData.ToEntity()
 	if err != nil {

@@ -57,7 +57,25 @@ func (e Envelope) ValidateAll() error {
 	if err := e.Root.Validate(); err != nil {
 		return fmt.Errorf("root: %w", err)
 	}
-	return VerifyIncludedKeyBinding(e.Included)
+	// §6.3 (0.8.2.26 DR-3): a received frame MUST NOT carry a CBOR tag at any
+	// depth. hash validation cannot see it — a tagged entity self-verifies —
+	// and the data field is captured raw for byte fidelity, so the tag is never
+	// parsed by the entity decode. One walk over the root's data reaches every
+	// nested data field it embeds (an EXECUTE root's data carries the params
+	// entity). Wide reading (any depth), matching entity-core-{rust,py}; settles
+	// SA-PY-66 toward §6.3 over row (5a)'s narrower "data-field position".
+	if err := ecf.ForbidTags(e.Root.Data); err != nil {
+		return fmt.Errorf("root: %w", err)
+	}
+	if err := VerifyIncludedKeyBinding(e.Included); err != nil {
+		return err
+	}
+	for h, ent := range e.Included {
+		if err := ecf.ForbidTags(ent.Data); err != nil {
+			return fmt.Errorf("included[%s]: %w", h, err)
+		}
+	}
+	return nil
 }
 
 // VerifyIncludedKeyBinding checks that every entry in an included map is keyed

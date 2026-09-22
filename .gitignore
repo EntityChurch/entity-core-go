@@ -40,6 +40,7 @@
 /agility-corpus-build
 /agility-corpus-verify
 /agility-phase2-pins
+/corpus-sig-verify
 /validate-peer
 /webrtc-vectors
 /wire-conformance

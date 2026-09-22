@@ -25,6 +25,13 @@ var (
 	// ErrDuplicateMapKey indicates a CBOR map with duplicate keys.
 	ErrDuplicateMapKey = errors.New("duplicate map key")
 
+	// ErrNonCanonicalECF indicates a received frame carries a construct ECF
+	// forbids — a CBOR tag (major type 6) at any depth (ENTITY-CBOR-ENCODING
+	// §6.3). Distinct from ErrHashMismatch: the bytes decode and self-verify,
+	// but they are non-canonical, so the receive-boundary remedy is
+	// "re-encode without the tag" (400 non_canonical_ecf), not a hash failure.
+	ErrNonCanonicalECF = errors.New("non-canonical ECF")
+
 	// ErrNotFound indicates an entity or path was not found.
 	ErrNotFound = errors.New("not found")
 
