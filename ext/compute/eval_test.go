@@ -629,7 +629,7 @@ func TestEvalLookupTree(t *testing.T) {
 
 	valueEnt := mustE(types.ComputeLiteralData{Value: int64(42)}.ToEntity())
 	valueHash := mustPut(t, cs, valueEnt)
-	li.Set("/peer1/app/data", valueHash)
+	li.Set("/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/data", valueHash)
 
 	ctx := &EvalContext{
 		ContentStore:  cs,
@@ -637,7 +637,7 @@ func TestEvalLookupTree(t *testing.T) {
 		Included:      make(map[hash.Hash]entity.Entity),
 	}
 
-	lookupEnt := mustE(types.ComputeLookupTreeData{Path: "/peer1/app/data"}.ToEntity())
+	lookupEnt := mustE(types.ComputeLookupTreeData{Path: "/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/data"}.ToEntity())
 
 	// Tree entity is a compute expression, so it should be evaluated.
 	result, err := Evaluate(lookupEnt, NewScope(), DefaultBudget(), ctx)
@@ -748,13 +748,13 @@ func TestEvalLookupTreeRelativePath(t *testing.T) {
 
 	valueEnt := mustE(types.ComputeLiteralData{Value: int64(99)}.ToEntity())
 	valueHash := mustPut(t, cs, valueEnt)
-	li.Set("/peer1/app/job/data/input", valueHash)
+	li.Set("/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/job/data/input", valueHash)
 
 	ctx := &EvalContext{
 		ContentStore:  cs,
 		LocationIndex: li,
 		Included:      make(map[hash.Hash]entity.Entity),
-		SubgraphRoot:  "/peer1/app/job",
+		SubgraphRoot:  "/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/job",
 	}
 
 	lookupEnt := mustE(types.ComputeLookupTreeData{
@@ -777,14 +777,14 @@ func TestEvalLookupTreeRelativePathDependencyRegistration(t *testing.T) {
 
 	valueEnt := mustE(types.ComputeLiteralData{Value: int64(1)}.ToEntity())
 	valueHash := mustPut(t, cs, valueEnt)
-	li.Set("/peer1/root/data/x", valueHash)
+	li.Set("/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/root/data/x", valueHash)
 
 	var registeredDep string
 	ctx := &EvalContext{
 		ContentStore:  cs,
 		LocationIndex: li,
 		Included:      make(map[hash.Hash]entity.Entity),
-		SubgraphRoot:  "/peer1/root",
+		SubgraphRoot:  "/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/root",
 		RegisterDep: func(path string) {
 			registeredDep = path
 		},
@@ -798,7 +798,7 @@ func TestEvalLookupTreeRelativePathDependencyRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if registeredDep != "/peer1/root/data/x" {
+	if registeredDep != "/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/root/data/x" {
 		t.Fatalf("expected absolute dep registration, got %q", registeredDep)
 	}
 }
@@ -812,13 +812,13 @@ func TestEvalLookupTreeBarePathCanonicalized(t *testing.T) {
 
 	valueEnt := mustE(types.ComputeLiteralData{Value: int64(42)}.ToEntity())
 	valueHash := mustPut(t, cs, valueEnt)
-	li.Set("/peer1/app/x", valueHash)
+	li.Set("/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/x", valueHash)
 
 	var registeredDep string
 	ctx := &EvalContext{
 		ContentStore:  cs,
 		LocationIndex: li,
-		LocalPeerID:   "peer1",
+		LocalPeerID:   "2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		Included:      make(map[hash.Hash]entity.Entity),
 		RegisterDep: func(path string) {
 			registeredDep = path
@@ -826,15 +826,15 @@ func TestEvalLookupTreeBarePathCanonicalized(t *testing.T) {
 	}
 
 	// Bare path, Relative absent/false — should resolve and dep-track as
-	// /peer1/app/x, not the verbatim "app/x".
+	// /2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/x, not the verbatim "app/x".
 	lookupEnt := mustE(types.ComputeLookupTreeData{Path: "app/x"}.ToEntity())
 
 	result, err := Evaluate(lookupEnt, NewScope(), DefaultBudget(), ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if registeredDep != "/peer1/app/x" {
-		t.Fatalf("expected dep registered at canonical /peer1/app/x, got %q", registeredDep)
+	if registeredDep != "/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/x" {
+		t.Fatalf("expected dep registered at canonical /2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/x, got %q", registeredDep)
 	}
 	rv, ok := toFloat64(result)
 	if !ok || rv != 42 {
@@ -866,18 +866,18 @@ func TestEvalLookupTreeCapabilityDeniesOutOfScope(t *testing.T) {
 	cs := store.NewMemoryContentStore()
 	li := store.NewMemoryLocationIndex()
 	valueEnt := mustE(types.ComputeLiteralData{Value: int64(42)}.ToEntity())
-	li.Set("/peer1/system/secret", mustPut(t, cs, valueEnt))
+	li.Set("/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/system/secret", mustPut(t, cs, valueEnt))
 
-	cap := makeCapEntity(t, []string{"get"}, []string{"system/tree"}, []string{"/peer1/app/*"})
+	cap := makeCapEntity(t, []string{"get"}, []string{"system/tree"}, []string{"/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/*"})
 	ctx := &EvalContext{
 		ContentStore:  cs,
 		LocationIndex: li,
-		LocalPeerID:   "peer1",
+		LocalPeerID:   "2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		Capability:    cap,
 		Included:      make(map[hash.Hash]entity.Entity),
 	}
 
-	lookupEnt := mustE(types.ComputeLookupTreeData{Path: "/peer1/system/secret"}.ToEntity())
+	lookupEnt := mustE(types.ComputeLookupTreeData{Path: "/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/system/secret"}.ToEntity())
 	_, err := Evaluate(lookupEnt, NewScope(), DefaultBudget(), ctx)
 	if err == nil {
 		t.Fatal("expected permission_denied for out-of-scope tree read")
@@ -892,18 +892,18 @@ func TestEvalLookupTreeCapabilityAllowsInScope(t *testing.T) {
 	cs := store.NewMemoryContentStore()
 	li := store.NewMemoryLocationIndex()
 	valueEnt := mustE(types.ComputeLiteralData{Value: int64(7)}.ToEntity())
-	li.Set("/peer1/app/data", mustPut(t, cs, valueEnt))
+	li.Set("/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/data", mustPut(t, cs, valueEnt))
 
-	cap := makeCapEntity(t, []string{"get"}, []string{"system/tree"}, []string{"/peer1/app/*"})
+	cap := makeCapEntity(t, []string{"get"}, []string{"system/tree"}, []string{"/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/*"})
 	ctx := &EvalContext{
 		ContentStore:  cs,
 		LocationIndex: li,
-		LocalPeerID:   "peer1",
+		LocalPeerID:   "2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		Capability:    cap,
 		Included:      make(map[hash.Hash]entity.Entity),
 	}
 
-	lookupEnt := mustE(types.ComputeLookupTreeData{Path: "/peer1/app/data"}.ToEntity())
+	lookupEnt := mustE(types.ComputeLookupTreeData{Path: "/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/data"}.ToEntity())
 	result, err := Evaluate(lookupEnt, NewScope(), DefaultBudget(), ctx)
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
@@ -931,7 +931,7 @@ func TestEvalApplyDualCheckHandlerGrantBlocksEscape(t *testing.T) {
 	lookupCapHash := mustPut(t, cs, lookupCapEnt)
 
 	resourceLit := mustE(types.ComputeLiteralData{
-		Value: types.ResourceTarget{Targets: []string{"/peer1/anything"}},
+		Value: types.ResourceTarget{Targets: []string{"/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/anything"}},
 	}.ToEntity())
 	resourceLitHash := mustPut(t, cs, resourceLit)
 
@@ -945,7 +945,7 @@ func TestEvalApplyDualCheckHandlerGrantBlocksEscape(t *testing.T) {
 	dispatched := false
 	ctx := &EvalContext{
 		ContentStore: cs,
-		LocalPeerID:  "peer1",
+		LocalPeerID:  "2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		Capability:   handlerGrant,
 		Included:     map[hash.Hash]entity.Entity{adminCapHash: adminCap},
 		DispatchExecute: func(path, op string, resource *types.ResourceTarget, p entity.Entity, override *entity.Entity) (*handler.Response, error) {
@@ -982,7 +982,7 @@ func TestEvalApplyDualCheckProvidedCapBlocks(t *testing.T) {
 	lookupCapHash := mustPut(t, cs, lookupCapEnt)
 
 	resourceLit := mustE(types.ComputeLiteralData{
-		Value: types.ResourceTarget{Targets: []string{"/peer1/x"}},
+		Value: types.ResourceTarget{Targets: []string{"/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/x"}},
 	}.ToEntity())
 	resourceLitHash := mustPut(t, cs, resourceLit)
 
@@ -996,7 +996,7 @@ func TestEvalApplyDualCheckProvidedCapBlocks(t *testing.T) {
 	dispatched := false
 	ctx := &EvalContext{
 		ContentStore: cs,
-		LocalPeerID:  "peer1",
+		LocalPeerID:  "2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		Capability:   handlerGrant,
 		Included:     map[hash.Hash]entity.Entity{callerCapHash: callerCap},
 		DispatchExecute: func(path, op string, resource *types.ResourceTarget, p entity.Entity, override *entity.Entity) (*handler.Response, error) {
@@ -1024,14 +1024,14 @@ func TestEvalApplyDualCheckBothPassDispatchesWithOverride(t *testing.T) {
 	cs := store.NewMemoryContentStore()
 
 	handlerGrant := makeCapEntity(t, []string{"*"}, []string{"system/tree"}, []string{"*"})
-	callerCap := makeCapEntity(t, []string{"*"}, []string{"system/tree"}, []string{"/peer1/app/public/*"})
+	callerCap := makeCapEntity(t, []string{"*"}, []string{"system/tree"}, []string{"/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/public/*"})
 	callerCapHash := mustPut(t, cs, callerCap)
 
 	lookupCapEnt := mustE(types.ComputeLookupScopeData{Name: "caller_cap"}.ToEntity())
 	lookupCapHash := mustPut(t, cs, lookupCapEnt)
 
 	resourceLit := mustE(types.ComputeLiteralData{
-		Value: types.ResourceTarget{Targets: []string{"/peer1/app/public/y"}},
+		Value: types.ResourceTarget{Targets: []string{"/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/public/y"}},
 	}.ToEntity())
 	resourceLitHash := mustPut(t, cs, resourceLit)
 
@@ -1045,7 +1045,7 @@ func TestEvalApplyDualCheckBothPassDispatchesWithOverride(t *testing.T) {
 	var seenOverride *entity.Entity
 	ctx := &EvalContext{
 		ContentStore: cs,
-		LocalPeerID:  "peer1",
+		LocalPeerID:  "2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		Capability:   handlerGrant,
 		Included:     map[hash.Hash]entity.Entity{callerCapHash: callerCap},
 		DispatchExecute: func(path, op string, resource *types.ResourceTarget, p entity.Entity, override *entity.Entity) (*handler.Response, error) {
@@ -1082,7 +1082,7 @@ func TestEvalApplyNoCapabilityFieldUsesCtxCapability(t *testing.T) {
 	var seenOverride *entity.Entity
 	ctx := &EvalContext{
 		ContentStore: cs,
-		LocalPeerID:  "peer1",
+		LocalPeerID:  "2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		Capability:   handlerGrant,
 		Included:     make(map[hash.Hash]entity.Entity),
 		DispatchExecute: func(path, op string, resource *types.ResourceTarget, p entity.Entity, override *entity.Entity) (*handler.Response, error) {
@@ -1101,23 +1101,23 @@ func TestEvalApplyNoCapabilityFieldUsesCtxCapability(t *testing.T) {
 }
 
 // PROPOSAL-COMPUTE-APPLY-RESOURCE-CEILING test vector row 3 (the security test).
-// Handler grant covers tree:get on /peer1/app/*; caller cap covers tree:get on
-// /peer1/system/secret/*. Without resource-aware dual-check, the handler grant
+// Handler grant covers tree:get on /2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/*; caller cap covers tree:get on
+// /2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/system/secret/*. Without resource-aware dual-check, the handler grant
 // "ceiling" passes at handler+op only and the dispatch goes through with the
 // caller's cap, reading the secret. With F2, the ceiling check sees resource
-// "/peer1/system/secret/x" and rejects.
+// "/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/system/secret/x" and rejects.
 func TestEvalApplyDualCheckResourceCeiling(t *testing.T) {
 	cs := store.NewMemoryContentStore()
 
-	handlerGrant := makeCapEntity(t, []string{"*"}, []string{"system/tree"}, []string{"/peer1/app/*"})
-	callerCap := makeCapEntity(t, []string{"*"}, []string{"system/tree"}, []string{"/peer1/system/secret/*"})
+	handlerGrant := makeCapEntity(t, []string{"*"}, []string{"system/tree"}, []string{"/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/*"})
+	callerCap := makeCapEntity(t, []string{"*"}, []string{"system/tree"}, []string{"/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/system/secret/*"})
 	callerCapHash := mustPut(t, cs, callerCap)
 
 	lookupCapEnt := mustE(types.ComputeLookupScopeData{Name: "caller_cap"}.ToEntity())
 	lookupCapHash := mustPut(t, cs, lookupCapEnt)
 
 	resourceLit := mustE(types.ComputeLiteralData{
-		Value: types.ResourceTarget{Targets: []string{"/peer1/system/secret/x"}},
+		Value: types.ResourceTarget{Targets: []string{"/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/system/secret/x"}},
 	}.ToEntity())
 	resourceLitHash := mustPut(t, cs, resourceLit)
 
@@ -1131,7 +1131,7 @@ func TestEvalApplyDualCheckResourceCeiling(t *testing.T) {
 	dispatched := false
 	ctx := &EvalContext{
 		ContentStore: cs,
-		LocalPeerID:  "peer1",
+		LocalPeerID:  "2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		Capability:   handlerGrant,
 		Included:     map[hash.Hash]entity.Entity{callerCapHash: callerCap},
 		DispatchExecute: func(path, op string, resource *types.ResourceTarget, p entity.Entity, override *entity.Entity) (*handler.Response, error) {
@@ -1174,7 +1174,7 @@ func TestEvalApplyF5RuntimeRejectsCapabilityWithoutResource(t *testing.T) {
 
 	ctx := &EvalContext{
 		ContentStore: cs,
-		LocalPeerID:  "peer1",
+		LocalPeerID:  "2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		Capability:   handlerGrant,
 		Included:     map[hash.Hash]entity.Entity{callerCapHash: callerCap},
 		DispatchExecute: func(path, op string, resource *types.ResourceTarget, p entity.Entity, override *entity.Entity) (*handler.Response, error) {
@@ -1202,7 +1202,7 @@ func TestEvalApplyDispatchedExecuteCarriesResource(t *testing.T) {
 	handlerGrant := makeCapEntity(t, []string{"*"}, []string{"system/tree"}, []string{"*"})
 
 	resourceLit := mustE(types.ComputeLiteralData{
-		Value: types.ResourceTarget{Targets: []string{"/peer1/app/x"}},
+		Value: types.ResourceTarget{Targets: []string{"/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/x"}},
 	}.ToEntity())
 	resourceLitHash := mustPut(t, cs, resourceLit)
 
@@ -1215,7 +1215,7 @@ func TestEvalApplyDispatchedExecuteCarriesResource(t *testing.T) {
 	var seenResource *types.ResourceTarget
 	ctx := &EvalContext{
 		ContentStore: cs,
-		LocalPeerID:  "peer1",
+		LocalPeerID:  "2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		Capability:   handlerGrant,
 		Included:     make(map[hash.Hash]entity.Entity),
 		DispatchExecute: func(path, op string, resource *types.ResourceTarget, p entity.Entity, override *entity.Entity) (*handler.Response, error) {
@@ -1231,8 +1231,8 @@ func TestEvalApplyDispatchedExecuteCarriesResource(t *testing.T) {
 	if seenResource == nil {
 		t.Fatal("dispatched EXECUTE must carry the resolved resource")
 	}
-	if len(seenResource.Targets) != 1 || seenResource.Targets[0] != "/peer1/app/x" {
-		t.Fatalf("dispatched resource targets = %v, want [/peer1/app/x]", seenResource.Targets)
+	if len(seenResource.Targets) != 1 || seenResource.Targets[0] != "/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/x" {
+		t.Fatalf("dispatched resource targets = %v, want [/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/app/x]", seenResource.Targets)
 	}
 }
 
@@ -1246,7 +1246,7 @@ func TestEvalLookupTreeNonExpression(t *testing.T) {
 		t.Fatal(err)
 	}
 	identHash := mustPut(t, cs, identEnt)
-	li.Set("/peer1/system/peer", identHash)
+	li.Set("/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/system/peer", identHash)
 
 	ctx := &EvalContext{
 		ContentStore:  cs,
@@ -1254,7 +1254,7 @@ func TestEvalLookupTreeNonExpression(t *testing.T) {
 		Included:      make(map[hash.Hash]entity.Entity),
 	}
 
-	lookupEnt := mustE(types.ComputeLookupTreeData{Path: "/peer1/system/peer"}.ToEntity())
+	lookupEnt := mustE(types.ComputeLookupTreeData{Path: "/2Peer1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/system/peer"}.ToEntity())
 
 	result, err := Evaluate(lookupEnt, NewScope(), DefaultBudget(), ctx)
 	if err != nil {

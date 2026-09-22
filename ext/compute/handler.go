@@ -56,13 +56,14 @@ func (h *Handler) Handle(ctx context.Context, req *handler.Request) (*handler.Re
 func (h *Handler) handleEval(ctx context.Context, req *handler.Request) (*handler.Response, error) {
 	hctx := req.Context
 
-	// V7 §3.2 path-as-resource: the expression path comes from
-	// EXECUTE.resource.targets[0]. Single-target, URI-only.
-	if hctx.Resource == nil || len(hctx.Resource.Targets) != 1 {
-		return handler.NewErrorResponse(400, "ambiguous_resource",
-			"eval requires exactly one resource target (the expression path)")
+	// V7 §3.2 path-as-resource: the expression path is drawn from
+	// effective_targets (§5.2, 0.8.2.20), never resource.Targets[0]. §3.3's
+	// cardinality on the effective set: empty → path_required, >1 →
+	// ambiguous_resource, a pattern → malformed_resource.
+	exprPath, resp := hctx.ResourceSubject("system/compute:eval")
+	if resp != nil {
+		return resp, nil
 	}
-	exprPath := hctx.Resource.Targets[0]
 	if !looksLikeExpressionPath(exprPath, hctx) {
 		return handler.NewErrorResponse(400, "ambiguous_resource",
 			"eval resource must target an expression path, not the handler pattern")

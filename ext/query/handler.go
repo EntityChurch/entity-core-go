@@ -583,10 +583,11 @@ func cborIn(value, arrayValue cbor.RawMessage) bool {
 
 // checkQueryPathPermission does a basic path authorization check.
 // Path is qualified ({peerID}/bare). Resource targets are bare.
-// Qualify targets before comparing.
+// Qualify targets before comparing. Iterates the EFFECTIVE targets (§5.2,
+// 0.8.2.20) so a caller-excluded target cannot authorize a path.
 func checkQueryPathPermission(path string, hctx *handler.HandlerContext) bool {
 	if hctx.Resource != nil {
-		for _, target := range hctx.Resource.Targets {
+		for _, target := range hctx.EffectiveTargets() {
 			if target == "*" {
 				return true
 			}

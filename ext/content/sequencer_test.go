@@ -117,7 +117,12 @@ func TestEnsureClosure_ReturnsStatusErrorOnDenial(t *testing.T) {
 		nonZeroDigest[i] = 0xAA
 	}
 	someHash, _ := hash.FromBytes(append([]byte{hash.AlgorithmSHA256}, nonZeroDigest...))
-	d := &denyingDispatcher{cs: local, status: 403, code: "forbidden", message: "cap denied"}
+	// 403 code is capability_denied — EXTENSION-TREE §8/App. A and EXTENSION-
+	// REVISION §8 spell the denial that way; "forbidden" is in no corpus table
+	// (a fixture asserting an undefined code is our constant against our own,
+	// and teaches the next reader a spelling the wire never uses — py caught it
+	// cohort-wide, 2026-09-11).
+	d := &denyingDispatcher{cs: local, status: 403, code: "capability_denied", message: "cap denied"}
 	err := EnsureClosure(context.Background(), d, someHash, "system/content")
 	if err == nil {
 		t.Fatalf("expected StatusError, got nil")

@@ -191,6 +191,14 @@ func (h *Handler) handleRequest(ctx context.Context, req *handler.Request) (*han
 		return handler.NewErrorResponse(400, "invalid_params",
 			"capability-request must specify at least one grant entry")
 	}
+	// H1 (§5.2/§5.4/§6.2, 0.8.2.21): refuse a capability carrying an unmatchable
+	// scope pattern at the authoring surface — an unmatchable exclude is
+	// fail-open (carves out nothing → a grant wider than written), so the
+	// granter, the party the widening harms, is told here.
+	if bad := corecap.FirstUnmatchableScopePattern(rr.Grants); bad != "" {
+		return handler.NewErrorResponse(400, "invalid_path",
+			"grant scope pattern "+bad+" is unmatchable (§5.4 NEVER_MATCH); refuse rather than mint a grant wider than written")
+	}
 
 	parentCap, err := types.CapabilityTokenDataFromEntity(hctx.CallerCapability)
 	if err != nil {
@@ -291,6 +299,13 @@ func (h *Handler) handleDelegate(ctx context.Context, req *handler.Request) (*ha
 	if len(dr.Grants) == 0 {
 		return handler.NewErrorResponse(400, "invalid_params",
 			"delegate-request must specify at least one grant entry")
+	}
+	// H1 (§5.2/§5.4/§6.2, 0.8.2.21): refuse an unmatchable scope pattern at
+	// delegation too — same reason as request; the fail-open exclude harms the
+	// granter, told here.
+	if bad := corecap.FirstUnmatchableScopePattern(dr.Grants); bad != "" {
+		return handler.NewErrorResponse(400, "invalid_path",
+			"grant scope pattern "+bad+" is unmatchable (§5.4 NEVER_MATCH); refuse rather than mint a grant wider than written")
 	}
 
 	parentEnt, ok := hctx.Store.Get(dr.Parent)

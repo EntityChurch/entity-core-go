@@ -719,6 +719,40 @@ func TestExtractFullPrefix(t *testing.T) {
 	}
 }
 
+// TestExtractMalformedPathIs400NotPanic is the handler teeth for the remote-DoS
+// fix (2026-09-11): a control character in extract's paths[] (unvalidated caller
+// params) used to be concatenated onto the prefix and handed to the location
+// index, which panicked the connection task — a remote crash from any peer with
+// a normal get grant. It must now be a 400 invalid_path. The test PANICKING is
+// itself the failure signal (the handler runs on this goroutine), so a green
+// run proves the crash is gone; the status assertion proves the clean refusal.
+func TestExtractMalformedPathIs400NotPanic(t *testing.T) {
+	h, cs, li, pid := setup(t)
+
+	e1 := makeEntity(t, "test/a", "alpha")
+	cs.Put(e1)
+	li.Set("local/files/a.txt", e1.ContentHash)
+
+	// Each malformed shape §6.2/v4.9 names must be 400 for the WHOLE request:
+	// a control char, an empty segment ("//" via a leading-"/" entry). A green
+	// run is also the no-panic proof (the handler runs on this goroutine).
+	for _, bad := range []string{"\x01evil", "/x"} {
+		extractReq := types.ExtractRequestData{
+			Prefix: "local/files/",
+			Paths:  []string{"a.txt", bad}, // one good + one malformed → whole request 400
+		}
+		extractEntity, _ := extractReq.ToEntity()
+		req := makeRequest(cs, li, pid, "system/tree", "extract", extractEntity, &types.ResourceTarget{Targets: []string{"local/files/"}})
+		resp, err := h.Handle(context.Background(), req)
+		if err != nil {
+			t.Fatalf("paths[]=%q: expected a 400 response, got go error: %v", bad, err)
+		}
+		if resp.Status != 400 {
+			t.Fatalf("malformed extract path %q must be 400 invalid_path for the whole request, got %d", bad, resp.Status)
+		}
+	}
+}
+
 func TestExtractPathsFilter(t *testing.T) {
 	h, cs, li, pid := setup(t)
 

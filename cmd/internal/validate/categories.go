@@ -67,6 +67,7 @@ func AllCategories() []string {
 		catRelaySourceRoute,
 		catRelayStoreBounds,
 		catResourceBounds,
+		catResourceEffective,
 		catRevision,
 		catRole,
 		catRoute,

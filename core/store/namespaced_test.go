@@ -49,6 +49,53 @@ func TestNamespacedIndex_LocalSetGet(t *testing.T) {
 	}
 }
 
+// TestNamespacedIndex_TotalOverMalformedPaths is the boundary teeth for the
+// remote-DoS fix (2026-09-11, cohort-wide — rust made its qualify_path total the
+// same day). A caller-controlled path with a control character used to reach
+// canonicalize and PANIC the connection task (defense-in-depth-as-assert on
+// untrusted input). Every store-touching method must be TOTAL: reads treat a
+// malformed path as absent, writes return an error, none panic. Mutation:
+// restore the panic in canonicalize (route methods through it) and every arm
+// below crashes the test binary.
+func TestNamespacedIndex_TotalOverMalformedPaths(t *testing.T) {
+	inner := NewMemoryLocationIndex()
+	ns := NewNamespacedIndex(inner, testLocalNS)
+	h := makeHash(0x01)
+
+	// The confirmed DoS payloads: a control char, and a non-peer first segment.
+	for _, bad := range []string{"files/\x01evil", "/short/x", "/" + testLocalNS + "//x"} {
+		// Reads: absent, no panic.
+		if _, ok := ns.Get(bad); ok {
+			t.Fatalf("Get(%q): a malformed path must be absent", bad)
+		}
+		if ns.Has(bad) {
+			t.Fatalf("Has(%q): a malformed path must be absent", bad)
+		}
+		if _, ok := ns.Remove(bad); ok {
+			t.Fatalf("Remove(%q): a malformed path must be absent", bad)
+		}
+		if got := ns.List(bad); got != nil {
+			t.Fatalf("List(%q): a malformed prefix must list nothing, got %v", bad, got)
+		}
+		if got := ns.LenPrefix(bad); got != 0 {
+			t.Fatalf("LenPrefix(%q): a malformed prefix must count 0, got %d", bad, got)
+		}
+		// Writes: error, no panic.
+		if err := ns.Set(bad, h); err == nil {
+			t.Fatalf("Set(%q): a malformed path must return an error", bad)
+		}
+		if _, err := ns.SetWithContext(bad, h, nil); err == nil {
+			t.Fatalf("SetWithContext(%q): a malformed path must return an error", bad)
+		}
+		if err := ns.CompareAndSwap(bad, hash.Hash{}, h); err == nil {
+			t.Fatalf("CompareAndSwap(%q): a malformed path must return an error", bad)
+		}
+		if err := ns.CompareAndRemove(bad, h); err == nil {
+			t.Fatalf("CompareAndRemove(%q): a malformed path must return an error", bad)
+		}
+	}
+}
+
 func TestNamespacedIndex_Has(t *testing.T) {
 	inner := NewMemoryLocationIndex()
 	ns := NewNamespacedIndex(inner, testLocalNS)

@@ -22,7 +22,7 @@ import (
 // testLocalPeerIDIntegration is the local peer id used to canonicalize
 // cap-resource patterns in integration tests (V7 §5.5 / PR-8). 46+ Base58
 // chars so it passes looksLikePeerID.
-const testLocalPeerIDIntegration = crypto.PeerID("2KZFtestIntegrationLocalPeerIDAAAAAAAAAAAAAAAA")
+const testLocalPeerIDIntegration = crypto.PeerID("2KZFtestZntegrationFocaPeerAAAAAAAAAAAAAAAAAAA")
 
 // mkConsultCapForIntegration builds a CallerCapability permitting the
 // consult gate (the public package-level constants on

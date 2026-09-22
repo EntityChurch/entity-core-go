@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"go.entitychurch.org/entity-core-go/core/capability"
-	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
 	ecerrors "go.entitychurch.org/entity-core-go/core/errors"
@@ -152,11 +151,13 @@ func (h *Handler) handleGet(ctx context.Context, req *handler.Request) (*handler
 		}
 	}
 
-	// Path comes from resource target (v7).
-	var path string
-	if hctx.Resource != nil && len(hctx.Resource.Targets) > 0 {
-		path = hctx.Resource.Targets[0]
-	}
+	// Path comes from the effective resource target (§5.2, 0.8.2.20), never
+	// resource.Targets[0] — that is the F68 bypass (a caller excluding its own
+	// sole target reaches the handler with the dispatch-level check made
+	// vacuous). An empty effective set (absent, or a lone target the caller
+	// excluded) means a listing, a legitimate tree:get; the handler-level
+	// CheckPathPermission below is the enforcement that closes F68 here.
+	path := hctx.ExtractResourcePath()
 
 	// Level 2 capability check: path-level permission.
 	if !hctx.CallerCapability.ContentHash.IsZero() {
@@ -174,7 +175,7 @@ func (h *Handler) handleGet(ctx context.Context, req *handler.Request) (*handler
 
 	// Trailing slash or empty path → listing.
 	if path == "" || strings.HasSuffix(path, "/") {
-		return h.handleListing(hctx.LocationIndex, path, hctx.LocalPeerID, &getReq)
+		return h.handleListing(hctx, path, &getReq)
 	}
 
 	// Look up path in location index.
@@ -215,7 +216,9 @@ func (h *Handler) handleGet(ctx context.Context, req *handler.Request) (*handler
 	}
 }
 
-func (h *Handler) handleListing(idx store.LocationIndex, prefix string, localPeerID crypto.PeerID, getReq *types.GetRequestData) (*handler.Response, error) {
+func (h *Handler) handleListing(hctx *handler.HandlerContext, prefix string, getReq *types.GetRequestData) (*handler.Response, error) {
+	idx := hctx.LocationIndex
+	localPeerID := hctx.LocalPeerID
 	entries := idx.List(prefix)
 
 	// Group by immediate child name to produce a single-level listing.
@@ -285,6 +288,23 @@ func (h *Handler) handleListing(idx store.LocationIndex, prefix string, localPee
 		}
 	}
 
+	// EXTENSION-TREE §8.2: a listing returns ONLY entries the capability grants
+	// `get` access to, and the `count` field MUST reflect the filtered (visible)
+	// count — a discrepancy between count and returned entries would leak the
+	// existence of hidden paths. The dispatch/prefix-level check authorized the
+	// prefix; each child is a distinct path the handler is about to reveal, so
+	// each is checked here (the §6.3 handler-level check, per-entry — rust routed
+	// this gap 2026-09-11). checkPathPerm returns true when no caller capability
+	// is present (local/trusted), so an unscoped read is unfiltered as before.
+	// childAbs = qualifiedPrefix + name is a genuine prefix of the entry's full
+	// path (qualifiedPrefix + rel == e.Path), so it needs no separator fix-up.
+	for name := range children {
+		childAbs := qualifiedPrefix + name
+		if !checkPathPerm(hctx, "get", childAbs) {
+			delete(children, name)
+		}
+	}
+
 	// Sort child names for stable output.
 	names := make([]string, 0, len(children))
 	for name := range children {
@@ -350,13 +370,13 @@ func (h *Handler) handlePut(ctx context.Context, req *handler.Request) (*handler
 		}
 	}
 
-	// Path comes from resource target (v7).
-	var path string
-	if hctx.Resource != nil && len(hctx.Resource.Targets) > 0 {
-		path = hctx.Resource.Targets[0]
-	}
+	// Path comes from the effective resource target (§5.2, 0.8.2.20), never
+	// resource.Targets[0] (the F68 bypass). tree:put requires a concrete write
+	// path, so an empty effective set — absent, or a lone target the caller
+	// excluded — is the absent case: §3.3 path_required.
+	path := hctx.ExtractResourcePath()
 	if path == "" {
-		return handler.NewErrorResponse(400, "invalid_params", "resource target path is required")
+		return handler.NewErrorResponse(400, "path_required", "resource target path is required")
 	}
 	// V7 §1.4 + v7.72 §9.5a CORE-TREE-PATH-FLEX-1: reject paths with
 	// control characters (NUL, C0 range, DEL). Caller paths come in any

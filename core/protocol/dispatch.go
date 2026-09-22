@@ -513,18 +513,32 @@ func isRemoteURI(uri string, localPeerID crypto.PeerID) bool {
 // If a target is entity://local_peer/path, it becomes just path.
 // If a target is entity://other_peer/path, it stays as-is (cross-peer resource reference).
 // If a target is already a bare path, it stays as-is.
+//
+// The caller's own Exclude list (§5.2 effective_targets, 0.8.2.20) is carried and
+// normalized identically — dropping it here defeats the F68 subject rule, because
+// both the authorizer (CheckResourceScope) and every handler derive their subject
+// from EffectiveTargets, which removes caller-excluded targets. An earlier form
+// rebuilt the struct with only Targets, so a caller's exclude never reached
+// either layer and effective always equalled raw.
 func normalizeResourceTargets(resource *types.ResourceTarget, localPeerID crypto.PeerID) *types.ResourceTarget {
-	if resource == nil || len(resource.Targets) == 0 {
+	if resource == nil || (len(resource.Targets) == 0 && len(resource.Exclude) == 0) {
 		return resource
+	}
+	normalizeOne := func(target string) string {
+		parsed, err := entity.ParseURI(target)
+		if err == nil && parsed.PeerID == string(localPeerID) && parsed.Path != "" {
+			return parsed.Path // Local peer URI — extract bare path.
+		}
+		return target
 	}
 	normalized := &types.ResourceTarget{Targets: make([]string, len(resource.Targets))}
 	for i, target := range resource.Targets {
-		parsed, err := entity.ParseURI(target)
-		if err == nil && parsed.PeerID == string(localPeerID) && parsed.Path != "" {
-			// Local peer URI — extract bare path.
-			normalized.Targets[i] = parsed.Path
-		} else {
-			normalized.Targets[i] = target
+		normalized.Targets[i] = normalizeOne(target)
+	}
+	if len(resource.Exclude) > 0 {
+		normalized.Exclude = make([]string, len(resource.Exclude))
+		for i, excl := range resource.Exclude {
+			normalized.Exclude[i] = normalizeOne(excl)
 		}
 	}
 	return normalized

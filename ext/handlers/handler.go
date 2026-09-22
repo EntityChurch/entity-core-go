@@ -122,25 +122,27 @@ func (h *Handler) handleRegister(ctx context.Context, req *handler.Request) (*ha
 			"handlers handler authority not yet wired (SetupAuthority pending)")
 	}
 
-	// V7 §3.2 path-as-resource: pattern derives from
-	// EXECUTE.resource.targets[0] = system/handler/{pattern}. §3245/§3.3 400
-	// row (0.8.2.18) split the two inputs: an ABSENT resource is path_required
-	// (remedy: supply a resource), MORE THAN ONE is ambiguous_resource (remedy:
-	// disambiguate). register derives its install path from targets[0], so it is
-	// an operation whose spec requires a resource — the absent case is
-	// path_required, not the collapsed ambiguous_resource the earlier text used.
-	if hctx.Resource == nil || len(hctx.Resource.Targets) == 0 {
+	// V7 §3.2 path-as-resource: pattern derives from the install path =
+	// system/handler/{pattern}. The subject is drawn from effective_targets
+	// (§5.2, 0.8.2.20) — never resource.Targets[0], which is the F68 bypass —
+	// and §3.3's cardinality is taken on the EFFECTIVE set: an ABSENT/fully
+	// self-excluded resource is path_required (remedy: supply a resource), MORE
+	// THAN ONE is ambiguous_resource (remedy: disambiguate). The malformed arm
+	// is register-specific (patternFromHandlerResource), not the generic
+	// is_pattern check — a handler pattern legitimately contains wildcards.
+	eff := hctx.EffectiveTargets()
+	if len(eff) == 0 {
 		return handler.NewErrorResponse(400, "path_required",
 			"register requires resource = system/handler/{pattern}")
 	}
-	if len(hctx.Resource.Targets) > 1 {
+	if len(eff) > 1 {
 		return handler.NewErrorResponse(400, "ambiguous_resource",
 			"register requires exactly one resource = system/handler/{pattern}")
 	}
-	pattern, ok := patternFromHandlerResource(hctx.Resource.Targets[0])
+	pattern, ok := patternFromHandlerResource(eff[0])
 	if !ok {
 		return handler.NewErrorResponse(400, "malformed_resource",
-			"register resource must be system/handler/{pattern}: "+hctx.Resource.Targets[0])
+			"register resource must be system/handler/{pattern}: "+eff[0])
 	}
 	// 0.8.2.13: the system/* registration reservation is WITHDRAWN. §6.2/§3162
 	// now state that installation at a system/* path is authorized by the same
@@ -285,24 +287,26 @@ func (h *Handler) handleRegister(ctx context.Context, req *handler.Request) (*ha
 func (h *Handler) handleUnregister(ctx context.Context, req *handler.Request) (*handler.Response, error) {
 	hctx := req.Context
 
-	// V7 §3.2 path-as-resource: pattern derives from
-	// EXECUTE.resource.targets[0] = system/handler/{pattern}. Unregister
-	// takes no params (empty primitive/any per the empty-params wire shape).
-	// §3245 covers register and unregister in one sentence, so the 0.8.2.18
-	// split applies here too: ABSENT → path_required, MORE THAN ONE →
-	// ambiguous_resource.
-	if hctx.Resource == nil || len(hctx.Resource.Targets) == 0 {
+	// V7 §3.2 path-as-resource: pattern derives from the install path =
+	// system/handler/{pattern}, drawn from effective_targets (§5.2, 0.8.2.20),
+	// never resource.Targets[0]. Unregister takes no params (empty primitive/any
+	// per the empty-params wire shape). §3245 covers register and unregister in
+	// one sentence, so §3.3's cardinality on the EFFECTIVE set applies here too:
+	// ABSENT/fully self-excluded → path_required, MORE THAN ONE →
+	// ambiguous_resource, register-specific malformed → malformed_resource.
+	eff := hctx.EffectiveTargets()
+	if len(eff) == 0 {
 		return handler.NewErrorResponse(400, "path_required",
 			"unregister requires resource = system/handler/{pattern}")
 	}
-	if len(hctx.Resource.Targets) > 1 {
+	if len(eff) > 1 {
 		return handler.NewErrorResponse(400, "ambiguous_resource",
 			"unregister requires exactly one resource = system/handler/{pattern}")
 	}
-	pattern, ok := patternFromHandlerResource(hctx.Resource.Targets[0])
+	pattern, ok := patternFromHandlerResource(eff[0])
 	if !ok {
 		return handler.NewErrorResponse(400, "malformed_resource",
-			"unregister resource must be system/handler/{pattern}: "+hctx.Resource.Targets[0])
+			"unregister resource must be system/handler/{pattern}: "+eff[0])
 	}
 	// 0.8.2.13: the system/* reservation is withdrawn (see handleRegister).
 	// Unregister at a system/* pattern is governed by the same capability

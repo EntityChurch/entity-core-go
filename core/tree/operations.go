@@ -101,10 +101,11 @@ func (h *Handler) handleSnapshot(_ context.Context, req *handler.Request) (*hand
 		}
 	}
 
-	// Prefix from resource target first, fallback to params.
+	// Prefix from the effective resource target (§5.2, 0.8.2.20) first, fallback
+	// to params. effective[0], never Targets[0] — the F68 subject rule.
 	prefix := snapReq.Prefix
-	if hctx.Resource != nil && len(hctx.Resource.Targets) > 0 {
-		prefix = hctx.Resource.Targets[0]
+	if eff := hctx.EffectiveTargets(); len(eff) > 0 {
+		prefix = eff[0]
 	}
 
 	if !validatePrefix(prefix) {
@@ -265,9 +266,18 @@ func (h *Handler) handleMerge(_ context.Context, req *handler.Request) (*handler
 	// Extract flat bindings from trie for merge iteration.
 	sourceBindings := CollectAllBindings(hctx.Store, sourceSnap.Root, "")
 
-	// Atomic pre-check: verify put authorization on all target paths.
+	// Atomic pre-check: verify put authorization on all target paths, and reject
+	// a malformed target path here (§12.1 atomicity: a denial on binding 40 of
+	// 50 must leave zero writes). relPath comes from the caller's source_envelope
+	// bindings and SourcePrefix/TargetPrefix from params — all unvalidated; a
+	// control character used to reach the location index and panic the task even
+	// with a wildcard put grant (the store boundary is fail-closed now, but the
+	// pre-pass gives the atomic 400 rather than a mid-merge failure).
 	for relPath := range sourceBindings {
 		targetPath := applyPrefix(relPath, mergeReq.SourcePrefix, mergeReq.TargetPrefix)
+		if err := store.ValidateAbsolutePath(capability.Canonicalize(targetPath, hctx.LocalPeerID)); err != nil {
+			return handler.NewErrorResponse(400, "invalid_path", "malformed merge target path: "+err.Error())
+		}
 		if !checkPathPerm(hctx, "put", targetPath) {
 			return handler.NewErrorResponse(403, "capability_denied", "insufficient capability for merge target path: "+targetPath)
 		}
@@ -363,10 +373,11 @@ func (h *Handler) handleExtract(_ context.Context, req *handler.Request) (*handl
 		}
 	}
 
-	// Prefix from resource target first, fallback to params.
+	// Prefix from the effective resource target (§5.2, 0.8.2.20) first, fallback
+	// to params. effective[0], never Targets[0] — the F68 subject rule.
 	prefix := extractReq.Prefix
-	if hctx.Resource != nil && len(hctx.Resource.Targets) > 0 {
-		prefix = hctx.Resource.Targets[0]
+	if eff := hctx.EffectiveTargets(); len(eff) > 0 {
+		prefix = eff[0]
 	}
 
 	if !validatePrefix(prefix) {
@@ -398,9 +409,33 @@ func (h *Handler) handleExtract(_ context.Context, req *handler.Request) (*handl
 	// Collect bindings.
 	var trieBindings []Binding
 	if len(extractReq.Paths) > 0 {
-		// Filtered: read specific paths directly.
+		// §6.2 (EXTENSION-TREE v4.9): validate EVERY paths[] entry BEFORE reading
+		// any. A malformed entry — a control character, an empty segment ("//"),
+		// a leading "/", or anything that does not canonicalize to a valid path
+		// under prefix — is 400 invalid_path for the WHOLE request, with NO
+		// partial result (distinct from a well-formed entry that binds nothing,
+		// which is silently omitted below — that is what the filter is for).
+		// paths[] is unvalidated caller params, a channel no resource-target
+		// pre-validator sees; a malformed entry used to reach the index and
+		// panic the connection task (remote DoS — the store boundary is total
+		// now per ENTITY-CORE-PROTOCOL §5.4, but the 400 is the handler's answer).
+		for _, relPath := range extractReq.Paths {
+			canon := capability.Canonicalize(prefix+relPath, hctx.LocalPeerID)
+			if err := store.ValidateAbsolutePath(canon); err != nil {
+				return handler.NewErrorResponse(400, "invalid_path",
+					"extract paths[] entry is not a valid relative path under prefix: "+err.Error())
+			}
+		}
+		// Filtered: read specific paths directly. Each path is re-checked against
+		// the caller capability (EXTENSION-TREE §8.2): an out-of-scope path MUST be
+		// indistinguishable from absent, so it is silently omitted exactly as a
+		// well-formed path that binds nothing is (§6.1) — a caller cannot use an
+		// explicit paths[] entry to extract a binding its grant excludes.
 		for _, relPath := range extractReq.Paths {
 			fullPath := prefix + relPath
+			if !checkPathPerm(hctx, "get", fullPath) {
+				continue
+			}
 			if h, ok := hctx.LocationIndex.Get(fullPath); ok {
 				trieBindings = append(trieBindings, Binding{Path: relPath, Hash: h})
 			}
@@ -408,13 +443,21 @@ func (h *Handler) handleExtract(_ context.Context, req *handler.Request) (*handl
 	} else {
 		// Full prefix: all bindings under prefix.
 		// List returns qualified paths; trim the full qualified prefix to get relative keys.
+		// Per-binding capability filter (EXTENSION-TREE §8.2): a binding the caller
+		// capability does not grant `get` is omitted. Filtering before BuildTrie is
+		// RE-ROOTING, not filtering (§6.2 v4.6) — the envelope is complete against
+		// the filtered root — so the envelope never ships an entity the cap forbids.
 		qp := store.QualifyPath(string(hctx.LocalPeerID), prefix)
 		entries := hctx.LocationIndex.List(prefix)
 		for _, e := range entries {
 			rel := strings.TrimPrefix(e.Path, qp)
-			if rel != "" {
-				trieBindings = append(trieBindings, Binding{Path: rel, Hash: e.Hash})
+			if rel == "" {
+				continue
 			}
+			if !checkPathPerm(hctx, "get", e.Path) {
+				continue
+			}
+			trieBindings = append(trieBindings, Binding{Path: rel, Hash: e.Hash})
 		}
 	}
 

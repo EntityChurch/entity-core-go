@@ -10,9 +10,13 @@ import (
 )
 
 // Test peer IDs — proper 46-char Base58 format matching real PeerID generation.
-const testPeerID = crypto.PeerID("2KZFtestpeerAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-const testPeerB = crypto.PeerID("3MbGtargetPeerBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
-const testPeerC = crypto.PeerID("4NcHremotePeerCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC")
+// 46-char Base58 (the §5.4 peer-id floor). These were 45 — one short — which
+// only ever passed because check_resource_scope's concrete-target validate was
+// chars-only; wiring the full validate_absolute_path (G6, 0.8.2.20) requires a
+// real ≥46-char first segment, exactly as py warned cohort-wide 2026-09-11.
+const testPeerID = crypto.PeerID("2KZFtestpeerAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+const testPeerB = crypto.PeerID("3MbGtargetPeerBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+const testPeerC = crypto.PeerID("4NcHremotePeerCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC")
 
 func TestMatchesPatternExact(t *testing.T) {
 	tests := []struct {

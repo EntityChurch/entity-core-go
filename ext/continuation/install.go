@@ -36,11 +36,13 @@ func (h *Handler) handleInstall(ctx context.Context, req *handler.Request) (*han
 		return handler.NewErrorResponse(500, "internal_error", "missing store or location index")
 	}
 
-	if hctx.Resource == nil || len(hctx.Resource.Targets) != 1 {
-		return handler.NewErrorResponse(400, "ambiguous_resource",
-			"install requires exactly one resource target (the suspended path)")
+	// The suspended path is drawn from effective_targets (§5.2, 0.8.2.20), never
+	// resource.Targets[0]. §3.3's cardinality on the effective set: empty →
+	// path_required, >1 → ambiguous_resource, a pattern → malformed_resource.
+	installPath, resp := hctx.ResourceSubject("install")
+	if resp != nil {
+		return resp, nil
 	}
-	installPath := hctx.Resource.Targets[0]
 
 	// Discriminate forward vs join on params.type. The continuation entity
 	// itself is the params payload — no wrapper.

@@ -507,13 +507,12 @@ func (h *Handler) handleProcessAttestation(ctx context.Context, req *handler.Req
 	if errResp != nil {
 		return errResp, nil
 	}
-	path := ""
-	if hctx.Resource != nil && len(hctx.Resource.Targets) > 0 {
-		path = hctx.Resource.Targets[0]
-	}
-	if path == "" {
-		return handler.NewErrorResponse(400, "missing_resource_path",
-			"process_attestation requires a resource target path")
+	// The attestation path is drawn from effective_targets (§5.2, 0.8.2.20),
+	// never resource.Targets[0]. §3.3's cardinality on the effective set gives
+	// the split (path_required / ambiguous_resource / malformed_resource).
+	path, resp := hctx.ResourceSubject("process_attestation")
+	if resp != nil {
+		return resp, nil
 	}
 	entHash, ok := hctx.LocationIndex.Get(path)
 	if !ok {

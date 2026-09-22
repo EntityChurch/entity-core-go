@@ -311,12 +311,66 @@ type HandlerContext struct {
 	ConnectionState interface{}
 }
 
-// ExtractResourcePath returns the first resource target path, or "" if none.
+// EffectiveTargets is the §5.2 effective target list for this request: the
+// canonicalized resource targets minus those the CALLER excluded. It is the
+// single derivation point for a handler's subject (§5.2 subject rule, 0.8.2.20)
+// — the authorizer (CheckResourceScope) and every handler MUST draw their
+// subject from this one function, never from hctx.Resource.Targets directly.
+func (hctx *HandlerContext) EffectiveTargets() []string {
+	return capability.EffectiveTargets(hctx.Resource, hctx.LocalPeerID)
+}
+
+// ExtractResourcePath returns the first EFFECTIVE resource target (§5.2), or ""
+// if the effective set is empty. Callers that must distinguish absent / ambiguous
+// / malformed with the §3.3 codes use ResourceSubject instead; this is for
+// handlers whose empty case is a legitimate operation (e.g. tree:get listing).
 func (hctx *HandlerContext) ExtractResourcePath() string {
-	if hctx.Resource != nil && len(hctx.Resource.Targets) > 0 {
-		return hctx.Resource.Targets[0]
+	eff := hctx.EffectiveTargets()
+	if len(eff) == 0 {
+		return ""
 	}
-	return ""
+	return eff[0]
+}
+
+// ResourceSubject resolves the single subject path for a resource-requiring
+// operation, applying §3.3's cardinality rule to the EFFECTIVE set (0.8.2.20):
+// an empty effective list → 400 path_required (an absent resource and one whose
+// only target the caller excluded are the same case), more than one → 400
+// ambiguous_resource, a single pattern target → 400 malformed_resource. On
+// success returns (effective[0], nil).
+//
+// Indexing hctx.Resource.Targets[0] here is the F68 bypass: targets:[P,Q]
+// exclude:[P] with Q in-grant has effective [Q] (size one, so the cardinality
+// check says proceed) while Targets[0] is P — the cardinality check is the
+// ambiguity rule and carries none of the authority; the selection does. The
+// subject is effective[0], never Targets[0].
+func (hctx *HandlerContext) ResourceSubject(op string) (string, *Response) {
+	eff := hctx.EffectiveTargets()
+	if len(eff) == 0 {
+		resp, err := NewErrorResponse(400, "path_required",
+			op+" requires a resource target path")
+		if err != nil {
+			return "", &Response{Status: 400}
+		}
+		return "", resp
+	}
+	if len(eff) > 1 {
+		resp, err := NewErrorResponse(400, "ambiguous_resource",
+			op+" requires exactly one effective resource target")
+		if err != nil {
+			return "", &Response{Status: 400}
+		}
+		return "", resp
+	}
+	if capability.IsPattern(eff[0]) {
+		resp, err := NewErrorResponse(400, "malformed_resource",
+			op+" requires a concrete resource path, not a pattern: "+eff[0])
+		if err != nil {
+			return "", &Response{Status: 400}
+		}
+		return "", resp
+	}
+	return eff[0], nil
 }
 
 // CheckPathCapability performs a Level 2 capability check for the given

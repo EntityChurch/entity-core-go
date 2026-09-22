@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"strings"
 
 	"go.entitychurch.org/entity-core-go/core/hash"
@@ -28,37 +29,63 @@ func NewNamespacedIndex(inner LocationIndex, localNS string) *NamespacedIndex {
 }
 
 // canonicalize applies V7 §1.4: if path is already absolute (starts with "/"),
-// return as-is; otherwise prepend "/" + local namespace. The result is validated
-// to ensure the first segment is a valid peer ID (structural invariant).
-//
-// Panics on invalid paths — this is defense-in-depth for internal bugs.
-// External input is validated at the dispatch layer (protocol boundary) before
-// reaching any handler. If this panic fires, it means a handler constructed an
-// invalid path, which is a programming error that should be caught immediately.
+// return as-is; otherwise prepend "/" + local namespace. It is a PURE string
+// transform and does NOT validate — validation lives in canonicalizeChecked,
+// which every store-touching method routes through. Callers that only need the
+// qualified form (Qualify/QualifyTo) use this directly.
 func (n *NamespacedIndex) canonicalize(path string) string {
-	var abs string
 	if strings.HasPrefix(path, "/") {
-		abs = path
-	} else {
-		abs = "/" + n.localNS + "/" + path
+		return path
 	}
-	if err := ValidateAbsolutePath(abs); err != nil {
-		panic("invalid tree path: " + err.Error() + " (path=" + abs + ")")
+	return "/" + n.localNS + "/" + path
+}
+
+// canonicalizeChecked canonicalizes AND validates against §5.4
+// validate_absolute_path (leading slash, no empty segment, no control chars,
+// peer-id first segment). It returns ok=false for a malformed path.
+//
+// This is the fail-closed boundary that makes the store TOTAL over caller
+// input. A handler that derives a path from unvalidated params — extract's
+// paths[], merge's target_prefix + source bindings, a snapshot params prefix —
+// and hands it here can no longer PANIC the connection task (the prior
+// behaviour: a remote-triggerable crash from any peer holding a normal grant,
+// found cohort-wide 2026-09-11 when rust made its own qualify_path total). A
+// malformed path is not a programming error to assert on; it is untrusted
+// input to refuse. Reads treat !ok as absent (a malformed path binds nothing);
+// writes return an error; the handler shapes the 400. This is defense in depth
+// BENEATH the handler-level validation, not a substitute for it.
+func (n *NamespacedIndex) canonicalizeChecked(path string) (string, bool) {
+	abs := n.canonicalize(path)
+	if ValidateAbsolutePath(abs) != nil {
+		return "", false
 	}
-	return abs
+	return abs, true
+}
+
+// errInvalidPath is the write-side disposition of a malformed path — a total,
+// fail-closed replacement for the panic canonicalize used to raise.
+func errInvalidPath(path string) error {
+	return fmt.Errorf("invalid tree path %q: not a well-formed absolute path (§5.4)", path)
 }
 
 // --- LocationIndex interface (canonicalized) ---
 
 func (n *NamespacedIndex) Set(path string, h hash.Hash) error {
-	return n.inner.Set(n.canonicalize(path), h)
+	abs, ok := n.canonicalizeChecked(path)
+	if !ok {
+		return errInvalidPath(path)
+	}
+	return n.inner.Set(abs, h)
 }
 
 // SetWithContext canonicalizes the path and delegates to the inner
 // LocationIndex's SetWithContext if it implements ContextualWriter,
 // otherwise falls back to plain Set.
 func (n *NamespacedIndex) SetWithContext(path string, h hash.Hash, ctx *MutationContext) (*CascadeResult, error) {
-	abs := n.canonicalize(path)
+	abs, ok := n.canonicalizeChecked(path)
+	if !ok {
+		return nil, errInvalidPath(path)
+	}
 	if cw, ok := n.inner.(ContextualWriter); ok {
 		return cw.SetWithContext(abs, h, ctx)
 	}
@@ -66,22 +93,37 @@ func (n *NamespacedIndex) SetWithContext(path string, h hash.Hash, ctx *Mutation
 }
 
 func (n *NamespacedIndex) Get(path string) (hash.Hash, bool) {
-	return n.inner.Get(n.canonicalize(path))
+	abs, ok := n.canonicalizeChecked(path)
+	if !ok {
+		return hash.Hash{}, false
+	}
+	return n.inner.Get(abs)
 }
 
 func (n *NamespacedIndex) Has(path string) bool {
-	return n.inner.Has(n.canonicalize(path))
+	abs, ok := n.canonicalizeChecked(path)
+	if !ok {
+		return false
+	}
+	return n.inner.Has(abs)
 }
 
 func (n *NamespacedIndex) Remove(path string) (hash.Hash, bool) {
-	return n.inner.Remove(n.canonicalize(path))
+	abs, ok := n.canonicalizeChecked(path)
+	if !ok {
+		return hash.Hash{}, false
+	}
+	return n.inner.Remove(abs)
 }
 
 // RemoveWithContext canonicalizes the path and delegates to the inner
 // LocationIndex's RemoveWithContext if it implements ContextualWriter,
 // otherwise falls back to plain Remove.
 func (n *NamespacedIndex) RemoveWithContext(path string, ctx *MutationContext) (hash.Hash, bool, *CascadeResult) {
-	abs := n.canonicalize(path)
+	abs, ok := n.canonicalizeChecked(path)
+	if !ok {
+		return hash.Hash{}, false, nil
+	}
 	if cw, ok := n.inner.(ContextualWriter); ok {
 		return cw.RemoveWithContext(abs, ctx)
 	}
@@ -110,7 +152,11 @@ func (n *NamespacedIndex) List(prefix string) []LocationEntry {
 	if prefix == "" || prefix == "/" {
 		return n.inner.List("")
 	}
-	return n.inner.List(n.canonicalize(prefix))
+	abs, ok := n.canonicalizeChecked(prefix)
+	if !ok {
+		return nil
+	}
+	return n.inner.List(abs)
 }
 
 // LenPrefix follows the same contract: empty or bare-root prefix counts
@@ -120,15 +166,27 @@ func (n *NamespacedIndex) LenPrefix(prefix string) int {
 	if prefix == "" || prefix == "/" {
 		return n.inner.LenPrefix("")
 	}
-	return n.inner.LenPrefix(n.canonicalize(prefix))
+	abs, ok := n.canonicalizeChecked(prefix)
+	if !ok {
+		return 0
+	}
+	return n.inner.LenPrefix(abs)
 }
 
 func (n *NamespacedIndex) CompareAndSwap(path string, expected, new hash.Hash) error {
-	return n.inner.CompareAndSwap(n.canonicalize(path), expected, new)
+	abs, ok := n.canonicalizeChecked(path)
+	if !ok {
+		return errInvalidPath(path)
+	}
+	return n.inner.CompareAndSwap(abs, expected, new)
 }
 
 func (n *NamespacedIndex) CompareAndRemove(path string, expected hash.Hash) error {
-	return n.inner.CompareAndRemove(n.canonicalize(path), expected)
+	abs, ok := n.canonicalizeChecked(path)
+	if !ok {
+		return errInvalidPath(path)
+	}
+	return n.inner.CompareAndRemove(abs, expected)
 }
 
 // --- Namespace-aware methods ---

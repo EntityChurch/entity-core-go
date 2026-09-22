@@ -364,27 +364,48 @@ func TestInstallMissingFields(t *testing.T) {
 	}
 }
 
-func TestInstallAmbiguousResource(t *testing.T) {
-	env := newInstallEnv(t)
-	cap := env.makeCap(t, env.writer.ContentHash, env.handler.ContentHash, nil)
-	cont := makeForward(t, "/peer/system/tree", "put", cap.ContentHash)
-	req := &handler.Request{
-		Path:      "system/continuation",
-		Operation: "install",
-		Params:    cont,
-		Context:   env.hctx,
+// TestInstallResourceCardinality pins §3.3's cardinality on the EFFECTIVE set
+// (§5.2, 0.8.2.20): install requires exactly one effective resource target, so
+// an ABSENT resource is path_required (NOT the collapsed ambiguous_resource the
+// pre-0.8.2.20 code emitted — that inverted the two remedies) and MORE THAN ONE
+// is ambiguous_resource. A lone self-excluded target is the absent case.
+func TestInstallResourceCardinality(t *testing.T) {
+	mkReq := func(env *installTestEnv, res *types.ResourceTarget) *handler.Request {
+		cap := env.makeCap(t, env.writer.ContentHash, env.handler.ContentHash, nil)
+		cont := makeForward(t, "/peer/system/tree", "put", cap.ContentHash)
+		env.hctx.Resource = res
+		return &handler.Request{
+			Path:      "system/continuation",
+			Operation: "install",
+			Params:    cont,
+			Context:   env.hctx,
+		}
 	}
-	// hctx.Resource left nil — should reject 400 ambiguous_resource.
-	resp, err := env.h.handleInstall(context.Background(), req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	cases := []struct {
+		name     string
+		resource *types.ResourceTarget
+		wantCode string
+	}{
+		{"absent", nil, "path_required"},
+		{"empty-targets", &types.ResourceTarget{}, "path_required"},
+		{"self-excluded", &types.ResourceTarget{Targets: []string{"/peer/x"}, Exclude: []string{"/peer/x"}}, "path_required"},
+		{"two-targets", &types.ResourceTarget{Targets: []string{"/peer/x", "/peer/y"}}, "ambiguous_resource"},
 	}
-	if resp.Status != 400 {
-		t.Fatalf("expected 400, got %d", resp.Status)
-	}
-	errData, _ := types.ErrorDataFromEntity(resp.Result)
-	if errData.Code != "ambiguous_resource" {
-		t.Fatalf("expected ambiguous_resource, got %q", errData.Code)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newInstallEnv(t)
+			resp, err := env.h.handleInstall(context.Background(), mkReq(env, tc.resource))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if resp.Status != 400 {
+				t.Fatalf("expected 400, got %d", resp.Status)
+			}
+			errData, _ := types.ErrorDataFromEntity(resp.Result)
+			if errData.Code != tc.wantCode {
+				t.Fatalf("expected %q, got %q", tc.wantCode, errData.Code)
+			}
+		})
 	}
 }
 

@@ -513,12 +513,19 @@ func (h *Handler) handleWatch(ctx context.Context, req *handler.Request) (*handl
 	return &handler.Response{Status: 200, Result: wcEntity}, nil
 }
 
-// extractResourcePath gets the first target path from the handler context resource.
+// extractResourcePath gets the first EFFECTIVE target path (§5.2, 0.8.2.20) from
+// the handler context resource, never resource.Targets[0] — the F68 subject
+// rule. An empty effective set (absent, or a lone caller-excluded target) is the
+// missing-resource case.
 func extractResourcePath(hctx *handler.HandlerContext) (string, error) {
-	if hctx == nil || hctx.Resource == nil || len(hctx.Resource.Targets) == 0 {
+	if hctx == nil {
 		return "", errorf("missing resource target")
 	}
-	return hctx.Resource.Targets[0], nil
+	eff := hctx.EffectiveTargets()
+	if len(eff) == 0 {
+		return "", errorf("missing resource target")
+	}
+	return eff[0], nil
 }
 
 func errorf(msg string) error {

@@ -91,7 +91,7 @@ func mkPayloadEntity(t *testing.T, payload string) entity.Entity {
 // testLocalPeerID is the local peer ID used for canonicalizing both the
 // request resource and the cap resource pattern in tests (V7 §5.5 / PR-8).
 // 46+ Base58 chars so it satisfies looksLikePeerID.
-const testLocalPeerID = crypto.PeerID("2KZFtestSubstituteSourcesLocalPeerIDAAAAAAAAAA")
+const testLocalPeerID = crypto.PeerID("2KZFtestSubstSourcesFocaAAAAAAAAAAAAAAAAAAAAAA")
 
 // testConsultResource is the namespace-shaped target the test inbound
 // content:get reads into, used as the consult gate's resource axis

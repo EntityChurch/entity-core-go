@@ -72,13 +72,14 @@ func (e *Engine) debugf(format string, args ...interface{}) {
 func (e *Engine) HandleInstall(ctx context.Context, req *handler.Request) (*handler.Response, error) {
 	hctx := req.Context
 
-	// V7 §3.2 path-as-resource: root expression path comes from
-	// EXECUTE.resource.targets[0]. Single-target, URI-only.
-	if hctx.Resource == nil || len(hctx.Resource.Targets) != 1 {
-		return handler.NewErrorResponse(400, "ambiguous_resource",
-			"install requires exactly one resource target (the root expression path)")
+	// V7 §3.2 path-as-resource: root expression path is drawn from
+	// effective_targets (§5.2, 0.8.2.20), never resource.Targets[0]. §3.3's
+	// cardinality on the effective set gives the split (path_required /
+	// ambiguous_resource / malformed_resource).
+	rootPath, resp := hctx.ResourceSubject("system/compute:install")
+	if resp != nil {
+		return resp, nil
 	}
-	rootPath := hctx.Resource.Targets[0]
 
 	var params types.ComputeInstallRequestData
 	if err := ecf.Decode(req.Params.Data, &params); err != nil {
@@ -278,14 +279,14 @@ func (e *Engine) HandleInstall(ctx context.Context, req *handler.Request) (*hand
 func (e *Engine) HandleUninstall(ctx context.Context, req *handler.Request) (*handler.Response, error) {
 	hctx := req.Context
 
-	// V7 §3.2 path-as-resource: subgraph path comes from
-	// EXECUTE.resource.targets[0]. Single-target, URI-only. Uninstall takes
-	// no params (empty primitive/any per the empty-params wire shape).
-	if hctx.Resource == nil || len(hctx.Resource.Targets) != 1 {
-		return handler.NewErrorResponse(400, "ambiguous_resource",
-			"uninstall requires exactly one resource target (the subgraph path)")
+	// V7 §3.2 path-as-resource: subgraph path is drawn from effective_targets
+	// (§5.2, 0.8.2.20), never resource.Targets[0]. Uninstall takes no params
+	// (empty primitive/any per the empty-params wire shape). §3.3's cardinality
+	// on the effective set gives the split.
+	subgraphPath, resp := hctx.ResourceSubject("system/compute:uninstall")
+	if resp != nil {
+		return resp, nil
 	}
-	subgraphPath := hctx.Resource.Targets[0]
 
 	qualifiedPath := store.QualifyPath(e.localPeerID, subgraphPath)
 	sgHash, ok := hctx.LocationIndex.Get(qualifiedPath)

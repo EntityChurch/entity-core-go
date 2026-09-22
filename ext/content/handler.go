@@ -144,22 +144,25 @@ func (h *Handler) Handle(ctx context.Context, req *handler.Request) (*handler.Re
 }
 
 // requireResource enforces the §6.2/§6.3 path-as-resource MUST: every
-// directly-callable content op identifies its namespace resource, even
-// when the op's semantic target is hash-shaped. Missing resource returns
-// path_required (v3.4 → v3.5 behavior reversal).
-//
-// The MORE-THAN-ONE arm of §3.3's 400 row (→ ambiguous_resource) is
-// DELIBERATELY NOT added here: F68 (arch ROUTING-2026-09-10-d §2) ruled the
-// §3.3 count is taken on the EFFECTIVE target set (targets minus the caller's
-// own exclude), which go does not yet compute — Resource.Exclude is read
-// nowhere on go's authorization path. A raw-len(Targets) guard is F68's exact
-// shape (a correction one home the 0.8.2.20 revision moves), so content folds
-// into that single effective-target sweep alongside DOMAIN-LOCAL-FILES and the
-// five §2.8 sites, not a piecemeal raw guard here.
+// directly-callable content op identifies its namespace resource, even when the
+// op's semantic target is hash-shaped. The §3.3 cardinality rule is applied to
+// the EFFECTIVE target set (§5.2, 0.8.2.20): an empty effective list — an absent
+// resource, or one whose only target the caller excluded — returns
+// path_required; more than one effective target returns ambiguous_resource; a
+// single pattern target returns malformed_resource. This is the effective-set
+// sweep folded here (0.8.2.20 landed; supersedes 0.8.2.18's count-only form
+// which F71 refuted): the count is taken on effective, never on raw Targets.
+// content resolves its namespace through hctx.ResourceSubject, discarding the
+// returned path because the op's semantic target is the params-supplied hash;
+// the subject rule still binds so an excluded-only or ambiguous resource is
+// refused with the correct code.
 func requireResource(hctx *handler.HandlerContext, op string) (*handler.Response, error) {
-	if hctx == nil || hctx.Resource == nil || len(hctx.Resource.Targets) == 0 {
-		msg := fmt.Sprintf("system/content:%s requires a resource targeting the namespace path (v3.5 §6.2/§6.3)", op)
-		return handler.NewErrorResponse(400, "path_required", msg)
+	if hctx == nil {
+		return handler.NewErrorResponse(400, "path_required",
+			fmt.Sprintf("system/content:%s requires a resource targeting the namespace path (v3.5 §6.2/§6.3)", op))
+	}
+	if _, resp := hctx.ResourceSubject("system/content:" + op); resp != nil {
+		return resp, nil
 	}
 	return nil, nil
 }

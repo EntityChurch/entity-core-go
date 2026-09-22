@@ -103,6 +103,19 @@ func VerifyChain(capEntity entity.Entity, included map[hash.Hash]entity.Entity, 
 			return fmt.Errorf("%w: %w", ecerrors.ErrCapabilityDenied, err)
 		}
 
+		// H1 (§5.2/§5.4, 0.8.2.21): a capability any of whose resource scope
+		// patterns is unmatchable (canonicalizes to NEVER_MATCH — a "*/"/"./"/
+		// "../"-leading pattern) is INVALID at verification. Unmatchable in an
+		// include grants nothing; in an exclude it carves out nothing, so the
+		// grant is silently wider than written (fail-open). Refused at mint/
+		// delegate too (§6.2, 400 invalid_path); here it is treated as an
+		// invalid capability. The two readings diverge across a peer boundary,
+		// so this is a MUST.
+		if bad := FirstUnmatchableScopePattern(capData.Grants); bad != "" {
+			return fmt.Errorf("%w: capability carries an unmatchable scope pattern %q (§5.4 NEVER_MATCH; 0.8.2.21 H1)",
+				ecerrors.ErrCapabilityDenied, bad)
+		}
+
 		// Per-link temporal validity (F3 / V7 §5.5). Every link in the chain
 		// MUST be within its validity window — not just the leaf. The leaf-only
 		// temporal check in FindMatchingGrant/CheckPathPermission left an

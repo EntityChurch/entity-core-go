@@ -196,18 +196,133 @@ func findMatchingGrant(execute types.ExecuteData, cap types.CapabilityTokenData,
 	return types.GrantEntry{}, false
 }
 
-// CheckResourceScope checks that all resource targets are covered by the
-// grant's resource scope (included and not excluded). Targets canonicalize
-// against localPeerID (request-path semantics, V7 §5.4); patterns
-// canonicalize against granterPeerID (cap-resource semantics, V7 §5.5 /
-// PR-8).
-func CheckResourceScope(resource *types.ResourceTarget, grantResources types.CapabilityScope, localPeerID, granterPeerID crypto.PeerID) bool {
+// EffectiveTargets is the §5.2 named function (0.8.2.20): the targets a request
+// ACTUALLY names, after the caller's own exclusions, one entry per surviving
+// target. THE AUTHORIZER AND EVERY HANDLER MUST DERIVE THEIR SUBJECT FROM THIS
+// ONE FUNCTION.
+//
+// It is a function rather than a rule restated in prose because the defect it
+// closes (F68) is two layers computing the same set independently and drifting:
+// CheckResourceScope skipped caller-excluded targets while every handler indexed
+// resource.Targets[0], and WHICH targets differed was the caller's to choose —
+// name the path you want, put the same path in exclude, clear the resource
+// dimension vacuously, and be acted upon. A third statement of the rule would
+// drift the same way; a function has one definition.
+//
+// Parameters are deliberately only values a handler already holds (ctx.Resource,
+// ctx.LocalPeerID) — no grant, no capability, no dispatch state — so a handler
+// specified in another document can call it. An absent resource yields the empty
+// list: "absent" and "present but fully self-excluded" are the same answer to
+// the same question (§3.3 gives them the same code, path_required).
+//
+// A caller-excluded target is redundant but valid and NOT a subject; the skip is
+// correct and retained — demanding grant coverage for a path nobody requested
+// would refuse legitimate traffic. The defect was never the skip; it was that
+// only one layer performed it. Go did not honor caller excludes at all before
+// 0.8.2.20; this makes both layers honor them together, so the exclude feature
+// cannot arrive later without the skip (which would be the F68 bypass).
+//
+// The skip decision is made on CANONICAL forms (§5.4 matcher) so the authorizer
+// and every handler agree on WHICH targets survive; the RAW survivor is returned
+// so a handler retains its existing path semantics (LocationIndex.Get,
+// QualifyPath) — canonicalizing the return would double-qualify a bare target
+// through the non-idempotent QualifyPath. The subject a handler acts on is
+// therefore raw effective[0], whose canonical form is a member of the canonical
+// effective set, so `subject ⊆ effective_targets` holds and F68 is closed at
+// both layers from one survivor set. A malformed/reserved target is NOT covered
+// by any exclude (§5.4), so it stays in the list and is refused by
+// CheckResourceScope's fail-closed validation.
+func EffectiveTargets(resource *types.ResourceTarget, localPeerID crypto.PeerID) []string {
+	if resource == nil {
+		return nil
+	}
+	out := make([]string, 0, len(resource.Targets))
 	for _, target := range resource.Targets {
+		// Caller excludes are request-path fields: both target and exclude
+		// canonicalize against localPeerID (granterPeerID == localPeerID here).
+		ct := Canonicalize(target, localPeerID)
+		if IsCoveredBy(ct, resource.Exclude, localPeerID, localPeerID) {
+			continue
+		}
+		out = append(out, target)
+	}
+	return out
+}
+
+// validConcreteTarget reports whether a canonicalized concrete (non-pattern)
+// resource target is a usable absolute path. A reserved-prefix ("./", "../"),
+// bare-peer-wildcard ("*/") or otherwise non-absolute target is malformed;
+// check_resource_scope MUST fail closed on it (G6 / §5.2, 0.8.2.20) rather than
+// let a broad grant include (e.g. "*", which MatchesPattern admits for any
+// string) match a path that is not a path.
+//
+// G6 is *"if validate_absolute_path(ct) is error: return false"* — so this
+// consumes store.ValidateAbsolutePath, the full §5.4 validate_absolute_path
+// (leading slash, no empty segment, control-char-free, AND a peer-id first
+// segment). A chars-only check dropped the peer-id clause, which is not
+// equivalent in practice: a target like "/short/x" is absolute and star-free
+// (so NOT NEVER_MATCH), yet against a peer-wildcard grant ("/*/*") the matcher
+// strips the first segment whatever it is and the remainder matches — covering
+// a target rooted at a peer that cannot exist. Found cohort-wide (rust + py
+// both routed the identical drop, 2026-09-11).
+func validConcreteTarget(ct string) bool {
+	return store.ValidateAbsolutePath(ct) == nil
+}
+
+// CheckResourceScope checks that every EFFECTIVE resource target (§5.2, caller
+// excludes removed) is covered by the grant's resource scope (included and not
+// excluded). Targets canonicalize against localPeerID (request-path semantics,
+// V7 §5.4); patterns canonicalize against granterPeerID (cap-resource
+// semantics, V7 §5.5 / PR-8). Behaviour is unchanged from 0.8.2.19 except that
+// the effective set is now NAMED rather than computed inline, and that a
+// malformed concrete target fails closed instead of proceeding on a discarded
+// verdict (G6, 0.8.2.20).
+func CheckResourceScope(resource *types.ResourceTarget, grantResources types.CapabilityScope, localPeerID, granterPeerID crypto.PeerID) bool {
+	var callerExclude []string
+	if resource != nil {
+		callerExclude = resource.Exclude
+	}
+	for _, target := range EffectiveTargets(resource, localPeerID) {
+		// Validate concrete path targets at the protocol boundary; pattern
+		// targets go through pattern matching, not tree access. Validate on the
+		// canonical form (the survivor is returned raw).
+		ct := Canonicalize(target, localPeerID)
+		if !IsPattern(ct) && !validConcreteTarget(ct) {
+			return false
+		}
+
+		// Target must be covered by the grant include, for both target shapes.
 		if !IsCoveredBy(target, grantResources.Include, localPeerID, granterPeerID) {
 			return false
 		}
-		if isExcluded(target, grantResources.Exclude, localPeerID, granterPeerID) {
-			return false
+
+		if IsPattern(ct) {
+			// PATTERN target (§5.2 pattern arm). A concrete-style exclude test is
+			// WRONG here: MatchesPattern("/{p}/data/*", "/{p}/data/secret") is a
+			// literal inequality, so the target pattern re-spells straight past a
+			// concrete grant exclude and is allowed where §5.2 denies (G-4, both
+			// siblings routed 2026-09-11). The rule: for every grant exclude that
+			// OVERLAPS this target, the caller must carry a corresponding exclude
+			// that covers it — otherwise the effective target spans paths the grant
+			// forbids. Grant patterns canonicalize against the granter (PR-8); the
+			// caller exclude is a request-path field (localPeerID). NEVER_MATCH is
+			// not special-cased here (per §5.2): an unmatchable grant exclude cannot
+			// overlap any real target and is caught by the H1 validity gate instead.
+			for _, ge := range grantResources.Exclude {
+				cge := Canonicalize(ge, granterPeerID)
+				if !PatternsOverlap(ct, cge) {
+					continue
+				}
+				if !IsCoveredBy(cge, callerExclude, localPeerID, localPeerID) {
+					return false
+				}
+			}
+		} else {
+			// CONCRETE target: must not be in any grant exclude, with the H1
+			// unmatchable-excludes-everything arm (isExcluded carries it).
+			if isExcluded(target, grantResources.Exclude, localPeerID, granterPeerID) {
+				return false
+			}
 		}
 	}
 	return true
@@ -384,15 +499,12 @@ func CheckPathPermission(operation, path string, cap types.CapabilityTokenData, 
 			continue
 		}
 
-		// Check handler pattern matches.
-		handlerMatched := false
-		for _, h := range grant.Handlers.Include {
-			if MatchesPattern(handlerPattern, h) {
-				handlerMatched = true
-				break
-			}
-		}
-		if !handlerMatched {
+		// Check handler scope (include AND exclude — §5.2 matches_scope, path-scope
+		// arm). scopeContains is the shared handlers matcher, so this §6.3 check and
+		// the dispatch check honor a handler exclude identically. Reading only
+		// Handlers.Include here was a fail-open: a grant excluding a handler still
+		// authorized it at the path level (G-3, both siblings routed 2026-09-11).
+		if !scopeContains(handlerPattern, grant.Handlers) {
 			continue
 		}
 
@@ -409,10 +521,22 @@ func CheckPathPermission(operation, path string, cap types.CapabilityTokenData, 
 			continue
 		}
 
-		// Check excludes.
+		// Check excludes. The path being checked is concrete, so this mirrors
+		// check_resource_scope's concrete arm: an UNMATCHABLE grant exclude excludes
+		// EVERYTHING (H1, 0.8.2.21) — fail closed. Without this arm a granter's
+		// misspelled exclude ("*/secret") carves out nothing and the grant is
+		// silently wider than written, the sentinel's fail-OPEN direction. This was
+		// the fourth fail-open site left after isExcluded got the arm (G-1, both
+		// siblings routed 2026-09-11); §6.3 is the SOLE resource enforcement when
+		// the dispatch-level resource dimension is absent, so it is the site that
+		// carries the guarantee once the dispatch path is vacuous.
 		excluded := false
 		for _, excl := range grant.Resources.Exclude {
 			canonicalExclude := Canonicalize(excl, granterPeerID)
+			if IsUnmatchablePattern(canonicalExclude) {
+				excluded = true
+				break
+			}
 			if MatchesPattern(canonicalPath, canonicalExclude) {
 				excluded = true
 				break
@@ -527,14 +651,100 @@ func Canonicalize(path string, localPeerID crypto.PeerID) string {
 	return "/" + string(localPeerID) + "/" + path
 }
 
-// scopeContains checks if a value is matched by any pattern in a scope's Include list.
+// scopeContains reports whether a value is admitted by a path-scope dimension:
+// matched by some include pattern AND not matched by any exclude (§5.2
+// matches_scope, path-scope arm). It is the shared matcher for the handlers
+// dimension — the dispatch check (findMatchingGrant Dimension 2) and the
+// §6.3 handler-level check (CheckPathPermission) both go through it, so the two
+// paths cannot silently diverge on whether a handler exclude is honored.
+//
+// The include-then-exclude shape mirrors matchesIDScope. The exclude arm carries
+// the H1 (0.8.2.21) reading: an UNMATCHABLE exclude excludes EVERYTHING (fail
+// closed). Without it a granter's misspelled handler exclude ("*/x") carves out
+// nothing and the grant is silently wider than written. Handler patterns are
+// matched raw (go does not canonicalize the handlers dimension); IsUnmatchable-
+// Pattern is peer-independent, so the H1 arm is correct on the raw form.
 func scopeContains(value string, scope types.CapabilityScope) bool {
+	matched := false
 	for _, pattern := range scope.Include {
 		if MatchesPattern(value, pattern) {
-			return true
+			matched = true
+			break
 		}
 	}
-	return false
+	if !matched {
+		return false
+	}
+	for _, pattern := range scope.Exclude {
+		if IsUnmatchablePattern(pattern) {
+			return false
+		}
+		if MatchesPattern(value, pattern) {
+			return false
+		}
+	}
+	return true
+}
+
+// IsUnmatchablePattern reports whether a canonicalized pattern is unmatchable
+// by construction — the §5.4 forms the spec canonicalizes to NEVER_MATCH:
+// a reserved-prefix ("./", "../") or bare-peer-wildcard ("*/") leading pattern.
+// go has no NEVER_MATCH sentinel; Canonicalize passes these through unchanged
+// and MatchesPattern returns false for them, which is fail-CLOSED in an include
+// (covers nothing) but fail-OPEN in an exclude (carves out nothing → a grant
+// wider than its author wrote). This predicate is how the exclude-evaluation
+// and capability-validity layers detect the unmatchable case (§5.2/§5.4 H1,
+// 0.8.2.21). The check is peer-independent: Canonicalize leaves these three
+// prefixes unchanged and maps every other input to a "/"-leading path, so the
+// verdict does not depend on which peer id is used to canonicalize.
+func IsUnmatchablePattern(pattern string) bool {
+	return strings.HasPrefix(pattern, "./") ||
+		strings.HasPrefix(pattern, "../") ||
+		strings.HasPrefix(pattern, "*/")
+}
+
+// FirstUnmatchableScopePattern returns the first PATH-SCOPE include/exclude
+// pattern across all grants that is unmatchable (§5.4 NEVER_MATCH), or "" if
+// every pattern is matchable. A capability carrying one is INVALID [MUST]
+// (§5.2/§5.4 H1, 0.8.2.21): unmatchable in an include grants nothing, in an
+// exclude carves out nothing (fail-open), and two conformant peers must not
+// disagree on the same bytes — so it is refused at mint/delegate (400
+// invalid_path, §6.2) and treated as invalid at verify (§5.5). The two readings
+// diverge across a peer boundary, so this is a MUST, not a MAY.
+//
+// BOTH path-scope dimensions are walked: handlers AND resources. §3.6 types the
+// handlers dimension as system/capability/path-scope, canonicalized and matched
+// exactly as resources is, so an unmatchable handler pattern is the same invalid
+// bytes — walking resources alone left a hole both siblings routed (G-2,
+// 2026-09-11). operations/peers are id-scope (literal identifiers, no §5.4
+// canonicalization) and are not walked. IsUnmatchablePattern is peer-independent,
+// so a raw handler pattern is checked directly (go does not canonicalize the
+// handlers dimension) — and no legitimate handler name begins with "./", "../"
+// or "*/", so this cannot false-positive on a real handler pattern.
+func FirstUnmatchableScopePattern(grants []types.GrantEntry) string {
+	for _, g := range grants {
+		for _, p := range g.Handlers.Include {
+			if IsUnmatchablePattern(p) {
+				return p
+			}
+		}
+		for _, p := range g.Handlers.Exclude {
+			if IsUnmatchablePattern(p) {
+				return p
+			}
+		}
+		for _, p := range g.Resources.Include {
+			if IsUnmatchablePattern(p) {
+				return p
+			}
+		}
+		for _, p := range g.Resources.Exclude {
+			if IsUnmatchablePattern(p) {
+				return p
+			}
+		}
+	}
+	return ""
 }
 
 // isExcluded checks if a target path matches any cap exclude pattern.
@@ -544,6 +754,14 @@ func isExcluded(target string, excludeSet []string, localPeerID, granterPeerID c
 	canonTarget := Canonicalize(target, localPeerID)
 	for _, excl := range excludeSet {
 		canonExcl := Canonicalize(excl, granterPeerID)
+		// H1 (0.8.2.21): an unmatchable grant-exclude excludes EVERYTHING —
+		// fail closed. Without this arm a granter's misspelled exclude
+		// ("*/secret") carves out nothing and the grant is silently wider than
+		// written. This is the sentinel's fail-OPEN direction, and it is a
+		// security verdict, not hygiene.
+		if IsUnmatchablePattern(canonExcl) {
+			return true
+		}
 		if MatchesPattern(canonTarget, canonExcl) {
 			return true
 		}

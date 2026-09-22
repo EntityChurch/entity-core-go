@@ -441,6 +441,10 @@ func (s *ValidationSuite) Run(ctx context.Context) (*Report, error) {
 		return runResourceBounds(ctx, s.addr, s.newClient, s.effectiveDeclaredMaxPayload(), s.effectiveDeclaredMaxChainDepth())
 	})
 
+	// CORE-RESOURCE-EFFECTIVE-1 (§3.3/§5.2/§6.3, 0.8.2.20): the subject is the
+	// effective set, never resource.targets[0] (F68).
+	runCat(catResourceEffective, func() []CheckResult { return runResourceEffective(ctx, client) })
+
 	// Category 16: EXTENSION-ATTESTATION (substrate primitive).
 	runCat(catAttestation, func() []CheckResult { return runAttestation(ctx, client) })
 
@@ -893,6 +897,8 @@ func (s *ValidationSuite) RunCategory(ctx context.Context, category string) (*Re
 		report.AddAll(runConcurrency(ctx, client, s.newClient))
 	case catResourceBounds:
 		report.AddAll(runResourceBounds(ctx, s.addr, s.newClient, s.effectiveDeclaredMaxPayload(), s.effectiveDeclaredMaxChainDepth()))
+	case catResourceEffective:
+		report.AddAll(runResourceEffective(ctx, client))
 	case catAttestation:
 		report.AddAll(runAttestation(ctx, client))
 	case catQuorum:
