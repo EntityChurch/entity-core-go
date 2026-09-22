@@ -51,10 +51,14 @@ with an independent lifecycle. You are working inside one of them; see its `AGEN
 ## Working across the polyrepo
 
 - **The spec is upstream; implementations implement, they do not define it.** Do not invent
-  wire formats, primitives, opcodes, or handler semantics in an implementation repo.
-  Implement against the **landed spec**, not in-flight proposals. On a gap or ambiguity:
-  **log it** (`docs/SPEC-AMBIGUITIES.md`) and route it upstream. The locked wire core is
-  never renumbered; unknowns are MUST-ignore ([ADR-0002]).
+  wire formats, primitives, opcodes, or handler semantics with no proposal behind them.
+  **Implement against a landed proposal or draft; you do not wait for the fold** — the
+  reference implementations lead, and building a proposal is how it earns its fold. For
+  something complex, spike a POC and feed it back as a proposal. On a genuine ambiguity with
+  real degrees of freedom, **log it** (`docs/SPEC-AMBIGUITIES.md`) and route it upstream. The
+  locked wire core is never renumbered; unknowns are MUST-ignore ([ADR-0002]). A repo that
+  must track only the *landed* spec (e.g. the conformance anchor) declares that in its own
+  `AGENTS.md`; it is not the ecosystem default.
 - **Read the source, not memory.** Sibling implementations are interop context, not a
   template to copy. Verify against the actual code and spec.
 - **Prove a negative before you claim it.** Before asserting "X is missing / not implemented

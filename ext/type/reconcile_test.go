@@ -179,6 +179,50 @@ func TestReconcileRejectsBadStrategy(t *testing.T) {
 	if resp.Status != 400 {
 		t.Errorf("bad strategy: status %d (want 400)", resp.Status)
 	}
+	// EXTENSION-TYPE Appendix A (v1.3) reserves the type-analysis 400 slot for
+	// `invalid_request` — a bad strategy is a structural defect of the request,
+	// and the table defines no `invalid_strategy` for these ops (that code is
+	// EXTENSION-REVISION merge-config's, a different operation). Converged to
+	// join the cohort (core-py already emits invalid_request here). SA-PY-40.
+	ed, err := types.ErrorDataFromEntity(resp.Result)
+	if err != nil {
+		t.Fatalf("decode error entity: %v", err)
+	}
+	if ed.Code != "invalid_request" {
+		t.Errorf("bad strategy: code %q (want invalid_request per Appendix A)", ed.Code)
+	}
+}
+
+// TestReconcileDecodeFailureIsInvalidRequest pins the Appendix A row-1 converge:
+// undecodable params answer 400 invalid_request, not the pre-fold decode_error.
+func TestReconcileDecodeFailureIsInvalidRequest(t *testing.T) {
+	env := newTestEnv(t)
+	// Valid CBOR at the entity level (a bare integer) so the entity constructs,
+	// but undecodable as a reconcile-request struct — exercises the decode arm.
+	badData, err := ecf.Encode(42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	garbage, err := entity.NewEntity("system/type/reconcile-request", badData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := env.typeHandler.Handle(context.Background(), &handler.Request{
+		Operation: "reconcile", Params: garbage, Context: env.hctx(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != 400 {
+		t.Fatalf("undecodable reconcile: status %d (want 400)", resp.Status)
+	}
+	ed, err := types.ErrorDataFromEntity(resp.Result)
+	if err != nil {
+		t.Fatalf("decode error entity: %v", err)
+	}
+	if ed.Code != "invalid_request" {
+		t.Errorf("undecodable reconcile: code %q (want invalid_request per Appendix A row 1)", ed.Code)
+	}
 }
 
 func TestReconcileUnionLeastRestrictiveConstraints(t *testing.T) {

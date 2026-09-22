@@ -312,6 +312,36 @@ echo "    $REF_ADDR"
 #                      — a behavioral check quietly not running, which is the
 #                      exact class this script exists to eliminate.
 #   --keepalive        a short §2.3 envelope so §5.4 escalation is observable
+
+# FAIL CLOSED on the http-poll listener's config BEFORE the peer starts. If
+# POLL_PORT (target, pass 1) or POLL_PORT+1 (NS_PORT, pass 2's serving target)
+# is already bound — a leftover peer, a sibling squatting it, the same
+# cross-session collision class as PI_PORT 9401 — entity-peer logs
+# "WARNING: http-poll listener: … address already in use" and CONTINUES with no
+# content server, so serving_mode 404s EVERY in-scope serve (~23 checks) and the
+# gate scores them as conformance FAILs indistinguishable from a real defect. The
+# peer's warn-and-continue is a fail-open; the gate must fail closed for it. This
+# is a PRE-flight check (the port must be FREE now), not an after-start liveness
+# probe — a squatted port IS listening, so "something answers" cannot tell the
+# target's own listener from the squatter's. Cost a bisect to attribute on
+# 2026-09-04.
+for probe in "${POLL_PORT}:target(pass1)" "$((POLL_PORT + 1)):NS_PORT(pass2)"; do
+    p="${probe%%:*}"; role="${probe##*:}"
+    if (exec 3<>"/dev/tcp/127.0.0.1/${p}") 2>/dev/null; then
+        # NB: close fd 3 with a bare `exec 3>&-` — do NOT append `2>/dev/null`,
+        # which on an exec line redirects the SHELL's stderr to /dev/null for
+        # good and swallows the abort message below (caught 2026-09-04).
+        exec 3>&-
+        echo "ABORT: 127.0.0.1:${p} — the ${role} http-poll port — is already bound before we start the peer." >&2
+        echo "       A leftover peer is squatting it (this box's recurring cross-session collision). If we" >&2
+        echo "       continued, the target's http-poll listener would fail to bind, serving_mode would 404" >&2
+        echo "       every in-scope serve, and the gate would score ~23 FALSE conformance FAILs." >&2
+        echo "       Re-run on free ports:  POLL_PORT=<free> PI_PORT=<free> $0 $TYPE" >&2
+        echo "       Find the squatter:     ss -ltnp | grep :${p}" >&2
+        exit 2
+    fi
+done
+
 echo "==> target peer ($TYPE) with every surface enabled"
 TARGET_ADDR=$(go run ./cmd/peer-manager start --name "$TARGET" --type "$TYPE" --debug \
     --signaling-node --validate --publish-root \

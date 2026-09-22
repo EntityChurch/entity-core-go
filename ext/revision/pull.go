@@ -121,9 +121,14 @@ func (h *Handler) handlePull(ctx context.Context, req *handler.Request) (*handle
 		return resp, nil
 	}
 	if fetchResult.Head.IsZero() {
-		resp, _ := handler.NewErrorResponse(500, "remote_empty",
-			"remote "+params.Remote+" has no versions at prefix "+localPrefix)
-		return resp, nil
+		// EXTENSION-REVISION §pull (v3.13): a remote with no versions at the
+		// prefix is a RESULT, not a 500 — nothing failed internally, and the
+		// declared merge-result type carries the outcome. Answer 200 with
+		// status "remote_empty" and version absent. (Was a 500, which told the
+		// caller our own machinery broke.)
+		result := types.RevisionMergeResultData{Status: "remote_empty"}
+		resultEntity, _ := result.ToEntity()
+		return &handler.Response{Status: 200, Result: resultEntity}, nil
 	}
 
 	// 3. Walk the remote's trie locally; iteratively fetch-entities

@@ -23,14 +23,14 @@ import (
 func (h *Handler) handleValidate(ctx context.Context, req *handler.Request) (*handler.Response, error) {
 	var dispatch types.ValidateRequestData
 	if err := ecf.Decode(req.Params.Data, &dispatch); err != nil {
-		return handler.NewErrorResponse(400, "decode_error",
+		return handler.NewErrorResponse(400, "invalid_request",
 			"failed to decode validate-request: "+err.Error())
 	}
 
 	// Decode the entity to validate.
 	subject, err := decodeEntity(dispatch.Entity)
 	if err != nil {
-		return handler.NewErrorResponse(400, "invalid_entity",
+		return handler.NewErrorResponse(400, "invalid_request",
 			"validate-request.entity does not decode as an entity: "+err.Error())
 	}
 

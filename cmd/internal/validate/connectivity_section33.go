@@ -13,14 +13,28 @@ import (
 // §9.1 conformance rows landed at 0.8.2.7 that give them a wire citation.
 const catSection33Ref = "V7 §3.3 / §9.1 (0.8.2.7)"
 
+// totalHandlerSkipMarker is the stable phrase the §3.3 404-row check stamps on a
+// SKIP taken because the peer registers a catch-all handler (the total-handler
+// exception, ENTITY-CORE-PROTOCOL §3.3 0.8.2.8). isTotalHandlerSkip keys the
+// gate exemption on it: such a peer is conformant, so the spec forbids scoring
+// the SKIP as a failure. Keep it distinctive so it can never match the OTHER
+// skip this check emits (the unattributable control-404 case), which stays
+// scored — that one is a genuine "cannot tell" and is not a conformant posture.
+const totalHandlerSkipMarker = "§3.3 total-handler declared SKIP (0.8.2.8)"
+
 // runSection33CodeProbe gates the two ORACLE-DRIVABLE rows of the §3.3 status-code
 // table, generalized from the retired-synonym incident to the whole code slot
 // (ENTITY-CORE-PROTOCOL §3.3 slot rule + §9.1, 0.8.2.7):
 //
 //   - 501 row: an operation absent from a REGISTERED handler's manifest MUST
-//     answer 501 `unsupported_operation`. The slot carries no synonym —
-//     `unknown_operation`, `not_implemented`, `not_supported`, `unsupported_mode`
-//     and `not_available` are all non-conformant spellings of this one row.
+//     answer 501 `unsupported_operation`. The slot carries no synonym for THIS
+//     row — `unknown_operation`, `not_implemented`, `not_supported` and
+//     `not_available` are all non-conformant spellings of it. (`unsupported_mode`
+//     is NOT a synonym: it is a distinct, defined 501 code for the registry
+//     live-registration row, REGISTRY §6a.9.2, un-retired at 0.8.2.8. This
+//     probe targets `system/tree` — not a registry path — so `unsupported_mode`
+//     is still a wrong answer HERE, but as a mis-routed distinct code, not a
+//     retired synonym.)
 //   - 404 row: a path on the local peer with NO registered handler MUST answer
 //     404 `handler_not_found` — distinct from the 501 (handler present, op absent)
 //     and from an entity-level `not_found` raised INSIDE a registered handler.
@@ -88,7 +102,8 @@ func runSection33CodeProbe(ctx context.Context, client *PeerClient) []CheckResul
 		if status != 501 || code != "unsupported_operation" {
 			return FailCheck(fmt.Sprintf(
 				"registered handler + unknown op answered %d/%q, want 501/unsupported_operation "+
-					"(§3.3 501 slot; unknown_operation/not_implemented/not_supported/unsupported_mode/not_available retired 0.8.2.7); "+
+					"(§3.3 501 slot; unknown_operation/not_implemented/not_supported/not_available retired 0.8.2.7; "+
+					"unsupported_mode is a distinct registry code per §6a.9.2, wrong on this system/tree path); "+
 					"control system/tree:get=%d/%q", status, code, ctlStatus, ctlCode))
 		}
 		return PassCheck(fmt.Sprintf("unknown op on registered handler → 501/unsupported_operation (control get=%d/%q)", ctlStatus, ctlCode))
@@ -133,9 +148,18 @@ func runSection33CodeProbe(ctx context.Context, client *PeerClient) []CheckResul
 //   - anything else → FAIL.
 func classifyHandlerNotFound(probeStatus uint, probeCode string, ctlStatus uint, ctlCode string) CheckOutcome {
 	if probeStatus == 501 {
+		// §3.3 total-handler exception (0.8.2.8): at a peer that registers a
+		// catch-all pattern no unregistered path exists, so this row's input is
+		// unconstructible and the probe reaches the catch-all instead. Such a
+		// peer is CONFORMANT; the check MUST record a declared SKIP naming the
+		// catch-all and MUST NOT report the fallback's answer as a failure of
+		// this row. isTotalHandlerSkip keys on totalHandlerSkipMarker below so
+		// the gate exempts it — without that, a spec-mandated declared SKIP
+		// still fails the run (the exact blocker core-py hit on the python
+		// passes, cf SA-PY-36).
 		return SkipCheck(fmt.Sprintf(
-			"probe path answered 501/%q — a handler is registered here (peer uses a catch-all `*`); the 404 handler_not_found row is not drivable against this posture (§3.3 satisfaction-mode 0.8.2.7; cf SA-PY-36)",
-			probeCode))
+			"%s: probe path answered 501/%q — a handler is registered here (peer uses a catch-all `*`); the 404 handler_not_found row is not drivable against this posture (§3.3 satisfaction-mode, total-handler exception, 0.8.2.8; cf SA-PY-36)",
+			totalHandlerSkipMarker, probeCode))
 	}
 	if ctlStatus == 404 {
 		return SkipCheck(fmt.Sprintf("control: registered path also answered 404/%q for an unknown op — peer does not distinguish no-handler from op-missing, cannot attribute", ctlCode))

@@ -68,7 +68,7 @@ func (h *Handler) Handle(ctx context.Context, req *handler.Request) (*handler.Re
 
 	var dispatch types.ConstraintValidateRequestData
 	if err := ecf.Decode(req.Params.Data, &dispatch); err != nil {
-		return handler.NewErrorResponse(400, "decode_error",
+		return handler.NewErrorResponse(400, "invalid_request",
 			"failed to decode validate-request: "+err.Error())
 	}
 

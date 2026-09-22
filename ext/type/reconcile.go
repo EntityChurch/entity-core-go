@@ -28,7 +28,7 @@ import (
 func (h *Handler) handleReconcile(ctx context.Context, req *handler.Request) (*handler.Response, error) {
 	var dispatch types.ReconcileRequestData
 	if err := ecf.Decode(req.Params.Data, &dispatch); err != nil {
-		return handler.NewErrorResponse(400, "decode_error",
+		return handler.NewErrorResponse(400, "invalid_request",
 			"failed to decode reconcile-request: "+err.Error())
 	}
 	if len(dispatch.TypePaths) < 2 {
@@ -39,7 +39,7 @@ func (h *Handler) handleReconcile(ctx context.Context, req *handler.Request) (*h
 	case types.ReconcileIntersect, types.ReconcileUnion, types.ReconcilePrefer:
 		// supported
 	default:
-		return handler.NewErrorResponse(400, "invalid_strategy",
+		return handler.NewErrorResponse(400, "invalid_request",
 			fmt.Sprintf("strategy must be one of intersect/union/prefer; got %q", dispatch.Strategy))
 	}
 
@@ -62,7 +62,7 @@ func (h *Handler) handleReconcile(ctx context.Context, req *handler.Request) (*h
 
 	ent, err := result.ToEntity()
 	if err != nil {
-		return handler.NewErrorResponse(500, "encode_error",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to encode reconcile-result: "+err.Error())
 	}
 	return &handler.Response{Status: 200, Result: ent}, nil

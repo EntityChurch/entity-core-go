@@ -193,9 +193,26 @@ func (r *Report) HasFailures() bool {
 		if isEnvironmentSkip(c) {
 			continue
 		}
+		if isTotalHandlerSkip(c) {
+			continue
+		}
 		return true
 	}
 	return false
+}
+
+// isTotalHandlerSkip reports whether a SKIP is the §3.3 total-handler exception
+// (0.8.2.8): the 404 handler_not_found row cannot be driven against a peer that
+// registers a catch-all handler, because no unregistered path exists. The spec
+// rules such a peer CONFORMANT and requires a declared SKIP that MUST NOT be
+// reported as a failure of the row — so this skip class is exempt from the
+// PASS/FAIL gate, the same way profile and environment skips are. Keyed on the
+// distinctive marker the check stamps (connectivity_section33.go), so it can
+// never catch that check's OTHER, genuinely-unattributable skip, which stays
+// scored. This closes the blocker core-py named: go moved FAIL→SKIP but the
+// gate still scored the SKIP, so a spec-mandated declared SKIP failed the run.
+func isTotalHandlerSkip(c CheckResult) bool {
+	return strings.Contains(c.Message, totalHandlerSkipMarker)
 }
 
 // isEnvironmentSkip reports whether a SKIP is conditioned on a local-test-
@@ -391,7 +408,7 @@ func (r *Report) WriteText(w io.Writer, failuresOnly bool) {
 	// are auto-allowlisted by HasFailures; surface them in their own
 	// bucket so the reader can tell "intentional by --profile core" from
 	// "user said allow this" from "the rest count as FAIL".
-	var allowedSkip, profileSkip, envSkip, unallowedSkip int
+	var allowedSkip, profileSkip, envSkip, postureSkip, unallowedSkip int
 	for _, c := range r.Checks {
 		if c.Severity != Skip {
 			continue
@@ -403,6 +420,8 @@ func (r *Report) WriteText(w io.Writer, failuresOnly bool) {
 			profileSkip++
 		case isEnvironmentSkip(c):
 			envSkip++
+		case isTotalHandlerSkip(c):
+			postureSkip++
 		default:
 			unallowedSkip++
 		}
@@ -448,6 +467,9 @@ func (r *Report) WriteText(w io.Writer, failuresOnly bool) {
 	}
 	if envSkip > 0 {
 		fmt.Fprintf(w, "         %d skip(s) conditioned on local-test-env capability (e.g. multi-sig accept path needs the peer's on-disk key) — exempt from the FAIL gate\n", envSkip)
+	}
+	if postureSkip > 0 {
+		fmt.Fprintf(w, "         %d skip(s) are §3.3 total-handler declared SKIPs (0.8.2.8) — the peer registers a catch-all, so the 404 row is unconstructible and the peer is conformant; exempt from the FAIL gate\n", postureSkip)
 	}
 	if allowedSkip > 0 {
 		fmt.Fprintf(w, "         %d skip(s) allowlisted via -allow-skip — exempt from the FAIL gate\n", allowedSkip)
@@ -720,7 +742,7 @@ func (r *Report) unexercisedSurfaces() []string {
 	seen := make(map[string]bool)
 	var out []string
 	for _, c := range r.Checks {
-		if c.Severity != Skip || r.allowedSkips[c.Name] || isProfileKeyedSkip(c) {
+		if c.Severity != Skip || r.allowedSkips[c.Name] || isProfileKeyedSkip(c) || isTotalHandlerSkip(c) {
 			continue
 		}
 		surface, how := "unclassified", "read the check's message"

@@ -333,8 +333,13 @@ func TestRegister_DomainControlMode_Deferred(t *testing.T) {
 	if resp.Status != 501 {
 		t.Fatalf("domain-control: status want 501 got %d", resp.Status)
 	}
-	if code := decodeErrorCode(t, resp); code != "unsupported_operation" {
-		t.Fatalf("domain-control: code want unsupported_operation got %s", code)
+	// EXTENSION-REGISTRY §6a.9.2 (v1.22) + ENTITY-CORE-PROTOCOL §9.1 (0.8.2.8):
+	// live registration under a stored domain-control policy MUST answer 501
+	// unsupported_mode — NOT unsupported_operation (the handler is registered and
+	// register is implemented; the refusal is about the stored policy's mode).
+	// arch ruled B2 py's way against the 2-1 go+rust cohort (AP-22).
+	if code := decodeErrorCode(t, resp); code != "unsupported_mode" {
+		t.Fatalf("domain-control: code want unsupported_mode got %s", code)
 	}
 }
 

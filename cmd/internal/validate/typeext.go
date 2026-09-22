@@ -52,6 +52,22 @@ func runType(ctx context.Context, client *PeerClient) []CheckResult {
 	r.Declare("op_converge_roundtrip", "TYPE §7.4 MAY — converge round-trips")
 	r.Declare("op_adopt_roundtrip", "TYPE §7.5 MAY — adopt round-trips")
 	r.Declare("op_reconcile_roundtrip", "TYPE §7.6 MAY — reconcile round-trips")
+	// PROPOSAL-TYPE-OPERATION-ERROR-TAXONOMY (arch adopted go's spelling): a TYPE
+	// analysis op that references a missing type MUST answer 404 type_not_found.
+	// Cited to the proposal deliberately — the fold's §8.5 anchor collides with the
+	// existing system/type/violation and is not yet landed; the behavior is not.
+	// Row-4 (compare/compatible, the §7.2/§7.3 SHOULD ops all three seats build)
+	// is where the not_found→type_not_found narrowing is actually live —
+	// covering only the three MAY ops (converge/adopt/reconcile) skipped it, so
+	// rust's and py's row-4 fix was cross-impl-invisible. Cover both rows.
+	// The rule is now landed (EXTENSION-TYPE v1.3 Appendix A, folded from
+	// PROPOSAL-TYPE-OPERATION-ERROR-TAXONOMY 2026-09-04); each check cites its
+	// op's own normative section — the appendix carries no §-number to cite.
+	r.Declare("op_compare_missing_type_404", "TYPE §7.2 (Appendix A) — compare on a missing referenced type → 404 type_not_found")
+	r.Declare("op_compatible_missing_type_404", "TYPE §7.3 (Appendix A) — compatible on a missing referenced type → 404 type_not_found")
+	r.Declare("op_converge_missing_type_404", "TYPE §7.4 (Appendix A) — converge on a missing referenced type → 404 type_not_found")
+	r.Declare("op_adopt_missing_type_404", "TYPE §7.5 (Appendix A) — adopt of a missing source type → 404 type_not_found")
+	r.Declare("op_reconcile_missing_type_404", "TYPE §7.6 (Appendix A) — reconcile on a missing referenced type → 404 type_not_found")
 
 	// --- Step 1: Handler manifests ---
 
@@ -540,6 +556,123 @@ func runType(ctx context.Context, client *PeerClient) []CheckResult {
 			return SkipCheck("encode: " + err.Error())
 		}
 		return checkOptionalOp("reconcile", types.TypeTypeReconcileResult, params)
+	})
+
+	// PROPOSAL-TYPE-OPERATION-ERROR-TAXONOMY missing-type teeth. Each op is a
+	// §12.2/§12.3 MAY, so a peer that does not ship it 501s — in which case the
+	// 404 behavior is untestable and we SKIP (never a false PASS). runMissingType404
+	// carries the teeth in-check (carry-the-teeth): it first runs the op with all
+	// PRESENT paths as a reachability control; only a 200 there makes a subsequent
+	// 404 on a missing path attributable to the missing type rather than to the op
+	// being unroutable. This is the row that separates go (404 type_not_found on all
+	// three) from py (400 invalid_request on converge/reconcile, not_found on adopt).
+	missingTypePath := "system/type/optest/nonexistent-missing-type"
+	runMissingType404 := func(opName string, controlParams, missingParams entity.Entity) CheckOutcome {
+		ctl, err := typeExecute(opName, controlParams)
+		if err != nil {
+			return FailCheck("execute " + opName + " (present-types control): " + err.Error())
+		}
+		if ctl.Status == 501 {
+			// The op is a §12.2/§12.3 MAY; a peer that does not ship it 501s and
+			// the missing-type 404 behavior is not testable. WARN, not SKIP —
+			// the roundtrip row above already WARNs the identical 501, and a SKIP
+			// counts as a failure (it exited the suite 1 against a conformant rust
+			// peer that builds only 3 of the 6 ops — rust ROUTING-2026-09-04).
+			return WarnCheck(opName + " not implemented (501) — missing-type 404 behavior not testable on this peer (conformant for the §12.2/§12.3 MAY op)")
+		}
+		if ctl.Status != 200 {
+			return SkipCheck(fmt.Sprintf("%s present-types control returned %d, not 200 — cannot attribute a missing-type response to the missing type", opName, ctl.Status))
+		}
+		resp, err := typeExecute(opName, missingParams)
+		if err != nil {
+			return FailCheck("execute " + opName + " (missing type): " + err.Error())
+		}
+		code, _ := decodeResultErrorCode(resp)
+		switch {
+		case resp.Status == 404 && code == "type_not_found":
+			return PassCheck(opName + " on a missing referenced type → 404 type_not_found (present-types control returned 200, so the 404 is the missing type)")
+		case resp.Status == 404:
+			return FailCheck(fmt.Sprintf("%s missing type → 404 but result.data.code=%q, want type_not_found (py adopt currently not_found)", opName, code))
+		case resp.Status == 200:
+			return FailCheck(opName + " resolved a nonexistent type as 200 — MUST 404 type_not_found")
+		default:
+			return FailCheck(fmt.Sprintf("%s missing type → status %d code %q, want 404 type_not_found (py currently 400 invalid_request on converge/reconcile — a wrong status class, not a spelling)", opName, resp.Status, code))
+		}
+	}
+
+	r.Run("op_compare_missing_type_404", func() CheckOutcome {
+		if !mustInstallOpType("optest/a") || !mustInstallOpType("optest/b") {
+			return SkipCheck("could not install probe types")
+		}
+		ctl, err := types.CompareRequestData{TypeA: "system/type/optest/a", TypeB: "system/type/optest/b"}.ToEntity()
+		if err != nil {
+			return SkipCheck("encode control: " + err.Error())
+		}
+		miss, err := types.CompareRequestData{TypeA: "system/type/optest/a", TypeB: missingTypePath}.ToEntity()
+		if err != nil {
+			return SkipCheck("encode probe: " + err.Error())
+		}
+		return runMissingType404("compare", ctl, miss)
+	})
+
+	r.Run("op_compatible_missing_type_404", func() CheckOutcome {
+		if !mustInstallOpType("optest/a") || !mustInstallOpType("optest/b") {
+			return SkipCheck("could not install probe types")
+		}
+		ctl, err := types.CompatibleRequestData{TypeA: "system/type/optest/a", TypeB: "system/type/optest/b", Direction: types.DirectionBidirectional}.ToEntity()
+		if err != nil {
+			return SkipCheck("encode control: " + err.Error())
+		}
+		miss, err := types.CompatibleRequestData{TypeA: "system/type/optest/a", TypeB: missingTypePath, Direction: types.DirectionBidirectional}.ToEntity()
+		if err != nil {
+			return SkipCheck("encode probe: " + err.Error())
+		}
+		return runMissingType404("compatible", ctl, miss)
+	})
+
+	r.Run("op_converge_missing_type_404", func() CheckOutcome {
+		if !mustInstallOpType("optest/a") || !mustInstallOpType("optest/b") {
+			return SkipCheck("could not install probe types")
+		}
+		ctl, err := types.ConvergeRequestData{TypePaths: []string{"system/type/optest/a", "system/type/optest/b"}}.ToEntity()
+		if err != nil {
+			return SkipCheck("encode control: " + err.Error())
+		}
+		miss, err := types.ConvergeRequestData{TypePaths: []string{"system/type/optest/a", missingTypePath}}.ToEntity()
+		if err != nil {
+			return SkipCheck("encode probe: " + err.Error())
+		}
+		return runMissingType404("converge", ctl, miss)
+	})
+
+	r.Run("op_adopt_missing_type_404", func() CheckOutcome {
+		if !mustInstallOpType("optest/a") {
+			return SkipCheck("could not install probe type")
+		}
+		ctl, err := types.AdoptRequestData{SourcePath: "system/type/optest/a", LocalName: "optest/adopted-ctl"}.ToEntity()
+		if err != nil {
+			return SkipCheck("encode control: " + err.Error())
+		}
+		miss, err := types.AdoptRequestData{SourcePath: missingTypePath, LocalName: "optest/adopted-missing"}.ToEntity()
+		if err != nil {
+			return SkipCheck("encode probe: " + err.Error())
+		}
+		return runMissingType404("adopt", ctl, miss)
+	})
+
+	r.Run("op_reconcile_missing_type_404", func() CheckOutcome {
+		if !mustInstallOpType("optest/a") || !mustInstallOpType("optest/b") {
+			return SkipCheck("could not install probe types")
+		}
+		ctl, err := types.ReconcileRequestData{TypePaths: []string{"system/type/optest/a", "system/type/optest/b"}, Strategy: types.ReconcileUnion}.ToEntity()
+		if err != nil {
+			return SkipCheck("encode control: " + err.Error())
+		}
+		miss, err := types.ReconcileRequestData{TypePaths: []string{"system/type/optest/a", missingTypePath}, Strategy: types.ReconcileUnion}.ToEntity()
+		if err != nil {
+			return SkipCheck("encode probe: " + err.Error())
+		}
+		return runMissingType404("reconcile", ctl, miss)
 	})
 
 	return r.Results()

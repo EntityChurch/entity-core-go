@@ -27,7 +27,7 @@ import (
 func (h *Handler) handleAdopt(ctx context.Context, req *handler.Request) (*handler.Response, error) {
 	var dispatch types.AdoptRequestData
 	if err := ecf.Decode(req.Params.Data, &dispatch); err != nil {
-		return handler.NewErrorResponse(400, "decode_error",
+		return handler.NewErrorResponse(400, "invalid_request",
 			"failed to decode adopt-request: "+err.Error())
 	}
 	if dispatch.SourcePath == "" {
@@ -56,7 +56,7 @@ func (h *Handler) handleAdopt(ctx context.Context, req *handler.Request) (*handl
 
 	ent, err := adopted.ToEntity()
 	if err != nil {
-		return handler.NewErrorResponse(500, "encode_error",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to encode adopted type: "+err.Error())
 	}
 	return &handler.Response{Status: 200, Result: ent}, nil

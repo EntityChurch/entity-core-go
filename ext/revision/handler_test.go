@@ -1446,3 +1446,56 @@ func storeTestEntity(t *testing.T, cs store.ContentStore, typeName string, data 
 	}
 	return h
 }
+
+// TestPull_EmptyRemote_Is200RemoteEmpty is the v3.13 teeth: a pull against a
+// remote with no versions at the prefix is a RESULT — 200 with
+// merge-result.status = "remote_empty" — not a 500. Nothing failed internally;
+// the declared merge-result type carries the outcome. (Was a 500 remote_empty,
+// which told the caller our own machinery broke; arch ruled it a 200 status
+// value at EXTENSION-REVISION v3.13.)
+func TestPull_EmptyRemote_Is200RemoteEmpty(t *testing.T) {
+	h := NewHandler()
+	hctx := newTestContext()
+
+	// Stub the outbound fetch: the remote answers a 200 envelope whose
+	// fetch-result carries a zero Head — the empty-remote condition the handler
+	// keys on. The control that the path is reached is the 200 itself: a broken
+	// fetch would surface as a 502, not a 200 remote_empty.
+	hctx.Execute = func(ctx context.Context, uri, operation string, params entity.Entity, opts ...handler.ExecuteOption) (*handler.Response, error) {
+		if operation != "fetch" {
+			return handler.NewErrorResponse(500, "internal_error", "unexpected op "+operation)
+		}
+		frEnt, err := types.RevisionFetchResultData{}.ToEntity() // Head zero → empty remote
+		if err != nil {
+			t.Fatalf("build fetch-result: %v", err)
+		}
+		raw, err := ecf.Encode(entity.Envelope{Root: frEnt, Included: map[hash.Hash]entity.Entity{}})
+		if err != nil {
+			t.Fatalf("encode envelope: %v", err)
+		}
+		envEnt, err := entity.NewEntity("system/envelope", cbor.RawMessage(raw))
+		if err != nil {
+			t.Fatalf("envelope entity: %v", err)
+		}
+		return &handler.Response{Status: 200, Result: envEnt}, nil
+	}
+
+	req := makeRequest(t, hctx, "pull", types.RevisionFetchParamsData{
+		Prefix: "data/",
+		Remote: "2KtestRemotePeerAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+	})
+	resp, err := h.Handle(context.Background(), req)
+	if err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	if resp.Status != 200 {
+		t.Fatalf("empty remote: status want 200 (a result, not a 500), got %d", resp.Status)
+	}
+	mr, err := types.RevisionMergeResultDataFromEntity(resp.Result)
+	if err != nil {
+		t.Fatalf("decode merge-result: %v", err)
+	}
+	if mr.Status != "remote_empty" {
+		t.Fatalf("empty remote: merge-result.status want %q, got %q", "remote_empty", mr.Status)
+	}
+}

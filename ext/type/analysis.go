@@ -14,7 +14,7 @@ import (
 func (h *Handler) handleCompare(ctx context.Context, req *handler.Request) (*handler.Response, error) {
 	var dispatch types.CompareRequestData
 	if err := ecf.Decode(req.Params.Data, &dispatch); err != nil {
-		return handler.NewErrorResponse(400, "decode_error",
+		return handler.NewErrorResponse(400, "invalid_request",
 			"failed to decode compare-request: "+err.Error())
 	}
 
@@ -37,7 +37,7 @@ func (h *Handler) handleCompare(ctx context.Context, req *handler.Request) (*han
 func (h *Handler) handleCompatible(ctx context.Context, req *handler.Request) (*handler.Response, error) {
 	var dispatch types.CompatibleRequestData
 	if err := ecf.Decode(req.Params.Data, &dispatch); err != nil {
-		return handler.NewErrorResponse(400, "decode_error",
+		return handler.NewErrorResponse(400, "invalid_request",
 			"failed to decode compatible-request: "+err.Error())
 	}
 

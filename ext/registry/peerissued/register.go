@@ -383,12 +383,18 @@ func (i *Issuer) handleRegisterRequest(_ context.Context, req *handler.Request) 
 	}
 
 	// §6a.9.1 mode "domain-control" is DEFERRED per §6a.10 — v1 rejects.
-	// This is the *stored-policy* path and keeps its 501: §6a.9.2's 400
-	// unsupported_mode is a requirement on set-issuer-policy, which refuses
-	// to store the mode in the first place. A policy that predates that
-	// refusal still has to be answered here.
+	// This is the *stored-policy* live-registration path: a domain-control
+	// policy is already stored (seeded out-of-band, written directly, or
+	// predating the §6a.9.1 store-refusal). Per EXTENSION-REGISTRY §6a.9.2
+	// (v1.22 Appendix A) it MUST answer 501 `unsupported_mode` and MUST NOT
+	// fall back. ENTITY-CORE-PROTOCOL §9.1 (0.8.2.8) confirms `unsupported_mode`
+	// is NOT a synonym of `unsupported_operation` here — the handler is
+	// registered and `register` IS implemented; the refusal is about the
+	// stored policy's mode, a distinct failure that merely shares the 501
+	// status. (Was `unsupported_operation`; arch ruled B2 against the 2-1
+	// cohort — the corpus MUST, not the census, governs. arch AP-22.)
 	if policy.Mode == types.IssuerPolicyModeDomainControl {
-		return handler.NewErrorResponse(501, "unsupported_operation",
+		return handler.NewErrorResponse(501, "unsupported_mode",
 			"domain-control mode is deferred to the web-native domain-proof co-design (§6a.10)")
 	}
 

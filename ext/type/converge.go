@@ -21,7 +21,7 @@ import (
 func (h *Handler) handleConverge(ctx context.Context, req *handler.Request) (*handler.Response, error) {
 	var dispatch types.ConvergeRequestData
 	if err := ecf.Decode(req.Params.Data, &dispatch); err != nil {
-		return handler.NewErrorResponse(400, "decode_error",
+		return handler.NewErrorResponse(400, "invalid_request",
 			"failed to decode converge-request: "+err.Error())
 	}
 	if len(dispatch.TypePaths) < 2 {
@@ -37,7 +37,7 @@ func (h *Handler) handleConverge(ctx context.Context, req *handler.Request) (*ha
 	merged := convergeDefinitions(defs, paths)
 	ent, err := merged.ToEntity()
 	if err != nil {
-		return handler.NewErrorResponse(500, "encode_error",
+		return handler.NewErrorResponse(500, "internal_error",
 			"failed to encode converged type: "+err.Error())
 	}
 	return &handler.Response{Status: 200, Result: ent}, nil

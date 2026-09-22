@@ -42,6 +42,47 @@ func TestClassifyHandlerNotFound(t *testing.T) {
 	}
 }
 
+// TestTotalHandlerSkipExemptFromGate pins the §3.3 total-handler exception
+// (0.8.2.8): a catch-all peer's declared SKIP is conformant and MUST NOT fail
+// the run, while the OTHER skip this same check can emit — the unattributable
+// control-404 case — is NOT a conformant posture and MUST still fail the gate.
+//
+// It drives the REAL classifier output through HasFailures rather than a
+// hand-copied message, so a drift in the skip message that unlinks it from
+// totalHandlerSkipMarker reddens here instead of silently re-failing the python
+// passes (the blocker core-py named). The control-404 row is the mutation
+// witness: if isTotalHandlerSkip ever broadened to match it, this row flips.
+func TestTotalHandlerSkipExemptFromGate(t *testing.T) {
+	// The catch-all posture: probe 501 → declared SKIP naming the catch-all.
+	totalHandler := classifyHandlerNotFound(501, "unsupported_operation", 501, "unsupported_operation")
+	if totalHandler.Severity() != Skip {
+		t.Fatalf("total-handler case: got %v, want SKIP", totalHandler.Severity())
+	}
+	rTotal := &Report{}
+	rTotal.Add(CheckResult{
+		Category: catConnectivity, Name: "handler_not_found_on_unregistered_path",
+		Severity: totalHandler.Severity(), Message: totalHandler.message,
+	})
+	if rTotal.HasFailures() {
+		t.Fatalf("a §3.3 total-handler declared SKIP must NOT fail the gate (0.8.2.8); message=%q", totalHandler.message)
+	}
+
+	// The unattributable posture: registered path also 404s → SKIP, but this is
+	// a genuine "cannot tell", not a conformant catch-all — it MUST still fail.
+	unattributable := classifyHandlerNotFound(404, "handler_not_found", 404, "not_found")
+	if unattributable.Severity() != Skip {
+		t.Fatalf("control-404 case: got %v, want SKIP", unattributable.Severity())
+	}
+	rUnattr := &Report{}
+	rUnattr.Add(CheckResult{
+		Category: catConnectivity, Name: "handler_not_found_on_unregistered_path",
+		Severity: unattributable.Severity(), Message: unattributable.message,
+	})
+	if !rUnattr.HasFailures() {
+		t.Fatalf("an unattributable control-404 SKIP must still fail the gate; message=%q", unattributable.message)
+	}
+}
+
 func TestClassifyOptionalTypeOp(t *testing.T) {
 	const rt = "system/type/compare-result"
 	cases := []struct {
