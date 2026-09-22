@@ -37,6 +37,7 @@ func runOriginationCore(ctx context.Context, target *PeerClient, referenceAddr s
 	r.Declare("reference_connect", "harness precondition (not a spec vector) — dial the reference peer with the TARGET's keypair, so the validator presents one byte-equal identity to both peers per EXTENSION-CONTINUATION §4.2 case 3")
 	r.Declare("reference_ready", "harness precondition (not a spec vector) — the reference peer completed its connectivity checks and is usable as the handshake half")
 	r.Declare("dispatch_outbound_reentry", "GUIDE-CONFORMANCE §7a.1 + §7a.2a; PROPOSAL v7.74 §10.2")
+	r.Declare("dispatch_outbound_ambient_refused", "ENTITY-CORE-PROTOCOL §5.2 PD-2 (0.8.2.17) negative arm — an outbound sub-dispatch to a foreign peer on ambient handler authority (no target-minted capability presented) MUST be refused")
 
 	var subResults []CheckResult
 
@@ -85,6 +86,45 @@ func runOriginationCore(ctx context.Context, target *PeerClient, referenceAddr s
 				return FailCheck(err.Error())
 			}
 			return PassCheck(fmt.Sprintf("dispatch-outbound reentry round-tripped (validator-as-B served %d inbound echo on the same connection)", hits))
+		})
+
+		// PD-2 negative arm. Drive the SAME handler with NO capability: the
+		// outbound to a foreign peer now rides ambient handler authority and
+		// MUST be refused (§5.2 — a handler with no peers scope covering the
+		// target cannot reach a foreign peer). Paired with the positive
+		// dispatch_outbound_reentry above, this discriminates: a peer that
+		// refuses everything fails the positive arm, and a peer that authorizes
+		// everything fails this one. One arm alone is not a check.
+		r.Run("dispatch_outbound_ambient_refused", func() CheckOutcome {
+			if !target.HasConformanceHandlers(ctx) {
+				return SkipCheck("target peer not run with --validate (system/validate/dispatch-outbound absent; §7a.4 falls back to code-attestation floor)")
+			}
+			outerStatus, outerCode, innerStatus, err := target.SendDispatchOutboundProbeAmbient(ctx)
+			if err != nil {
+				return FailCheck(err.Error())
+			}
+			// The ambient Dimension-4 refusal surfaces in either scaffold shape,
+			// both a pass (the §7a scaffold does not pin which):
+			//   - RELAYED (py): outer 403 capability_denied.
+			//   - WRAPPED (go, rust): outer 200, inner 403.
+			if outerStatus == 403 && outerCode == "capability_denied" {
+				return PassCheck("PD-2 negative arm: ambient outbound sub-dispatch to a foreign peer refused (outer 403 capability_denied, relayed shape) — Dimension 4 enforced on outbound (§5.2)")
+			}
+			if outerStatus == 200 {
+				if innerStatus == 200 {
+					return FailCheck("PD-2 negative arm: an ambient outbound sub-dispatch to a foreign peer SUCCEEDED (inner 200) — the peer authorized a foreign sub-dispatch on a handler grant with no peers scope (§5.2 escalation the peers dimension exists to close)")
+				}
+				if innerStatus != 403 {
+					return FailCheck(fmt.Sprintf("PD-2 negative arm: ambient outbound sub-dispatch refused with inner status %d, want 403 capability_denied (§5.2 Dimension 4)", innerStatus))
+				}
+				return PassCheck("PD-2 negative arm: ambient outbound sub-dispatch to a foreign peer refused (inner 403 capability_denied, wrapped shape) — Dimension 4 enforced on outbound (§5.2)")
+			}
+			// A strict handler refuses the omitted-triple probe at param
+			// validation (outer 400 invalid_params), before any dispatch — the
+			// ambient arm is not reachable over this probe. UNMEASURED, not a
+			// defect: SKIP (a param-validation refusal is not a Dimension-4
+			// refusal; the "early refusal reads as unmeasurability" trap).
+			return SkipCheck(fmt.Sprintf("target keeps the §7a.2a triple mandatory (omitted-triple probe refused at param validation: outer status %d code %q) — PD-2 ambient arm not reachable over this probe; the cohort scaffold makes the triple optional (outer 403 relayed, or outer 200 + inner 403) so the arm is measured there", outerStatus, outerCode))
 		})
 
 		// reference is connected to keep the gate's input shape

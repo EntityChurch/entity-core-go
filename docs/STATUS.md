@@ -1,6 +1,6 @@
 # entity-core-go — status
 
-_Updated: 2026-09-04 · released version: the newest git tag on `master` (authoritative in `CHANGELOG.md` + `go.mod`) — deliberately not restated here, so it cannot go stale on a cut_
+_Updated: 2026-09-09 · released version: the newest git tag on `master` (authoritative in `CHANGELOG.md` + `go.mod`) — deliberately not restated here, so it cannot go stale on a cut_
 
 **This file is the canonical rolling log for this repo** — one file, re-measured
 rather than appended to, and the only status document that publishes. The dated
@@ -40,7 +40,37 @@ live-HTTP transport surfaces.
 
 ## Where we left off
 
-> **NEXT SESSION STARTS HERE — 2026-09-04: §3.3 error-code convergence is CLOSED at the
+> **2026-09-09 (b) — the 0.8.2.17 set converged three ways.** All three reference
+> implementations (Go, Rust, Python) landed the outbound sub-dispatch authorization
+> and the id-scope delegation-subset, and drove them against each other: the outbound
+> check refuses a foreign sub-dispatch on an unscoped handler grant and accepts a
+> target-minted credential, agreeing on reading that credential's authority from the
+> chain's root rather than its leaf (a re-attenuated credential the target delegated is
+> still the target's). The `system/*` registration reservation is withdrawn — any path
+> is gated by the capability check, not a prefix rule — so its conformance check was
+> re-based onto that capability refusal. A handful of small questions the specification
+> leaves open (which error code a few operations return for a missing resource; whether
+> the outbound check also binds a request a peer originates purely as itself) are raised
+> upstream rather than decided unilaterally; behaviour is correct and identical across
+> the three implementations on everything that is settled.
+>
+> **2026-09-09 — outbound sub-dispatch authorization and the id-scope delegation-subset
+> both landed (§5.2 / §5.5a).** Before a locally-originated sub-dispatch leaves the peer,
+> the four-dimension permission check now runs against the authority the sub-dispatch spends:
+> a capability the target peer minted for this peer (its own dimensions authorize it), or —
+> absent one — the executing handler's own grant, whose `peers` dimension binds it, so a
+> handler with no peers scope covering the target cannot reach a foreign peer. A top-level
+> request the peer originates as itself is authorized by the target on receipt, not pre-gated.
+> Separately, the delegation subset check (child capability ⊆ parent) now matches the
+> `operations` and `peers` dimensions as literal identifiers (bare `*` / trailing `/*`), never
+> the tree-path matcher, and checks the `peers` dimension at all — closing a path by which a
+> child grant could widen the peers it applies to past its parent's. The full conformance
+> suite is green across all profiles. The `path_required` code question for the tree / inbox /
+> subscription / continuation operations (whose specifications do not state whether a missing
+> resource is that specific code or a generic structural one) is raised upstream rather than
+> decided unilaterally; the behaviour (a 400 on a missing resource) is correct either way.
+>
+> **2026-09-04: §3.3 error-code convergence is CLOSED at the
 > reference-implementation tier; a scoped follow-on backlog is analysed and reconciled.**
 >
 > **§3.3 (0.8.2.7) error codes — done, cross-impl clean.** go/rust/py are zero-FAIL on every

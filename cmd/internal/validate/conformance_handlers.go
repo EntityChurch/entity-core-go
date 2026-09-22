@@ -373,6 +373,78 @@ func (c *PeerClient) SendDispatchOutboundProbe(ctx context.Context, value interf
 	return hits, nil
 }
 
+// SendDispatchOutboundProbeAmbient drives the target's dispatch-outbound
+// handler with NO reentry capability, so the handler's outbound sub-dispatch
+// to a FOREIGN peer (the validator) rides only the target's ambient handler
+// grant. This is the PD-2 (§5.2, 0.8.2.17) negative arm: a handler whose grant
+// carries no peers scope covering the target MUST be refused before the
+// sub-dispatch leaves the peer.
+//
+// Returns (outerStatus, outerCode, innerStatus). The ambient Dimension-4
+// refusal surfaces in one of two scaffold shapes, BOTH of which the caller
+// treats as a pass (the §7a scaffold does not pin which):
+//   - WRAPPED (go, rust): the handler returns outer 200 and the refusal rides
+//     the INNER (sub-dispatch) status — inner 403.
+//   - RELAYED (py): the handler relays the refusal as the OUTER status —
+//     outer 403 capability_denied, inner 0.
+// A peer that keeps the §7a.2a triple MANDATORY refuses the omitted-triple
+// probe at PARAM VALIDATION (outer 400 invalid_params) — a refusal BEFORE any
+// dispatch, so the ambient arm is NOT reachable over this probe and the outcome
+// is UNMEASURED, not a defect (the caller SKIPs it). outerCode disambiguates a
+// 403 Dimension-4 refusal from a 400 param-validation refusal — distinguishing
+// them is the "early refusal reads as unmeasurability, not strictness" lesson.
+func (c *PeerClient) SendDispatchOutboundProbeAmbient(ctx context.Context) (outerStatus int, outerCode string, innerStatus int, err error) {
+	// Point the sub-dispatch at the validator's own echo handler — a foreign
+	// namespace from the target's perspective. No capability is presented.
+	valueRaw, err := ecf.Encode(map[string]interface{}{"value": "pd2-ambient-negative-probe"})
+	if err != nil {
+		return 0, "", 0, fmt.Errorf("encode echo params shape: %w", err)
+	}
+	validatorURI := fmt.Sprintf("entity://%s/%s", c.identityPeerIDString(), conformance.PatternEcho)
+	paramsRaw, err := ecf.Encode(map[string]interface{}{
+		"target":    validatorURI,
+		"operation": "echo",
+		"value":     cbor.RawMessage(valueRaw),
+		// reentry_capability / reentry_granter / reentry_cap_signature omitted
+		// on purpose — this exercises the ambient authority arm.
+	})
+	if err != nil {
+		return 0, "", 0, fmt.Errorf("encode dispatch-outbound params: %w", err)
+	}
+	paramsEnt, err := entity.NewEntity("primitive/any", cbor.RawMessage(paramsRaw))
+	if err != nil {
+		return 0, "", 0, fmt.Errorf("build dispatch-outbound params entity: %w", err)
+	}
+	uri := fmt.Sprintf("entity://%s/%s", c.remotePeerID, conformance.PatternDispatchOutbound)
+	env, _, err := c.SendExecute(ctx, uri, "dispatch", paramsEnt, nil)
+	if err != nil {
+		return 0, "", 0, fmt.Errorf("send dispatch-outbound (ambient): %w", err)
+	}
+	respData, err := types.ExecuteResponseDataFromEntity(env.Root)
+	if err != nil {
+		return 0, "", 0, fmt.Errorf("decode dispatch-outbound response: %w", err)
+	}
+	// Outer non-200: either the ambient refusal RELAYED as the outer status (py:
+	// 403 capability_denied), or a strict handler refusing the omitted triple at
+	// PARAM VALIDATION (400 invalid_params). The outer code tells them apart; the
+	// caller treats the former as the refusal (pass) and the latter as unmeasured
+	// (skip). inner is 0 — there is no wrapped result to read.
+	if respData.Status != 200 {
+		code, _ := decodeResultErrorCode(respData)
+		return int(respData.Status), code, 0, nil
+	}
+	// Outer 200: the WRAPPED shape (go, rust) — the refusal rides the inner status.
+	var outerResult entity.Entity
+	if err := ecf.Decode(respData.Result, &outerResult); err != nil {
+		return 0, "", 0, fmt.Errorf("decode dispatch-outbound result entity: %w", err)
+	}
+	var inner conformance.DispatchOutboundResult
+	if err := ecf.Decode(outerResult.Data, &inner); err != nil {
+		return 0, "", 0, fmt.Errorf("decode dispatch-outbound inner result: %w", err)
+	}
+	return 200, "", int(inner.Status), nil
+}
+
 // HasConformanceHandlers does a cheap wire probe to detect whether the
 // target peer has the §7a test handlers wired (i.e. was started with
 // --validate). Tree-gets the echo handler interface entity; presence

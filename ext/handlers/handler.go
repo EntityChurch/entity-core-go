@@ -97,7 +97,10 @@ func (h *Handler) Handle(ctx context.Context, req *handler.Request) (*handler.Re
 //     signature in the address space)
 //   - any provided type definitions at system/type/{type_name}
 //
-// V7 §6.6: rejects user-installed handlers under system/* paths.
+// 0.8.2.13: no system/* prefix reservation — installation at any path,
+// system/* included, is authorized by the dispatch capability check on
+// `resource` (§6.2 / §3162), and refusing system/* is deployment policy, not a
+// protocol constraint (§3164).
 //
 // V7 §3.12 / §6.2: grant scope comes from requested_scope, falling back to
 // manifest.internal_scope. An empty scope is permitted — the handler is
@@ -130,10 +133,15 @@ func (h *Handler) handleRegister(ctx context.Context, req *handler.Request) (*ha
 		return handler.NewErrorResponse(400, "malformed_resource",
 			"register resource must be system/handler/{pattern}: "+hctx.Resource.Targets[0])
 	}
-	if isReservedSystemPattern(pattern) {
-		return handler.NewErrorResponse(403, "forbidden_pattern",
-			"V7 §6.6: user-installed handlers MUST NOT register at system/* paths: "+pattern)
-	}
+	// 0.8.2.13: the system/* registration reservation is WITHDRAWN. §6.2/§3162
+	// now state that installation at a system/* path is authorized by the same
+	// dispatch capability check on `resource` as any other registration, and
+	// "the protocol places no additional constraint on the system/* prefix";
+	// refusing such a register is a deployment decision, not a protocol
+	// constraint (§3164). The capability layer is the gate — DefaultConnectionGrants
+	// grants no authority over the system/handler handler, so a default-posture
+	// remote cannot reach this path at all. The former isReservedSystemPattern
+	// prefix refusal was removed with this revision.
 
 	var rr types.RegisterRequestData
 	if err := ecf.Decode(req.Params.Data, &rr); err != nil {
@@ -280,10 +288,9 @@ func (h *Handler) handleUnregister(ctx context.Context, req *handler.Request) (*
 		return handler.NewErrorResponse(400, "malformed_resource",
 			"unregister resource must be system/handler/{pattern}: "+hctx.Resource.Targets[0])
 	}
-	if isReservedSystemPattern(pattern) {
-		return handler.NewErrorResponse(403, "forbidden_pattern",
-			"V7 §6.6: cannot unregister system/* handlers: "+pattern)
-	}
+	// 0.8.2.13: the system/* reservation is withdrawn (see handleRegister).
+	// Unregister at a system/* pattern is governed by the same capability
+	// check, not a hardcoded prefix refusal.
 
 	existing, ok := hctx.LocationIndex.Get(pattern)
 	if !ok {
@@ -322,13 +329,6 @@ func putAt(hctx *handler.HandlerContext, path string, ent entity.Entity, op stri
 		return fmt.Errorf("bind %s entity: %w", path, err)
 	}
 	return nil
-}
-
-// isReservedSystemPattern returns true for patterns the spec reserves for
-// bootstrap installation. V7 §6.6: "Implementations MUST NOT allow user-
-// installed handlers to register at system/* paths."
-func isReservedSystemPattern(pattern string) bool {
-	return pattern == "system" || strings.HasPrefix(pattern, "system/")
 }
 
 // patternFromHandlerResource extracts the user pattern from a register/unregister

@@ -81,6 +81,18 @@ func (r *reentryHandler) Manifest() types.HandlerManifestData {
 		Operations: map[string]types.HandlerOperationSpec{
 			"go": {InputType: "test/reentry-input", OutputType: "test/slow-result"},
 		},
+		// The reentry handler dispatches AMBIENTLY to a foreign peer, so under
+		// PD-2 (§5.2, 0.8.2.17) its own grant must scope that peer — declare a
+		// cross-peer internal scope. A handler that legitimately reenters a
+		// foreign peer without presenting a target-minted capability must
+		// declare a peers scope covering it, exactly as this does; the §6.9
+		// default self-grant (peers absent → {local}) would refuse the outbound.
+		InternalScope: []types.GrantEntry{{
+			Handlers:   types.CapabilityScope{Include: []string{"*"}},
+			Operations: types.CapabilityScope{Include: []string{"*"}},
+			Resources:  types.CapabilityScope{Include: []string{"/*/*"}},
+			Peers:      &types.CapabilityScope{Include: []string{"*"}},
+		}},
 	}
 }
 

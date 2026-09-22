@@ -60,6 +60,11 @@ func seedWildcardGrant(t *testing.T, kp crypto.Keypair, cs store.ContentStore, l
 			Handlers:   types.CapabilityScope{Include: []string{"*"}},
 			Resources:  types.CapabilityScope{Include: []string{"*"}},
 			Operations: types.CapabilityScope{Include: ops},
+			// Wildcard on peers too: these are cross-peer chain/bounds
+			// propagation tests, and PD-2 (§5.2) requires the executing
+			// handler's grant to scope the target peer for an outbound
+			// sub-dispatch. A "wildcard grant" authorizes any peer.
+			Peers: &types.CapabilityScope{Include: []string{"*"}},
 		}},
 		Granter:   types.SingleSigGranter(identity.ContentHash),
 		Grantee:   identity.ContentHash,

@@ -2,7 +2,9 @@
   "_comment": "Rows with no resolved normative home, pinned so -check can fail on NEW ones. Exact in both directions: fixing a row also fails the gate until the baseline is rewritten (go run ./cmd/conformance-register -write-baseline). Shrinking this file is the point.",
   "findings": {
     "?.\u003ccomputed\u003e": "DYNAMIC",
-    "?.core_register_reserved_publishes_nothing": "NON_NORMATIVE",
+    "?.core_register_capability_positive_control": "NON_NORMATIVE",
+    "?.core_register_capability_refused": "NON_NORMATIVE",
+    "?.core_register_refused_publishes_nothing": "NON_NORMATIVE",
     "?.core_register_unregister_signature_removed": "UNRESOLVED",
     "?.role_int_2_assignment_propagation": "NON_NORMATIVE",
     "?.role_stage2_cap_survives_revoke": "NO_CITATION",

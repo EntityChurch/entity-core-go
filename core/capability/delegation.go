@@ -50,6 +50,15 @@ func granterPeerIDFromIncluded(granter types.Granter, included map[hash.Hash]ent
 	return peerIDFromPeerEntity(granterEnt)
 }
 
+// ResolveGranterPeerIDFromIncluded resolves the granter's peer_id from an
+// envelope `included` map rather than the content store — the exported form of
+// granterPeerIDFromIncluded, for the outbound-sub-dispatch presented-authority
+// check (§5.2 PD-2), where the target peer's identity travels in-band with the
+// presented capability and is not necessarily in the local store.
+func ResolveGranterPeerIDFromIncluded(granter types.Granter, included map[hash.Hash]entity.Entity, localPeerID crypto.PeerID) (crypto.PeerID, error) {
+	return granterPeerIDFromIncluded(granter, included, localPeerID)
+}
+
 // VerifyChain validates a capability token's delegation chain end-to-end:
 // signatures, temporal validity, grantee→granter linkage, attenuation,
 // delegation caveats, and that the root cap's granter is the local peer.
@@ -166,7 +175,7 @@ func VerifyChain(capEntity entity.Entity, included map[hash.Hash]entity.Entity, 
 		if err != nil {
 			return fmt.Errorf("%w: parent granter unresolvable: %v", ecerrors.ErrCapabilityDenied, err)
 		}
-		if !IsAttenuated(capData, parentData, childGranterPeerID, parentGranterPeerID) {
+		if !IsAttenuated(capData, parentData, childGranterPeerID, parentGranterPeerID, localPeerID) {
 			return fmt.Errorf("%w: capability not properly attenuated", ecerrors.ErrCapabilityDenied)
 		}
 		if err := checkDelegationCaveats(parentData, capData, i); err != nil {
@@ -328,13 +337,17 @@ func verifyRootGranter(root entity.Entity, capData types.CapabilityTokenData, in
 // IsAttenuated checks that child's grants are a subset of parent's grants.
 // Each cap's resource patterns canonicalize against ITS OWN granter's
 // namespace per §PR-8 (V7 §5.5); pass the resolved granter peer_id for
-// each cap.
-func IsAttenuated(child, parent types.CapabilityTokenData, childGranterPeerID, parentGranterPeerID crypto.PeerID) bool {
+// each cap. localPeerID is the §5.5a scope_subset local reference — the value
+// an absent `peers` scope defaults to ({include:[local_peer_id]}, §3.6); it is
+// unused by the id-scope arms (operations/peers match literally) and by the
+// path-scope handler/resource canonicalization here (which use the granter
+// peer_ids), and is consulted only to construct that peers default.
+func IsAttenuated(child, parent types.CapabilityTokenData, childGranterPeerID, parentGranterPeerID, localPeerID crypto.PeerID) bool {
 	// Every child grant must be covered by some parent grant.
 	for _, childGrant := range child.Grants {
 		covered := false
 		for _, parentGrant := range parent.Grants {
-			if grantCovers(parentGrant, childGrant, parentGranterPeerID, childGranterPeerID) {
+			if grantCovers(parentGrant, childGrant, parentGranterPeerID, childGranterPeerID, localPeerID) {
 				covered = true
 				break
 			}
@@ -357,11 +370,18 @@ func IsAttenuated(child, parent types.CapabilityTokenData, childGranterPeerID, p
 	return true
 }
 
-// grantCovers checks if a parent grant covers a child grant. Resource
-// pattern canonicalization uses the granter peer_id of each respective cap
-// per §PR-8.
-func grantCovers(parent, child types.GrantEntry, parentGranterPeerID, childGranterPeerID crypto.PeerID) bool {
-	// All child handlers must be covered by some parent handler pattern.
+// grantCovers checks if a parent grant covers a child grant (§5.5a
+// grant_subset). Path-scope dimensions (handlers, resources) match via the
+// §5.4 MatchesPattern, canonicalizing against each cap's own granter peer_id
+// per §PR-8. Id-scope dimensions (operations, peers) match via the §5.2
+// id-scope grammar (idScopeSubset) — literal, NOT MatchesPattern; applying the
+// §5.4 path matcher to an id dimension is the F40 defect and, on a *subset*
+// check, is over-permissive (a child op a literal match would reject is judged
+// covered), diverging from CheckPermission's own id-scope matcher. localPeerID
+// supplies the {include:[local_peer_id]} default for an absent peers scope.
+func grantCovers(parent, child types.GrantEntry, parentGranterPeerID, childGranterPeerID, localPeerID crypto.PeerID) bool {
+	// All child handlers must be covered by some parent handler pattern
+	// (path-scope, §5.4).
 	for _, childHandler := range child.Handlers.Include {
 		matched := false
 		for _, parentHandler := range parent.Handlers.Include {
@@ -375,28 +395,19 @@ func grantCovers(parent, child types.GrantEntry, parentGranterPeerID, childGrant
 		}
 	}
 
-	// All child operations must be covered by some parent operation
-	// pattern. V7 §3.6 line 836 + §5.4 line 1868 + §5.6 scope_subset
-	// require matches_pattern for ALL grant dimensions including
-	// operations — `{include: ["*"]}` matches any operation. Earlier
-	// drafts of this code used literal set membership (containsString),
-	// which silently rejected wildcard parent caps; fixed per
-	// PROPOSAL-ROLE-V1.5-SPEC-FIXES SI-24.
-	for _, childOp := range child.Operations.Include {
-		matched := false
-		for _, parentOp := range parent.Operations.Include {
-			if MatchesPattern(childOp, parentOp) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return false
-		}
+	// Operations subset (id-scope, §5.2 grammar — include coverage AND
+	// parent-exclude inheritance). NOT the §5.4 path matcher: `operations` is
+	// id-scope, and a superset path matcher on a subset check over-grants.
+	// `{include:["*"]}` still covers any operation and `{include:["compute/*"]}`
+	// any compute/… operation (the SI-24 wildcard-parent case), because the
+	// id-scope grammar carries bare "*" and trailing "/*" — only the path
+	// transforms are dropped.
+	if !idScopeSubset(child.Operations, parent.Operations) {
+		return false
 	}
 
-	// All child resources must match some parent resource. Each side
-	// canonicalizes against its own granter's namespace per §PR-8.
+	// All child resources must match some parent resource (path-scope, §5.4).
+	// Each side canonicalizes against its own granter's namespace per §PR-8.
 	for _, childRes := range child.Resources.Include {
 		canonChild := Canonicalize(childRes, childGranterPeerID)
 		matched := false
@@ -412,21 +423,38 @@ func grantCovers(parent, child types.GrantEntry, parentGranterPeerID, childGrant
 		}
 	}
 
-	// Parent-exclude inheritance (F4 / V7 §5.6 scope_subset). A child grant
-	// MUST inherit every exclude the parent carries, on each dimension. Without
-	// this, a delegating peer could split a grant to DROP an exclude the parent
-	// imposed — re-granting access to a region the parent explicitly denied
-	// (the exact attenuation bypass §5.6 calls out, and a §5.10 verdict
-	// divergence: Rust/Python enforce it, Go did not). Handlers/operations are
-	// matched literally; resources canonicalize against each cap's own granter
-	// namespace (PR-8).
+	// Peers subset (id-scope, §5.2 grammar). Absent on either side defaults to
+	// {include:[local_peer_id]} (§3.6). This dimension was NOT checked here
+	// before: a child grant could carry a BROADER `peers` scope than its parent
+	// and be judged a valid subset — latent while no grant carried a peers
+	// scope, but reachable the moment PD-2's presented/peers-scoped caps go
+	// live (§5.2 outbound sub-dispatch). A child that widens `peers` down a
+	// delegation chain is exactly the escalation nobody re-checks.
+	childPeers := types.CapabilityScope{Include: []string{string(localPeerID)}}
+	if child.Peers != nil {
+		childPeers = *child.Peers
+	}
+	parentPeers := types.CapabilityScope{Include: []string{string(localPeerID)}}
+	if parent.Peers != nil {
+		parentPeers = *parent.Peers
+	}
+	if !idScopeSubset(childPeers, parentPeers) {
+		return false
+	}
+
+	// Parent-exclude inheritance for the PATH-scope dimensions (F4 / §5.6
+	// scope_subset). A child grant MUST inherit every exclude the parent
+	// carries: without this, a delegating peer could split a grant to DROP an
+	// exclude the parent imposed, re-granting a region the parent explicitly
+	// denied (the attenuation bypass §5.6 names; Rust/Python enforce it). The
+	// id-scope dimensions (operations, peers) fold their exclude-inheritance
+	// into idScopeSubset above; only handlers/resources remain here. Resources
+	// canonicalize against each cap's own granter namespace (PR-8); handlers
+	// match literally.
 	identity := func(s string) string { return s }
 	canonChild := func(s string) string { return Canonicalize(s, childGranterPeerID) }
 	canonParent := func(s string) string { return Canonicalize(s, parentGranterPeerID) }
 	if !excludesInherited(parent.Handlers.Exclude, child.Handlers.Exclude, identity, identity) {
-		return false
-	}
-	if !excludesInherited(parent.Operations.Exclude, child.Operations.Exclude, identity, identity) {
 		return false
 	}
 	if !excludesInherited(parent.Resources.Exclude, child.Resources.Exclude, canonParent, canonChild) {
@@ -447,6 +475,48 @@ func grantCovers(parent, child types.GrantEntry, parentGranterPeerID, childGrant
 		return false
 	}
 
+	return true
+}
+
+// idScopeSubset implements §5.5a scope_subset for an id-scope dimension
+// (operations, peers): every child include pattern is covered by some parent
+// include pattern, AND every parent exclude is inherited by some child exclude.
+// Coverage uses the §5.2 id-scope grammar via idScopeMatches
+// (pattern_covers(outer, inner) form: idScopeMatches(outerPattern, innerValue)) —
+// literal identifiers with bare "*" and trailing "/*", never the §5.4 path
+// transforms. Canonicalizing an id dimension here widens authority down a
+// delegation chain (§5.5a) — the exact place nobody re-checks — which is why
+// this dispatches on scope type exactly as matches_scope does.
+func idScopeSubset(child, parent types.CapabilityScope) bool {
+	// Every child include pattern covered by some parent include pattern.
+	for _, childPattern := range child.Include {
+		covered := false
+		for _, parentPattern := range parent.Include {
+			if idScopeMatches(parentPattern, childPattern) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			return false
+		}
+	}
+	// Child must inherit all parent excludes: each parent exclude covered by
+	// some child exclude (a broader child exclude covers a narrower parent one;
+	// a narrower child exclude does not cover a broader parent, which would
+	// re-open a denied region).
+	for _, parentEx := range parent.Exclude {
+		childHas := false
+		for _, childEx := range child.Exclude {
+			if idScopeMatches(childEx, parentEx) {
+				childHas = true
+				break
+			}
+		}
+		if !childHas {
+			return false
+		}
+	}
 	return true
 }
 

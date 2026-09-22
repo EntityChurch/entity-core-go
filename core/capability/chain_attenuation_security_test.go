@@ -72,7 +72,7 @@ func TestParentExcludeInheritance_F4(t *testing.T) {
 			},
 		},
 	}
-	if IsAttenuated(dropExclude, parent, pid, pid) {
+	if IsAttenuated(dropExclude, parent, pid, pid, pid) {
 		t.Fatal("F4: child dropping the parent's resource exclude must NOT be attenuated")
 	}
 
@@ -86,7 +86,7 @@ func TestParentExcludeInheritance_F4(t *testing.T) {
 			},
 		},
 	}
-	if !IsAttenuated(keepExclude, parent, pid, pid) {
+	if !IsAttenuated(keepExclude, parent, pid, pid, pid) {
 		t.Fatal("F4: child preserving the parent's exclude must be attenuated")
 	}
 
@@ -100,7 +100,7 @@ func TestParentExcludeInheritance_F4(t *testing.T) {
 			},
 		},
 	}
-	if !IsAttenuated(broaderExclude, parent, pid, pid) {
+	if !IsAttenuated(broaderExclude, parent, pid, pid, pid) {
 		t.Fatal("F4: child with a superset of the parent's excludes must be attenuated")
 	}
 
@@ -120,7 +120,7 @@ func TestParentExcludeInheritance_F4(t *testing.T) {
 			Operations: types.CapabilityScope{Include: []string{"*"}},
 		}},
 	}
-	if IsAttenuated(childDropOpExcl, parentOpExcl, pid, pid) {
+	if IsAttenuated(childDropOpExcl, parentOpExcl, pid, pid, pid) {
 		t.Fatal("F4: child dropping the parent's operation exclude must NOT be attenuated")
 	}
 }

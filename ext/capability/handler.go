@@ -871,7 +871,7 @@ func addChainToIncluded(
 func requireAttenuation(child, parent []types.GrantEntry, localPeerID crypto.PeerID) error {
 	parentToken := types.CapabilityTokenData{Grants: parent}
 	childToken := types.CapabilityTokenData{Grants: child}
-	if !corecap.IsAttenuated(childToken, parentToken, localPeerID, localPeerID) {
+	if !corecap.IsAttenuated(childToken, parentToken, localPeerID, localPeerID, localPeerID) {
 		return fmt.Errorf("requested scope is not a subset of the bounding capability")
 	}
 	return nil

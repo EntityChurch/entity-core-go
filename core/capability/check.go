@@ -243,12 +243,42 @@ func ExtractPeer(locator string, localPeerID crypto.PeerID) crypto.PeerID {
 	return extractPeer(locator, localPeerID)
 }
 
-// MatchesPeerScope checks if a peer ID is covered by the peers scope.
-// Peer IDs are explicit — there is no "self" alias (R11).
-func MatchesPeerScope(peerID string, scope types.CapabilityScope, localPeerID crypto.PeerID) bool {
+// idScopeMatches implements the §5.2 id-scope pattern grammar — the id-scope
+// arm of both scope_value_matches (matches_scope) and pattern_covers
+// (scope_subset). A literal identifier match with exactly two wildcard forms:
+// bare "*" matches any value, and a trailing "/*" matches by literal
+// segment-prefix (strip only the "*", keep the "/", then HasPrefix — so
+// "compute/*" covers "compute/apply"). It applies NONE of the §5.4 path
+// transforms (no canonicalize, no "/*/" interior peer-wildcard, no leading-"/"
+// universal reading, no peer-relative qualification). `operations` and `peers`
+// are id-scope dimensions; `handlers` and `resources` are path-scope and MUST
+// go through MatchesPattern instead. Interchanging the two is the F40
+// conformance defect (§5.2 "Scope types" / "id-scope pattern grammar",
+// pseudocode pinned 0.8.2.16) — a path dimension matched literally, or an id
+// dimension canonicalized, produces a real ALLOW bug and diverges across a
+// peer boundary. Called `(pattern, value)`; for the subset (pattern_covers)
+// form the arguments are `(outer, inner)` — the same three lines.
+func idScopeMatches(pattern, value string) bool {
+	if pattern == "*" {
+		return true
+	}
+	if strings.HasSuffix(pattern, "/*") {
+		return strings.HasPrefix(value, pattern[:len(pattern)-1]) // strip "*", keep "/"
+	}
+	return value == pattern
+}
+
+// matchesIDScope reports whether value is admitted by an id-scope dimension:
+// matched by some include pattern AND not matched by any exclude pattern
+// (§5.2 matches_scope, id-scope arm). This is the single shared matcher for
+// the `operations` and `peers` dimensions — CheckPermission (operationsAllow /
+// MatchesPeerScope) and the delegation subset check (idScopeSubset) both run
+// through idScopeMatches so the two paths cannot silently diverge on a
+// hash-/authz-determining rule.
+func matchesIDScope(value string, scope types.CapabilityScope) bool {
 	included := false
 	for _, p := range scope.Include {
-		if p == "*" || p == peerID {
+		if idScopeMatches(p, value) {
 			included = true
 			break
 		}
@@ -257,11 +287,20 @@ func MatchesPeerScope(peerID string, scope types.CapabilityScope, localPeerID cr
 		return false
 	}
 	for _, p := range scope.Exclude {
-		if p == peerID {
+		if idScopeMatches(p, value) {
 			return false
 		}
 	}
 	return true
+}
+
+// MatchesPeerScope checks if a peer ID is covered by the peers scope (an
+// id-scope dimension, §5.2). Peer IDs are explicit — there is no "self" alias
+// (R11). localPeerID is unused (peers are literal identifiers, not path
+// patterns) and retained only for signature stability with the path-scope
+// matchers.
+func MatchesPeerScope(peerID string, scope types.CapabilityScope, localPeerID crypto.PeerID) bool {
+	return matchesIDScope(peerID, scope)
 }
 
 // IsPattern returns true if the string contains wildcard characters.
@@ -480,23 +519,14 @@ func isExcluded(target string, excludeSet []string, localPeerID, granterPeerID c
 	return false
 }
 
-func containsString(ss []string, s string) bool {
-	for _, v := range ss {
-		if v == "*" || v == s {
-			return true
-		}
-	}
-	return false
-}
-
 // operationsAllow reports whether an operation is permitted by an operations
-// scope: it MUST be in Include AND MUST NOT be in Exclude (F2 / V7 §5.2 §5.6 —
-// excludes apply to every scope dimension, operations included). A bare "*" in
-// either list is the universal: include "*" permits any op; exclude "*" denies
-// any op. This mirrors the include-AND-exclude treatment already applied to the
-// resources dimension (CheckResourceScope); before this, operations consulted
-// Include only, so a grant {include:["*"], exclude:["delete"]} wrongly permitted
-// delete on Go while Rust/Python denied it — a §5.10 verdict divergence.
+// scope: matched by some include pattern AND not matched by any exclude
+// (F2 / §5.2 / §5.6 — excludes apply to every scope dimension). `operations`
+// is an id-scope dimension, so matching is the §5.2 id-scope grammar
+// (literal + bare "*" + trailing "/*"), NOT the §5.4 path matcher — a grant
+// {include:["compute/*"]} authorizes any compute/… op, and one
+// {include:["*"], exclude:["delete"]} permits everything but delete. Delegates
+// to matchesIDScope so this and the delegation subset check share one matcher.
 func operationsAllow(scope types.CapabilityScope, op string) bool {
-	return containsString(scope.Include, op) && !containsString(scope.Exclude, op)
+	return matchesIDScope(op, scope)
 }

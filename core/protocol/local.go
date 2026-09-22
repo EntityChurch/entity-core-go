@@ -309,6 +309,21 @@ func (d *Dispatcher) makeLocalExecute(parentCtx context.Context, callerCtx *hand
 				}
 				ad.Bounds = childBounds
 			}
+			// PD-2 (0.8.2.17, §5.2): authorize this locally-originated
+			// sub-dispatch BEFORE it leaves the peer. Gated on being inside an
+			// executing handler (HandlerPattern set) — that is the
+			// "sub-dispatch" the rule governs and the point where the ambient
+			// authority is a handler grant. A top-level SELF origination
+			// through DispatchLocalExecute (rootCtx has no HandlerPattern) is
+			// the peer acting as itself and is authorized by the TARGET on
+			// receipt, not pre-gated here (the §5.2 SELF authority case, whose
+			// authority is the caller capability verified at the far end).
+			if callerCtx.HandlerPattern != "" {
+				if code, msg, ok := d.authorizeOutboundSubdispatch(uri, operation, resource, execOpts.Capability, execOpts.IncludedChain, callerCtx.HandlerGrant); !ok {
+					resp, _ := handler.NewErrorResponse(403, code, msg)
+					return resp, nil
+				}
+			}
 			var async []*AsyncDelivery
 			if ad != nil {
 				async = append(async, ad)

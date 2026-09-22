@@ -87,7 +87,7 @@ func (h *Handler) handleDefine(ctx context.Context, req *handler.Request) (*hand
 		Grants:    body.Grants,
 		ExpiresAt: hypotheticalExp,
 	}
-	if !capability.IsAttenuated(hypothetical, callerCapData, resolveGranterOrLocal(hctx, callerCapData), resolveGranterOrLocal(hctx, callerCapData)) {
+	if !capability.IsAttenuated(hypothetical, callerCapData, resolveGranterOrLocal(hctx, callerCapData), resolveGranterOrLocal(hctx, callerCapData), hctx.LocalPeerID) {
 		return handler.NewErrorResponse(403, "definer_authority_insufficient",
 			"caller capability does not cover proposed grants for "+
 				defInfo.RoleName+" (RL2 at definition-write time)")
@@ -231,7 +231,7 @@ func (h *Handler) handleAssign(ctx context.Context, req *handler.Request) (*hand
 		Grants:    derivedGrants,
 		ExpiresAt: issuedExp,
 	}
-	if !capability.IsAttenuated(hypothetical, callerCapData, resolveGranterOrLocal(hctx, callerCapData), resolveGranterOrLocal(hctx, callerCapData)) {
+	if !capability.IsAttenuated(hypothetical, callerCapData, resolveGranterOrLocal(hctx, callerCapData), resolveGranterOrLocal(hctx, callerCapData), hctx.LocalPeerID) {
 		return handler.NewErrorResponse(403, "assigner_authority_insufficient",
 			"caller capability does not cover role-derived grants for "+body.Role+
 				" (RL2: derived grants are not an attenuation of the caller's authority)")
@@ -541,7 +541,7 @@ func (h *Handler) runReDeriveCascade(
 			Grants:    derived,
 			ExpiresAt: issuedExp,
 		}
-		if !capability.IsAttenuated(hypothetical, callerCapData, resolveGranterOrLocal(hctx, callerCapData), resolveGranterOrLocal(hctx, callerCapData)) {
+		if !capability.IsAttenuated(hypothetical, callerCapData, resolveGranterOrLocal(hctx, callerCapData), resolveGranterOrLocal(hctx, callerCapData), hctx.LocalPeerID) {
 			// SI-15: skip-and-continue, report the grantee.
 			skipped = append(skipped, info.PeerHash)
 			continue
@@ -690,7 +690,7 @@ func (h *Handler) handleDelegate(ctx context.Context, req *handler.Request) (*ha
 	delegatorGrants := resolveGrants(roleDef.Grants, body.Context, hctx.AuthorHash)
 	delegatorAuth := types.CapabilityTokenData{Grants: delegatorGrants}
 	scopeAsCap := types.CapabilityTokenData{Grants: body.Scope}
-	if !capability.IsAttenuated(scopeAsCap, delegatorAuth, resolveGranterOrLocal(hctx, delegatorAuth), resolveGranterOrLocal(hctx, delegatorAuth)) {
+	if !capability.IsAttenuated(scopeAsCap, delegatorAuth, resolveGranterOrLocal(hctx, delegatorAuth), resolveGranterOrLocal(hctx, delegatorAuth), hctx.LocalPeerID) {
 		return handler.NewErrorResponse(403, "delegator_authority_insufficient",
 			"scope is not an attenuation of the delegator's role grants (RL2)")
 	}

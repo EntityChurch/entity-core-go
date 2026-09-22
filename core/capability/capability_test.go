@@ -338,7 +338,7 @@ func TestIsAttenuated(t *testing.T) {
 			},
 		},
 	}
-	if !IsAttenuated(child, parent, pid, pid) {
+	if !IsAttenuated(child, parent, pid, pid, pid) {
 		t.Fatal("should be properly attenuated")
 	}
 
@@ -352,7 +352,7 @@ func TestIsAttenuated(t *testing.T) {
 			},
 		},
 	}
-	if IsAttenuated(bad, parent, pid, pid) {
+	if IsAttenuated(bad, parent, pid, pid, pid) {
 		t.Fatal("should not be attenuated: expanded operations")
 	}
 }
@@ -376,7 +376,7 @@ func TestIsAttenuatedExpiration(t *testing.T) {
 		},
 		ExpiresAt: &childExpiry,
 	}
-	if !IsAttenuated(child, parent, pid, pid) {
+	if !IsAttenuated(child, parent, pid, pid, pid) {
 		t.Fatal("child expiring before parent should be OK")
 	}
 
@@ -388,7 +388,7 @@ func TestIsAttenuatedExpiration(t *testing.T) {
 		},
 		ExpiresAt: &laterExpiry,
 	}
-	if IsAttenuated(bad, parent, pid, pid) {
+	if IsAttenuated(bad, parent, pid, pid, pid) {
 		t.Fatal("child should not expire after parent")
 	}
 
@@ -398,7 +398,7 @@ func TestIsAttenuatedExpiration(t *testing.T) {
 			{Handlers: types.CapabilityScope{Include: []string{"*"}}, Resources: types.CapabilityScope{Include: []string{"*"}}, Operations: types.CapabilityScope{Include: []string{"get"}}},
 		},
 	}
-	if IsAttenuated(noExpiry, parent, pid, pid) {
+	if IsAttenuated(noExpiry, parent, pid, pid, pid) {
 		t.Fatal("child without expiry when parent has one should fail")
 	}
 }
