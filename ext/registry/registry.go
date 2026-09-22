@@ -409,7 +409,8 @@ func (h *Handler) handleGetResolverConfig(_ context.Context, req *handler.Reques
 // naming did-web violates even with no did-web chain entry, because a shipped
 // artifact's safety must survive a downstream operator later adding that
 // backend, an extension the distribution cannot re-review. Returns one
-// human-readable string per violation (the operator wants the whole list).
+// human-readable string per violation — the caller needs the whole list, not
+// the first violation.
 func disclosureViolations(cfg types.ResolverConfigData) []string {
 	var out []string
 	if len(cfg.NameFormatDispatch) == 0 {

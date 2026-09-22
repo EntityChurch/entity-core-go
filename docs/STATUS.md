@@ -505,8 +505,8 @@ live-HTTP transport surfaces.
 > - **Correction, same day:** the first version of that spec-issue claimed the
 >   corpus "exists nowhere." Wrong, and wrong because the search was insufficient
 >   — `find -maxdepth 6` against a path 8 levels deep, over the church-meta
->   — `find -maxdepth 6` against a path 8 levels deep, over the church-meta
 >   siblings only. `entity-core-architecture` is the **pre-V8 arch repo and is
+>   archived outside the active working set**, not beside this repo. Second insufficient
 >   build-state claim from here in two days; both were caught by a person, not by
 >   the process.
 > - **Correction to our 08-11 packet.** It claimed EXTENSION-SUBSCRIPTION §2.2's

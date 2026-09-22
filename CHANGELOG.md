@@ -38,21 +38,53 @@ targets* with *the implementation's own release*. So:
   halves — the SemVer shape, and lockstep between the newest heading here and
   every module declaration.
 
-**The next cut is `0.9.0`**, and the reasoning belongs on the record rather than in
-someone's head. Pre-1.0 SemVer puts breaking changes in the MINOR field, and the
-work below is breaking for a consumer of `core`/`ext`: the §5.4 matcher no longer
-self-matches a bare prefix, `assoc` answers `index_out_of_range` where it answered
-`type_mismatch`, `fold` contains an error accumulator instead of short-circuiting,
+**Why each cut picked its field, on the record rather than in someone's head.**
+Pre-1.0 SemVer puts breaking changes in the MINOR field, so every release so far
+has moved the MINOR: `0.9.0` because the §5.4 matcher stopped self-matching a bare
+prefix, `assoc` began answering `index_out_of_range` where it answered
+`type_mismatch`, `fold` gained an error accumulator instead of short-circuiting,
 the default per-handler self-grant widened to the peer-wildcard form, and `ext/`
-grew from 8 packages to 28. `0.8.1` would claim backward-compatible fixes only,
-which is false. (`entity-core-py` independently reached `0.9.0` for an unrelated
-reason — a fourth workspace package. Same number, different derivation; do not
-read it as a fleet version.)
+grew from 8 packages to 28; `0.10.0` for the reasons its own section states.
+A PATCH would claim backward-compatible fixes only, which in both cases is false.
+(`entity-core-py` independently reached `0.9.0` for an unrelated reason — a fourth
+workspace package. Same number, different derivation; do not read either as a
+fleet version. The fleet shares a cut **date**, never a number.)
 
 ## [Unreleased]
 
 Development lands on `dev`; `master` carries the last release.
 
+## [0.10.0] — 2026-09-20
+
+_Protocol: Entity Core Protocol **V7**, carried out-of-band per [ADR-0002]. The
+revision each claim was measured against is named at its own site. Conformance
+gate green at `1666 · 0F · 0S · 0W` over 68 categories, measured 2026-09-15._
+
+**A MINOR, not a patch.** Pre-1.0 SemVer puts breaking changes in the MINOR field,
+and this span moved error codes, statuses and authorization outcomes that an
+existing caller can observe. *Breaking* is measured against what this project
+promises to keep: **the wire** — the status and error code a peer emits for a
+given request, and whether that request is admitted at all — and **the exported
+Go API of `core` and `ext`**. Internal packages, log prose, and the validator's
+own output shapes are outside that line.
+
+### Changed in ways that can break an existing caller
+
+- **A registered handler that does not implement the named operation answers
+  `501 unsupported_operation`, not `400 unknown_operation`**
+  (`ENTITY-CORE-PROTOCOL` §3.3 / §6.2). `unknown_operation` is retired as a
+  synonym that MUST NOT be emitted, and the sweep covered all 26 emit sites: the
+  25 handler `default:` arms across `core/tree` and `ext/*`, plus the connect
+  path, where an unrecognized connect operation is §4.7's `400 invalid_request`
+  rather than the 501 case. A client branching on that pair sees neither the
+  status nor the code it used to. The spelling is now absent from the tree.
+- **`system/tree:put` error codes moved to EXTENSION-TREE Appendix A.** `put`
+  answered `400 invalid_entity` — a code defined in no specification — at both
+  its decode and its validate site. The validate site now branches, because
+  `Validate` checks empty type/data before the hash: a decode failure or a
+  structural defect is `400 invalid_request`, a content-hash mismatch is
+  `400 hash_mismatch`. The 409 CAS-race `hash_mismatch` rows were already
+  conformant and are untouched.
 - **`system/tree:put` rejects an absent `content_hash` as `400 invalid_request`,
   not `400 hash_mismatch`** (EXTENSION-TREE Appendix A `put` row 1, v4.5;
   `ENTITY-NATIVE-TYPE-SYSTEM` §8.1 — content_hash is a required field of
@@ -68,6 +100,124 @@ Development lands on `dev`; `master` carries the last release.
   by format is distinct from a structurally-malformed one; a mis-sized hash under
   a *known* format stays `invalid_request`. Previously go flattened the
   unknown-format decode error into `invalid_request`.
+- **A grant-exclude that cannot match anything now excludes everything, and a
+  capability carrying an unmatchable scope pattern is refused as invalid.** The
+  never-match sentinel is directional: fail-closed in an include (covers nothing)
+  but fail-**open** in an exclude (carves out nothing), which made a grant
+  silently wider than its author wrote. Evaluation now denies; authoring and
+  verification refuse — `400 invalid_path` at
+  `system/capability:{request,delegate}` (§6.2), `capability_denied` at chain
+  verification (§5.5). A request such a capability used to authorize is now
+  refused, and the capability itself no longer mints.
+- **An outbound sub-dispatch is authorized before it leaves the peer (§5.2).**
+  A handler dispatching to a foreign peer must now present a capability rooted at
+  that target, or hold a grant whose **peers** scope covers it; with neither, the
+  dispatch is `403` instead of going out. The peers dimension was not previously
+  enforced on this path, so a handler that reached a foreign peer on ambient
+  authority alone stops doing so. `operations` and `peers` are matched as
+  id-scopes — literally, bare `*` and trailing `/*` — never through the §5.4 path
+  matcher.
+- **An advertised served scope names `/*/*` on its resources axis, not a bare
+  `*`.** Canonicalization (§5.5) resolves a bare `*` to the local namespace only,
+  so as the parent of the advertisement subset check it **dropped** — not narrowed
+  — any grant whose resource names a foreign namespace, meaning an operator
+  widening a grant silently deleted it. Advertisements a consumer has pinned will
+  differ. `operations` stays bare `*`; it is not a path axis. A declared
+  `MaxScope` is untouched.
+- **A peers pattern is canonicalized at comparison, and an unresolvable exclude
+  fails closed** (rule 4). Previously an exclude that could not be resolved was
+  ignored, so a child grant could widen the peers it applies to past its parent's.
+- **A malformed frame gets a coded error on the wire before the connection
+  closes, and a whole-decoded refusal keeps the connection open** (§4.11). A peer
+  used to answer an undecodable frame, or one that is not a recognized message
+  type, by simply hanging up — indistinguishable from the network failing, and
+  destructive of the unrelated requests multiplexed on the same connection. It
+  now answers `400 invalid_request` first, and where the frame decoded whole it
+  keeps serving. A caller that treated a silent hang-up as the signal must read
+  the error instead. A genuine network drop — a reset, a broken pipe, a timeout —
+  is told apart from a malformed frame and stays silent, rather than blaming the
+  caller for the network.
+- **A read that excludes exactly the path it named is refused, not answered with
+  everything.** `system/tree:get` in its widest listing form now returns
+  `400 path_required` for a request that resolves to nothing, matching the
+  disposition the two narrower read operations already drew; it previously
+  exported every entity in the tree. A malformed entry anywhere in
+  `extract.paths[]` is `400 invalid_path` for the **whole** request, validated
+  before any read, rather than being skipped per entry.
+- **Connect-handshake refusals were brought to §4.6 / §4.7.** An absent or empty
+  `protocols` list is `400 invalid_request`; a `peer_id` that does not equal the
+  authenticated identity is refused; out-of-order handshake messages answer `409`;
+  a non-connect operation before the handshake completes is
+  `401 authentication_failed`. Each of these answered differently before.
+- **`system/handlers:{register,unregister}` with an absent resource is
+  `400 path_required`, and the reservation refusing registration under `system/*`
+  is withdrawn** — a registration the peer used to reject now succeeds.
+- **A frame carrying a CBOR tag at any depth is refused at the receive
+  boundary** (`ENTITY-CBOR-ENCODING` §6.3 — tags are non-canonical in ECF and
+  MUST NOT be accepted, forwarded, or silently stripped). Such a frame used to be
+  admitted: the package decoder runs with tags allowed, an entity's `data` is
+  held raw to preserve byte fidelity for hashing, and a tagged entity
+  self-verifies because the sender hashed the same tagged bytes — so nothing
+  short of an explicit walk could see it. `Envelope.ValidateAll` now walks every
+  `data` field, including nested ones, and rejects definite- and
+  indefinite-length non-canonical items alike.
+- **`capability.IsAttenuated` takes a fifth parameter**, `localPeerID
+  crypto.PeerID`, required to canonicalize a peers-scope pattern at the point of
+  comparison. This is a compile break for an external caller; it is the only
+  exported signature in `core`/`ext` that changed.
+- **`history` `max_depth` no longer prunes, and is documented RESERVED.** It
+  enforced nothing: prune walked head→`max_depth` and returned without mutating,
+  so the head still reached every transition, and there is no garbage collector
+  anywhere in the cohort to reclaim an unlinked tail. The walk — an
+  `O(max_depth)` content-store read after every recorded write, achieving nothing
+  — is removed, and the field's type doc says it is not enforced, so nothing
+  sizes a retention plan against it as a guarantee. A caller that believed it
+  bounded a chain never had that bound; a real bound needs a rewrite cascade, a
+  head-side counter, a segmented chain or a reclaim pass, and that design call is
+  deferred rather than invented.
+
+### Added
+
+- **The §4.11 pre-admission refusal conformance class**, five arms driven over
+  raw sockets, including the one the specification calls out as never previously
+  exercised: a garbled frame arriving on a connection already carrying an active
+  request must not disturb it, and the connection must keep serving new work
+  afterward. Every arm is mutation-verified — reverting to the old bare hang-up
+  turns it red.
+- **An entity resolved by hash from a wire-supplied `included` map has its map
+  key bound to its recomputed content hash at the trust boundary.** Self
+  consistency is not that binding, and its absence was a capability/identity
+  forgery. Closed at the boundary, not per call site.
+- **`Connection.IsOutbound()` / `Connection.Direction()`** — connection direction
+  is now observable rather than inferred.
+- **`peerissued.NormalizeName`** is exported as a cross-implementation contract,
+  so the name a registry issues normalizes identically in every implementation.
+- **Relay §8 store bounds (EXTENSION-RELAY v1.3)** — the retention clamp (§8.1)
+  and storage refusal (§8.2), `expires_at` on forward-request clamped on the
+  §6.2.1 fallback, and a self-advertise seam that publishes the bounds so a peer
+  can see them before it relies on them.
+- **Peer-wiring advertisement** (`ext/relay/peerwiring`) and maintain-peer
+  relationship existence derived from the tree rather than a process-scoped map,
+  so it survives a restart.
+- **`corpus-sig-verify`** — a standing verifier for the ECF conformance signature
+  vectors, which were recomputed under the §7.3 rules.
+- **The validation suite is 68 categories**, up from 66, adding the exclude
+  matrix, effective-resource, resolution-integrity, serving-capability-scope,
+  origination, connect-error and `tree:put` error-code families. `-list-categories`
+  prints the live set.
+
+### Fixed
+
+- **A published root recovers rather than stalling**: local-files rehydration
+  restarts, the loop guard keys on content rather than a clock, and watcher
+  liveness is a fact in the tree instead of process state.
+- **The last-burst write loss was a stale tracked-root read, not the CAS loop** —
+  auto-versioning re-reads the tracked root inside the loop.
+- **A chain-error lost marker carries its `TargetPeerID`**, and a subscription
+  binder reaps itself; a pull failure carries the downstream error code on its
+  `502` rather than flattening it.
+- **A remote denial-of-service in the store-path boundary** — the path check is
+  total, not an assert.
 
 ## [0.9.0] — 2026-08-24
 

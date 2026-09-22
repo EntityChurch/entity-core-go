@@ -88,6 +88,12 @@ blurb = "The shared ~/.entity/ convention (identities, config) used across the C
 group = "Guides"
 
 [[doc]]
+path  = "docs/architecture/guides/PUNCH-SOCKET-REQUIREMENTS.md"
+title = "The punch socket requirements"
+blurb = "The socket-level MUST behind the SIGNALING §7 hole punch — why a srflx candidate binds to the socket that produced it, what is normative versus platform-local, and how an implementation in any language satisfies it."
+group = "Guides"
+
+[[doc]]
 path  = "docs/architecture/guides/GUIDE-CONVERGENT-MIRROR-RECIPE.md"
 title = "Convergent-mirror recipe"
 blurb = "Step-by-step recipe for the convergent-mirroring flow."
@@ -114,7 +120,7 @@ blurb = "Current project status — where the project is, recent work, backlog, 
 group = "Overview"
 
 # ── Project files ─────────────────────────────────────────────────────────────
-# These were public at the last release but were never declared, and canon-filter
+# These were public at the last release but were never declared, and this manifest
 # is a KEEP-LIST — so the next release would have DELETED all of them from the
 # public repo. Declaring them is what keeps them.
 

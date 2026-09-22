@@ -1,9 +1,9 @@
 # .release-removals — deliberate deletions against the PUBLISHED tree.
 #
-# One path or path-prefix per line; `#` comments allowed. The `[6/6] public-regress`
-# gate blocks any release that removes a file already on public `master` unless it is
-# declared here. A deletion is not forbidden — it must be intended, and this file is
-# the reviewed record that it was. Read by dev-pipeline/promote/promote.sh.
+# One path or path-prefix per line; `#` comments allowed. A release that removes a
+# file already on public `master` is blocked unless it is declared here. A deletion is
+# not forbidden — it must be intended, and this file is the reviewed record that it
+# was.
 #
 # A comment-only or blank file is NOT an allow-all; it declares nothing.
 #

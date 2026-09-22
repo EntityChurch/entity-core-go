@@ -138,8 +138,13 @@ TYPES=go,rust,python ./scripts/test-cross-peer.sh                        # conve
   replaces. A `cmd` cut that still requires the previous `core` publishes a build
   reproducible only inside this workspace. `TestModuleRequiresMatchTheLatestRelease`
   is the gate; it goes RED the moment a release heading lands unaccompanied.
-- **The next cut is `0.9.0`** (breaking pre-1.0 changes → MINOR: the §5.4 matcher, the
-  `assoc`/`fold` corner rulings, the widened default self-grant, `ext/` 8 → 28).
+- **The cut on the table is `0.10.0`** (breaking pre-1.0 changes → MINOR: the §3.3
+  `unknown_operation` → `501 unsupported_operation` sweep, the `tree:put` Appendix A
+  codes, the fail-open exclude closed, §5.2 outbound sub-dispatch authorization,
+  the CBOR-tag receive-boundary refusal, and `IsAttenuated`'s new parameter).
+  **Write the breaking verdict into the release section — do not derive it from the
+  CHANGELOG's own prose; derive it from `git diff github/master dev` and the
+  commits.**
 
 ## Citations on the PUBLISHED surface: name the finding, not the hash
 

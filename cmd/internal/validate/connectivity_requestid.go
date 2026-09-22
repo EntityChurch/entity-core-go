@@ -20,8 +20,8 @@ import (
 // write-then-read (the desync that mis-reported the C# leg-3 case) — is a
 // PeerClient async-reader rework. It is FLAGGED for review, not done here:
 // it touches ~10 Send* call sites and changes the read model, which is the
-// "big refactoring" class the operator asked to surface rather than land
-// silently.
+// "big refactoring" class this project surfaces for review rather than
+// landing silently.
 func runRequestIDEchoProbe(ctx context.Context, client *PeerClient) []CheckResult {
 	r := NewCheckRunner(catConnectivity)
 	r.Declare("request_id_echoed", "V7 §6.11(b) / §3.3:742 (request_id correlation)")
