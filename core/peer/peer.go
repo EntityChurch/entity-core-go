@@ -935,9 +935,12 @@ func advertisedServedScope(reg *handler.Registry) []types.GrantEntry {
 // defaultHandlerSelfGrant is the V7 §6.9 default per-handler self-grant — the
 // authority a handler that declares NO manifest InternalScope runs under.
 //
-// The Resources spelling is load-bearing and is NOT bare "*". §6.9 describes
-// the default as "all resources", and bare "*" was the obvious encoding of that
-// sentence — but §5.5 / PR-8 canonicalization (capability.Canonicalize) resolves
+// The Resources spelling is load-bearing and is NOT bare "*". §6.2's normative
+// "Default self-grant shape (normative, 0.8.2.3)" clause — what a handler that
+// declares neither requested_scope nor internal_scope receives — pins this to
+// the cross-peer peer-wildcard "/*/*". Bare "*" was the obvious encoding of a
+// grant that "reaches its own store" — but §5.5 / PR-8 canonicalization
+// (capability.Canonicalize) resolves
 // a bare "*" in a cap RESOURCE pattern to "/{granter}/*", i.e. OWN NAMESPACE
 // ONLY. The cross-peer universal form is the absolute peer-wildcard "/*/*", as
 // Canonicalize's own doc comment says and as every deliberate cross-peer grant
@@ -948,8 +951,9 @@ func advertisedServedScope(reg *handler.Registry) []types.GrantEntry {
 // with a nil Resource, so CheckResourceScope never ran and NOTHING read this
 // field. Once it became the ceiling, bare "*" meant the peer's own engine could
 // no longer write the foreign-namespace subtrees its store legitimately holds
-// under V7 §1.4's universal address space (Category A — a follow mirror at
-// /{them}/app/..., a cached foreign content site): a default-scope handler
+// under V7 §1.4's universal address space — §1.4's "Cached remote data" class,
+// entities under other peers' namespaces (/{them}/...): a follow mirror at
+// /{them}/app/..., a cached foreign content site — a default-scope handler
 // sub-dispatching system/tree:put at /{remote}/... got 403 capability_denied
 // while the identical binding through the bootstrap LocationIndex path
 // succeeded. entity-core-rust hit the same shape and fixed it the same way —

@@ -134,6 +134,20 @@ func runHandshakeProofChecks(ctx context.Context, addr string) []CheckResult {
 	// or post-handshake established-state); only the rejection status is pinned.
 	checks = append(checks, probeNonceSingleUse(ctx, addr, baselineOK))
 
+	// Probe (FM-1, §4.7 row 6 — ruled 2026-08-30 → entity-core-protocol
+	// 804876e): an `authenticate` sent as the FIRST frame, before any hello
+	// nonce has been issued, MUST be rejected with the PINNED pair 401
+	// invalid_nonce. This is the wire form of the replay §4.6 step 1 stops — a
+	// captured authenticate replayed onto a fresh connection IS an
+	// authenticate-before-hello — so it is pinned to the same (status, code) as
+	// the RT-6 same-connection replay, NOT a 409/400 sequence-or-state conflict
+	// (which under-signals the replay, §4.6 Hardening). No probe sent
+	// authenticate as the first frame before FM-1; §4.7's own contradiction
+	// (row 6 = 401 invalid_nonce, row 10's parenthetical = 400) survived two
+	// releases because nothing tested it. No baseline is needed: no hello is
+	// sent, so there is no consumed nonce to attribute a close to.
+	checks = append(checks, probePreHelloAuthenticate(ctx, addr))
+
 	return checks
 }
 
@@ -403,6 +417,85 @@ func probeAuthRejected(ctx context.Context, addr string, baselineOK bool, name, 
 			desc+" was ACCEPTED (status 200) — responder performs no proof-of-possession at §4.6; handshake is forgeable/replay-vulnerable (F12)")
 	}
 	return pass(cat, name, ref, fmt.Sprintf("%s rejected (status %d)", desc, status))
+}
+
+// probePreHelloAuthenticate sends a well-formed `authenticate` as the FIRST
+// frame on a fresh connection — no hello leg — and requires the pinned pair
+// 401 invalid_nonce (FM-1, §4.7 row 6). The three outcomes are scored
+// DISTINCTLY, mirroring the RT-6 taxonomy: a wrong (status, code) pair
+// (FAIL:wrong-status) is a diagnosable code fix; a connection close with no
+// response (FAIL:no-response) is undiagnosable from the wire and must not be
+// conflated with it (§4.6 makes a bare close non-conformant regardless of
+// which). The nonce value is irrelevant — none was ever issued — so an
+// arbitrary value stands in for a captured one, and the frame is validly
+// signed by the probe's own key so that the MISSING HELLO is the only possible
+// ground for rejection.
+//
+// Transport: this runs on whichever transport `addr` names (PeerClient adapts
+// by addr form — TCP vs http-live). arch §5.1.6 asks for BOTH transports where
+// a peer offers both; the connectivity category is threaded a single addr, so
+// exercising both in one pass is a harness follow-up — keystone's cohort run
+// must invoke this per-transport for peers serving both (§3 of the routing:
+// rust reaches this failure by two independent dispatch paths, and a
+// single-transport probe would find only one). This is stated, not silently
+// assumed covered.
+func probePreHelloAuthenticate(ctx context.Context, addr string) CheckResult {
+	const cat = catConnectivity
+	const name = "connect_prehello_authenticate"
+	const ref = "V7 §4.7 row 6 / §4.6 / FM-1"
+	const desc = "an authenticate sent as the first frame, before any hello"
+
+	pc, err := NewPeerClient(addr)
+	if err != nil {
+		return warn(cat, name, ref, "could not create probe client: "+err.Error())
+	}
+	defer pc.Close()
+	if err := pc.Connect(ctx); err != nil {
+		return warn(cat, name, ref, "probe connect failed: "+err.Error())
+	}
+
+	// A well-formed, validly-signed authenticate echoing a nonce that was never
+	// issued (no hello was sent) — a stand-in for a captured one.
+	bogusNonce := make([]byte, 32)
+	if _, err := rand.Read(bogusNonce); err != nil {
+		return warn(cat, name, ref, "could not generate probe nonce: "+err.Error())
+	}
+	authEnv, err := protocol.CreateAuthenticateExecute(pc.keypair, bogusNonce)
+	if err != nil {
+		return warn(cat, name, ref, "could not build authenticate: "+err.Error())
+	}
+
+	// Send it as the FIRST frame — no hello leg.
+	if err := pc.writeEnvelope(ctx, authEnv); err != nil {
+		return warn(cat, name, ref, "could not send first-frame authenticate: "+err.Error())
+	}
+	respBytes, err := pc.readFrame(ctx)
+	if err != nil {
+		// §4.6 makes a bare close non-conformant, and here there is no consumed
+		// nonce to attribute the close to — it is simply the absence of the
+		// required EXECUTE_RESPONSE. FAIL, scored distinctly from wrong-status:
+		// an undiagnosable close vs a diagnosable wrong pair.
+		res := fail(cat, name, ref, "FAIL:no-response — "+desc+" got a connection CLOSE with no EXECUTE_RESPONSE frame; §4.6 requires an explicit status boundary and FM-1 pins 401 invalid_nonce. Scored distinctly from wrong-status (undiagnosable from the wire): "+err.Error())
+		res.Details = map[string]string{"fm1_class": "no-response"}
+		return res
+	}
+	var respEnv entity.Envelope
+	if err := ecf.Decode(respBytes, &respEnv); err != nil {
+		return warn(cat, name, ref, "could not decode first-frame response envelope: "+err.Error())
+	}
+	status, code, _, err := extractStatusAndCode(respEnv)
+	if err != nil {
+		return warn(cat, name, ref, "could not decode first-frame response status/code: "+err.Error())
+	}
+
+	if status == 401 && code == "invalid_nonce" {
+		res := pass(cat, name, ref, desc+" rejected with 401 invalid_nonce (FM-1 §4.7 row 6 satisfied)")
+		res.Details = map[string]string{"fm1_class": "conformant"}
+		return res
+	}
+	res := fail(cat, name, ref, fmt.Sprintf("FAIL:wrong-status — %s got (status %d, code %q); FM-1 pins 401 invalid_nonce. A 409/400 sequence-or-state conflict under-signals the replay (the captured-authenticate attack §4.6 step 1 stops), and §4.7's preamble forbids 'either'. Distinct from FAIL:no-response.", desc, status, code))
+	res.Details = map[string]string{"fm1_class": "wrong-status"}
+	return res
 }
 
 // sendAuthAndReadStatus writes an authenticate envelope and reads one response

@@ -47,6 +47,30 @@ func (d *Dispatcher) handleExecute(ctx context.Context, env entity.Envelope, con
 		return entity.Envelope{}, fmt.Errorf("decode execute: %w", err)
 	}
 
+	// PD-1h / §1.4 dispatch routing + §9.1 (ruled 2026-08-31 → entity-core-
+	// protocol ba2f5a3, 0.8.2.2). An inbound EXECUTE whose HANDLER uri names a
+	// peer_id that is not us MUST be refused at canonicalization — 400
+	// invalid_request — BEFORE handler resolution AND before the connect branch.
+	// §6.5 step 3 is a GATE, not an ordering preference: an impl MUST NOT reach
+	// the refusal by stripping the peer id, resolving the LOCAL handler, and
+	// letting the §5.2 peers dimension decide — that path lets a grant carrying a
+	// matching `peers` scope authorize a foreign namespace, the live escalation
+	// this closes (P1 → 200 in the minority-of-6). The peers dimension is
+	// evaluated on §1.4's INTERNAL-dispatch class only, unreachable from the
+	// inbound wire by construction.
+	//
+	// This gates the HANDLER uri's peer segment (execData.URI), NOT the resource
+	// target: a tree:put to entity://{local}/system/tree with
+	// Resource.Targets[0]=/{other}/… is the universal-address-space slot (§1.4)
+	// and stays conformant — ExtractPeer reads the handler uri, which is local
+	// there. Same extract_peer as §5.2 Dimension 4 (core/capability), one
+	// implementation, so routing and authorization cannot diverge.
+	if target := capability.ExtractPeer(execData.URI, d.LocalPeerID); target != d.LocalPeerID {
+		return d.makeErrorResponse(execData.RequestID, 400, "invalid_request",
+			"EXECUTE handler uri targets non-local peer_id "+string(target)+
+				": this peer dispatches only its own namespace (§1.4 dispatch routing; §9.1)")
+	}
+
 	handlerPath := entity.ExtractHandlerPath(execData.URI)
 	d.debugf("execute: req=%s uri=%s op=%s", execData.RequestID, execData.URI, execData.Operation)
 
@@ -81,6 +105,21 @@ func (d *Dispatcher) handleExecute(ctx context.Context, env entity.Envelope, con
 		}
 		if connState != nil {
 			if err := ValidateConnectionSequence(connState, execData.Operation); err != nil {
+				// FM-1 (§4.7 row 6, ruled 2026-08-30 →
+				// entity-core-protocol 804876e). An `authenticate` arriving
+				// before any `hello` nonce was issued is the wire form of the
+				// replay attack §4.6 step 1 exists to stop: a captured
+				// authenticate replayed onto a fresh connection IS an
+				// authenticate-before-hello. It MUST surface as 401
+				// invalid_nonce — the same status as the established-connection
+				// replay special-cased above (RT-6) — because a 409/state-conflict
+				// under-signals the replay (§4.6 Hardening). Completed is already
+				// false here (that branch returned), so an authenticate reaching
+				// this point is exactly the pre-hello case. Every OTHER
+				// out-of-order connect op keeps 409 connection_sequence_error.
+				if execData.Operation == "authenticate" {
+					return d.makeErrorResponse(execData.RequestID, 401, "invalid_nonce", "authenticate before hello: no nonce has been issued for this connection (§4.6 single-use nonce; FM-1)")
+				}
 				return d.makeErrorResponse(execData.RequestID, 409, "connection_sequence_error", err.Error())
 			}
 		}

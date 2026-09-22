@@ -95,8 +95,8 @@ func runAuthz(ctx context.Context, client *PeerClient) []CheckResult {
 		"V7 §5.2 / F40 — operations/peers are id-scope (literal match): an operations exclude \"/*/get\" is a literal string that MUST NOT be canonicalized as a §5.4 path and block a real `get`. Scored on the A→B differential (VECTOR-SPEC-2026-07-27): (ALLOW,ALLOW)=PASS literal · (ALLOW,DENY)=FAIL canonicalization · (DENY,DENY)=unrelated deny, not F40.")
 	r.Declare("f40_id_scope_include_no_overgrant",
 		"V7 §5.2 / F40 — a path-syntax operations include (probed across /*/get, /{local}/get, /*/*, /*/{peer}) matches only the literal op string; none may canonicalize as a path and over-grant a real `get` (reject-path complement; a canonicalizing peer wrongly allows at least one)")
-	r.Declare("authz_peers_target_from_uri",
-		"V7 §5.2 peers dimension — target_peer = extract_peer(execute.uri, local), NOT local; and an absent `peers` field defaults to {include:[local]} and is STILL checked. Self-checking trio on a foreign-namespace URI: peers={R} ALLOWs (P-1 control), peers={local} DENYs (P-2 escalation), peers absent DENYs (P-3 escalation). A peer that tests local_peer_id or skips the absent field ALLOWs P-2/P-3 — a foreign-namespace privilege escalation.")
+	r.Declare("dispatch_inbound_foreign_namespace_refused",
+		"V7 §1.4 dispatch routing + §9.1 (PD-1h, 0.8.2.2) — an inbound EXECUTE whose HANDLER uri names a non-local peer_id MUST be refused at canonicalization with 400 invalid_request, BEFORE handler resolution. §6.5 step 3 is a gate, not an ordering preference: a peer MUST NOT strip the peer id, resolve the local handler, and let §5.2 decide (that path lets a matching `peers` scope authorize a foreign namespace — the live escalation). Positive control: a LOCAL handler uri is NOT gated, so the 400 is attributable to the foreign handler uri and not to a malformed request.")
 
 	roleURI := fmt.Sprintf("entity://%s/system/role", client.RemotePeerID())
 	treeURI := fmt.Sprintf("entity://%s/system/tree", client.RemotePeerID())
@@ -721,13 +721,21 @@ func runAuthz(ctx context.Context, client *PeerClient) []CheckResult {
 		return PassCheck("`get` DENIED under all four path-syntax operations includes (" + strings.Join(passed, ", ") + ") — id-scope matched literally, no path over-grant (F40 §5.2)")
 	})
 
-	r.Run("authz_peers_target_from_uri", func() CheckOutcome {
+	// PD-1i + PD-1d #1 (2026-08-31). This REPLACES the retired
+	// `authz_peers_target_from_uri`, whose reference answer inverted under
+	// 0.8.2.2: its PASS branch required P-1 (a foreign-handler-uri EXECUTE) to
+	// be ALLOWED, which the §1.4 routing ruling now makes a MUST-refuse. A
+	// conformant peer could only ever score WARN there, and a peer with the
+	// escalation scored PASS — the gate certified the defect. The peers
+	// DIMENSION (its right subject) is unreachable from the inbound wire (see
+	// authz_peers_dimension_subdispatch below); what IS wire-observable, and
+	// what actually closes the escalation, is the routing gate itself.
+	r.Run("dispatch_inbound_foreign_namespace_refused", func() CheckOutcome {
 		if len(client.Grants()) == 0 {
 			return SkipCheck("no authenticated grants to attenuate from")
 		}
-		// L = the responder itself, which is §5.2 local_peer_id on the peer under
-		// test. R = a syntactic-but-unowned foreign peer id: exactly 46 Base58
-		// chars so every impl's is_peer_id recognizes it (spec ≥46; rust/py ==46).
+		// R = a syntactic-but-unowned foreign peer id: exactly 46 Base58 chars so
+		// every impl's is_peer_id recognizes it (spec ≥46; rust/py ==46).
 		localID := string(client.RemotePeerID())
 		const foreignID = "1FZfarForeignPeerRRRRRRRRRRRRRRRRRRRRRRRRRRRRR"
 		if foreignID == localID {
@@ -735,45 +743,56 @@ func runAuthz(ctx context.Context, client *PeerClient) []CheckResult {
 		}
 		foreignURI := fmt.Sprintf("entity://%s/system/tree", foreignID)
 
-		// P-1 control: grant scoped to R, target R → ALLOW (the harmless direction).
-		allow1, s1, c1, err := probePeersRow(client, foreignURI, &types.CapabilityScope{Include: []string{foreignID}})
+		// Positive control (the complement §1 of the routing packet names: run
+		// the gate against an input you believe is CORRECT and confirm it
+		// passes). A LOCAL handler uri MUST NOT be refused by the routing gate —
+		// it proceeds to §5.2, which here allows a plain local get. If this is
+		// itself 400 invalid_request the gate is over-firing (or the harness is
+		// broken), so the foreign-uri verdict is unattributable → SKIP.
+		_, ls, lc, err := probePeersRow(client, treeURI, &types.CapabilityScope{Include: []string{localID}})
 		if err != nil {
-			return FailCheck("P-1 (peers={R}): " + err.Error())
+			return FailCheck("positive control (local uri): " + err.Error())
 		}
-		// P-2: grant scoped to LOCAL, target R → MUST DENY (local-scoped grant must
-		// not reach a foreign namespace).
-		allow2, s2, c2, err := probePeersRow(client, foreignURI, &types.CapabilityScope{Include: []string{localID}})
-		if err != nil {
-			return FailCheck("P-2 (peers={L}): " + err.Error())
+		if ls == 400 && lc == "invalid_request" {
+			return SkipCheck(fmt.Sprintf("positive control: a LOCAL handler uri was itself refused (400 invalid_request) — the routing gate is over-firing or the harness is misconfigured; foreign-uri verdict unattributable (local s=%d %q)", ls, lc))
 		}
-		// P-3: peers ABSENT, target R → MUST DENY (absent defaults to {include:[L]}
-		// and is still checked; skipping the check ALLOWs a foreign namespace).
-		allow3, s3, c3, err := probePeersRow(client, foreignURI, nil)
+
+		// The gate: a foreign HANDLER uri MUST be 400 invalid_request. The peers
+		// scope on the delegated cap is irrelevant — the gate fires ahead of
+		// authorization — so any scope exercises it; {R} is the harmless one.
+		_, fs, fc, err := probePeersRow(client, foreignURI, &types.CapabilityScope{Include: []string{foreignID}})
 		if err != nil {
-			return FailCheck("P-3 (peers absent): " + err.Error())
+			return FailCheck("foreign uri probe: " + err.Error())
 		}
 		det := map[string]any{
-			"P1_grant_R_uri_R": map[string]any{"allow": allow1, "status": s1, "code": c1},
-			"P2_grant_L_uri_R": map[string]any{"allow": allow2, "status": s2, "code": c2},
-			"P3_absent_uri_R":  map[string]any{"allow": allow3, "status": s3, "code": c3},
+			"local_uri":   map[string]any{"status": ls, "code": lc},
+			"foreign_uri": map[string]any{"status": fs, "code": fc},
 		}
-		switch {
-		case allow2 || allow3:
+		if fs != 400 || fc != "invalid_request" {
 			return FailCheck(fmt.Sprintf(
-				"§5.2 peers dimension FAIL — privilege escalation: a local-scoped or absent-peers grant authorized a FOREIGN namespace (P2 grant={L} uri=/R/: allow=%v s=%d %q; P3 absent uri=/R/: allow=%v s=%d %q). The peer tested local_peer_id instead of extract_peer(execute.uri), or skipped the check on an absent peers field. §5.2 requires target_peer=extract_peer(execute.uri) and absent peers→{include:[local]}, still checked.",
-				allow2, s2, c2, allow3, s3, c3)).WithDetails(det)
-		case allow1 && !allow2 && !allow3:
-			return PassCheck(fmt.Sprintf(
-				"§5.2 peers dimension correct: foreign-scoped grant ALLOWs the foreign target (P1 s=%d), while local-scoped (P2 s=%d %q) and absent-peers (P3 s=%d %q) grants DENY it — target read from the URI, absent defaulted-and-checked",
-				s1, s2, c2, s3, c3)).WithDetails(det)
-		case !allow1 && !allow2 && !allow3:
-			return WarnCheck(fmt.Sprintf(
-				"§5.2 peers: all three rows DENIED (P1 s=%d %q, P2 s=%d %q, P3 s=%d %q) — the foreign-scoped control (P1) also denied, so the denials are unattributable to the peers dimension (unrelated deny, or the peer refuses all foreign-namespace targets). This is NOT the local_peer_id escalation bug, which ALLOWs P2/P3. Investigate the P1 control before scoring.",
-				s1, c1, s2, c2, s3, c3)).WithDetails(det)
-		default: // !allow1 && (allow2||allow3) is already caught above; defensive.
-			return WarnCheck(fmt.Sprintf("§5.2 peers: incoherent verdict (P1=%v P2=%v P3=%v) — investigate harness/setup", allow1, allow2, allow3)).WithDetails(det)
+				"§1.4/§9.1 routing gate FAIL: an inbound EXECUTE naming a FOREIGN handler peer_id got (%d, %q), want (400, invalid_request). A 2xx is the live escalation — the peer stripped the foreign peer id, resolved its LOCAL handler, and let a matching `peers` scope authorize a foreign namespace. A 403/404 means the refusal is reached by resolving locally (§6.5 step 3 forbids that ordering) — the code must be invalid_request at canonicalization, not an authz/handler verdict. (Local control passed: s=%d %q.)",
+				fs, fc, ls, lc)).WithDetails(det)
 		}
+		return PassCheck(fmt.Sprintf(
+			"§1.4/§9.1 routing gate correct: foreign handler uri refused (400 invalid_request) at canonicalization, while the local handler uri is NOT gated (s=%d %q) — the refusal is attributable to the foreign peer segment, not a malformed request",
+			ls, lc)).WithDetails(det)
 	})
+
+	// PD-1d #2 (2026-08-31) — `authz_peers_dimension_subdispatch` is deliberately
+	// NOT a runnable check. Arch flagged it ("if unconstructible, that IS the
+	// finding, not an exclusion"), and it is unconstructible from an external
+	// wire probe: post-PD-1h the inbound wire refuses every foreign-handler-uri
+	// EXECUTE at the routing gate (see dispatch_inbound_foreign_namespace_refused
+	// above), so the §5.2 Dimension 4 case where target_peer != local arises ONLY
+	// on §1.4's internal-dispatch class — reachable solely by a handler that
+	// sub-dispatches to a foreign handler uri, which needs handler code installed
+	// on the peer under test, outside what validate-peer can stage against a
+	// black box. A SkipCheck here would be a permanent gate FAIL (validate-
+	// complete.sh scores a skip as an untested surface), so the finding is
+	// carried in the validation report, and the dimension's teeth stay in-tree
+	// (core/peer handler_grant_ceiling_test.go peers row; core/capability
+	// extract_peer / MatchesPeerScope tests). Not omitted silently — recorded
+	// here and reported.
 
 	return r.Results()
 }

@@ -233,6 +233,16 @@ func extractPeer(locator string, localPeerID crypto.PeerID) crypto.PeerID {
 	return localPeerID
 }
 
+// ExtractPeer is the exported §5.2 extract_peer, for the one caller outside
+// this package: the §1.4 inbound-dispatch routing gate in core/protocol
+// (handleExecute). The gate and the §5.2 peers dimension (Dimension 4) MUST
+// read the target peer of a locator through ONE implementation — a routing
+// concept split across two implementations is a DAG fork nobody sees until a
+// peer does — so both go through extractPeer here.
+func ExtractPeer(locator string, localPeerID crypto.PeerID) crypto.PeerID {
+	return extractPeer(locator, localPeerID)
+}
+
 // MatchesPeerScope checks if a peer ID is covered by the peers scope.
 // Peer IDs are explicit — there is no "self" alias (R11).
 func MatchesPeerScope(peerID string, scope types.CapabilityScope, localPeerID crypto.PeerID) bool {

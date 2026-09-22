@@ -93,19 +93,21 @@ func openEntryCap(t *testing.T, p *Peer) entity.Entity {
 	return ent
 }
 
-// TestDefaultHandlerGrantCeilingReachesForeignNamespace pins the V7 §6.9
+// TestDefaultHandlerGrantCeilingReachesForeignNamespace pins the V7 §6.2
 // default per-handler self-grant against the §5.2 Dimension 3 ceiling that
 // 49d4a03 gave the in-process sub-dispatch path.
 //
-// §6.9 describes the default as "all resources" and it was encoded as bare "*".
-// Inert, that is a harmless spelling — nothing read the field, because before
-// 49d4a03 makeLocalExecute handed the L1 check an ExecuteData with a nil
-// Resource and CheckResourceScope never ran. As a CEILING, bare "*" resolves
-// through capability.Canonicalize to "/{granter}/*" — OWN NAMESPACE ONLY — so
-// the peer's own engine could no longer write the foreign-namespace subtrees
-// its store legitimately holds under V7 §1.4's universal address space
-// (Category A: a `follow` mirror at /{them}/app/..., a cached foreign content
-// site). entity-core-rust hit exactly this shape in their own
+// §6.2's "Default self-grant shape (normative, 0.8.2.3)" clause pins the
+// resources default to "/*/*"; the obvious encoding of a grant that reaches its
+// own store was bare "*". Inert, that is a harmless spelling — nothing read the
+// field, because before 49d4a03 makeLocalExecute handed the L1 check an
+// ExecuteData with a nil Resource and CheckResourceScope never ran. As a
+// CEILING, bare "*" resolves through capability.Canonicalize to "/{granter}/*"
+// — OWN NAMESPACE ONLY — so the peer's own engine could no longer write the
+// foreign-namespace subtrees its store legitimately holds under V7 §1.4's
+// universal address space (§1.4's "Cached remote data" class, entities under
+// other peers' namespaces: a `follow` mirror at /{them}/app/..., a cached
+// foreign content site). entity-core-rust hit exactly this shape in their own
 // `default_handler_self_grant` and fixed it the same way.
 //
 // Teeth: this test goes 403 capability_denied against the pre-fix bare-"*"
@@ -161,7 +163,7 @@ func TestDefaultHandlerGrantCeilingReachesForeignNamespace(t *testing.T) {
 		t.Fatalf("default-scope handler sub-dispatching system/tree:put at a FOREIGN-namespace path returned %d, want 200.\n"+
 			"  ceiling Resources.Include = %v (first pattern canonicalizes to %q)\n"+
 			"  target                    = %q\n"+
-			"§6.9's \"all resources\" must be encoded as the cross-peer peer-wildcard \"/*/*\"; bare \"*\" canonicalizes to /{granter}/* (own namespace only) per §5.5/PR-8, and since 49d4a03 that spelling is an enforcement input, not documentation. The bootstrap-path control above proves the store holds this namespace.",
+			"§6.2's default self-grant shape (normative, 0.8.2.3) must be encoded as the cross-peer peer-wildcard \"/*/*\"; bare \"*\" canonicalizes to /{granter}/* (own namespace only) per §5.5/PR-8, and since 49d4a03 that spelling is an enforcement input, not documentation. The bootstrap-path control above proves the store holds this namespace.",
 			resp.Status, mirror.sawResources, canon, target)
 	}
 	if _, ok := p.LocationIndex().Get(target); !ok {
