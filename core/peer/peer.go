@@ -882,8 +882,9 @@ func registerHandler(reg *handler.Registry, typeReg *types.TypeRegistry, pattern
 // entries — the parent side of the §3 advertisement-discipline subset check
 // (`EXTENSION-SIGNALING.md` §6.5 (b) Contents; arch 977667f).
 //
-// One entry per registered handler: that handler's pattern exactly, with `*`
-// on resources and operations — "this peer serves this handler, wholly."
+// One entry per registered handler: that handler's pattern exactly, with the
+// cross-peer peer-wildcard `/*/*` on resources and `*` on operations — "this
+// peer serves this handler, wholly, across the universal address space."
 //
 // **Why operations is `*` and not the manifest's declared op list.** Narrowing
 // it there is tempting, and wrong under "drop, not narrow." A grant of
@@ -917,8 +918,28 @@ func advertisedServedScope(reg *handler.Registry) []types.GrantEntry {
 			}
 		}
 		out = append(out, types.GrantEntry{
-			Handlers:   types.CapabilityScope{Include: []string{pattern}},
-			Resources:  types.CapabilityScope{Include: []string{"*"}},
+			Handlers: types.CapabilityScope{Include: []string{pattern}},
+			// Resources IS a path namespace, so the spelling is load-bearing and
+			// is NOT bare "*". §5.5 / PR-8 canonicalization (capability.
+			// Canonicalize) resolves a bare "*" resource pattern to
+			// "/{granter}/*" — OWN NAMESPACE ONLY. This served-scope is the
+			// PARENT side of the §3 advertisement subset check (advertisedCovers/
+			// coversFourAxes canonicalize the resources axis), so a bare "*" here
+			// covers only the local namespace and DROPS every grant whose
+			// resource names another peer's namespace — a §1.4 universal-address-
+			// space path (a cached-remote entity, a follow mirror at /{them}/...)
+			// this peer's store legitimately serves. Under "drop, not narrow" the
+			// whole entry is deleted, so an operator who WIDENS a grant by adding
+			// a foreign-namespace resource row silently makes it narrower.
+			//
+			// The peer serves this handler across the universal address space, so
+			// the cross-peer peer-wildcard "/*/*" (all peers, all paths) is what
+			// it advertises. This is the SAME class defaultHandlerSelfGrant
+			// documents and fixed one function over — the ceiling facing outward
+			// with the old spelling. Operations below stays bare "*": it is not a
+			// path axis, MatchesPattern short-circuits "*", and no
+			// canonicalization applies.
+			Resources:  types.CapabilityScope{Include: []string{"/*/*"}},
 			Operations: types.CapabilityScope{Include: []string{"*"}},
 		})
 	}
@@ -977,6 +998,19 @@ func advertisedServedScope(reg *handler.Registry) []types.GrantEntry {
 // authorizes dispatching at OUR handlers. Widening it to "*" would authorize
 // dispatch at foreign peers' handlers, which is a real escalation and is not
 // what "all resources" means. Do not "complete" the fix by touching it.
+//
+// CONSEQUENCE UNDER 0.8.2.19 E1, and the correct escape (do not read the
+// paragraph above and stop): because Dimension 4 is now checked on every
+// outbound sub-dispatch, a handler that declares NO manifest InternalScope and
+// therefore runs on this default is CROSS-PEER-INERT — it can reach only its
+// own peer. That is correct for a handler whose work is local. A handler that
+// legitimately reaches a FOREIGN peer (system/revision:pull dispatches
+// system/revision:fetch at entity://{remote}/…) MUST declare its own
+// InternalScope in its manifest with a peers-dimension entry — narrow in
+// handlers/operations/resources, wildcard only in peers (which peer is not
+// knowable at manifest time). See ext/revision.Handler.Manifest and
+// ext/localfiles.Handler.Manifest for the pattern. The fix is a per-handler
+// manifest scope, NOT widening this default.
 //
 // Do not reuse this as a generic wide-grant builder: a call site that genuinely
 // wants own-namespace confinement must spell its own scope (as every ext

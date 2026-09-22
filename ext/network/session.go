@@ -9,6 +9,7 @@ import (
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
 	"go.entitychurch.org/entity-core-go/core/hash"
+	"go.entitychurch.org/entity-core-go/core/store"
 	"go.entitychurch.org/entity-core-go/core/types"
 )
 
@@ -64,6 +65,64 @@ func (h *Handler) getSession(peerID crypto.PeerID) *session {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.sessions[peerID]
+}
+
+// hasTreeResidentGraph reports whether a durable §4.1 relationship graph for
+// peerID survives in the tree — the backoff continuation, the on-disconnect or
+// the on-reconnect standing continuation. This is the evidence of a prior
+// maintain relationship that outlives the process, so it answers "have I
+// maintained this peer before?" without a live connection (workbench-go row 11).
+func (h *Handler) hasTreeResidentGraph(li store.LocationIndex, peerID crypto.PeerID) bool {
+	if li == nil {
+		return false
+	}
+	for _, path := range []string{backoffPath(peerID), onDisconnectPath(peerID), onReconnectPath(peerID)} {
+		if _, ok := li.Get(path); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// recoverSession returns the in-memory session for peerID, or rebuilds one from
+// the tree-resident graph when the map has none but the durable graph survives
+// (workbench-go row 11). The Handler.sessions map dies with the process while
+// the continuation graph and lifecycle subscriptions are tree-resident and
+// restored at open — so after a restart the two 404 sites (handleReconnect,
+// handleRestoreSubscriptions) that key on the map would refuse a relationship
+// that is fully alive, and the restored subscriptions dispatch into the hole,
+// binding one permanent lost marker per peer-status transition, forever. A
+// rebuilt session carries a fresh session/chain id (the durable graph paths are
+// peer-keyed, so the identities are correlation-only) and is marked
+// graphInstalled so no duplicate subscriptions are created. Returns nil only
+// when there is genuinely no relationship — in memory or in the tree.
+func (h *Handler) recoverSession(peerID crypto.PeerID, li store.LocationIndex) *session {
+	if s := h.getSession(peerID); s != nil {
+		return s
+	}
+	if !h.hasTreeResidentGraph(li, peerID) {
+		return nil
+	}
+	remoteHash, err := types.ComputePeerIdentityHashFromPeerID(peerID)
+	if err != nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	// Re-check under the lock: a concurrent maintain-peer may have created it.
+	if s, ok := h.sessions[peerID]; ok {
+		return s
+	}
+	sid := newSessionID()
+	s := &session{
+		peerID:         peerID,
+		remoteHash:     remoteHash,
+		sessionID:      sid,
+		chainID:        newChainID("network-maintain", sid),
+		graphInstalled: true, // the graph is already in the tree
+	}
+	h.sessions[peerID] = s
+	return s
 }
 
 // getOrCreateSession returns the existing session for peerID or creates one.

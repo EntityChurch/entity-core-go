@@ -23,13 +23,12 @@ const handlerPattern = "local/files"
 
 // Handler implements the local/files domain handler per DOMAIN-LOCAL-FILES.md.
 type Handler struct {
-	mu             sync.Mutex
-	roots          map[string]*RootMapping
-	watchers       map[string]*watcher
-	reverseTracker *reverseTracker
-	localNS        string // local peer ID for namespace stripping in reverse write
-	logger         *log.Logger
-	statCache      *statCache // L7 stat-cache per §10.2 SHOULD (Git racy-clean shape)
+	mu        sync.Mutex
+	roots     map[string]*RootMapping
+	watchers  map[string]*watcher
+	localNS   string // local peer ID for namespace stripping in reverse write
+	logger    *log.Logger
+	statCache *statCache // L7 stat-cache per §10.2 SHOULD (Git racy-clean shape)
 }
 
 // NewHandler creates a new local files handler.
@@ -87,8 +86,14 @@ func (h *Handler) StartWatching(ctx context.Context, rootName string, cs store.C
 		capHash = gh
 	}
 
-	w, err := newWatcher(root, 2000, cs, li, h.logger, h.statCache)
+	const debounceMs = 2000
+	w, err := newWatcher(root, debounceMs, cs, li, h.logger, h.statCache)
 	if err != nil {
+		// Row 3: record watcher liveness as a TREE FACT so any renderer can
+		// read it, not just an in-process Go consumer. A restart/auto-started
+		// watcher that failed to start otherwise reads identically to a healthy
+		// one — the silent state a Local Files panel had to print "unknown" for.
+		h.persistWatcherState(cs, li, rootName, "error", 0, err.Error())
 		return fmt.Errorf("create watcher: %w", err)
 	}
 	w.bgCtx = &store.MutationContext{
@@ -106,7 +111,32 @@ func (h *Handler) StartWatching(ctx context.Context, rootName string, cs store.C
 	h.mu.Unlock()
 
 	w.Start(ctx)
+	h.persistWatcherState(cs, li, rootName, "active", debounceMs, "")
 	return nil
+}
+
+// persistWatcherState writes the watcher's liveness for a root to the tree at
+// system/config/local/files/watch/{rootName} (row 3). handleWatch persists the
+// same shape for the explicit `watch` operation; this covers the auto/restart
+// path (StartWatching from Load / AddRoot) so watcher liveness is a tree fact
+// on every path, readable by any implementation. Best-effort: a persistence
+// failure must not stop the watcher, which is already running.
+func (h *Handler) persistWatcherState(cs store.ContentStore, li store.LocationIndex, rootName, status string, debounceMs uint64, errMsg string) {
+	if li == nil || cs == nil {
+		return
+	}
+	wc := WatcherConfigData{RootName: rootName, Status: status, ErrorMessage: errMsg}
+	if debounceMs > 0 {
+		wc.DebounceMs = &debounceMs
+	}
+	ent, err := wc.ToEntity()
+	if err != nil {
+		return
+	}
+	if _, err := cs.Put(ent); err != nil {
+		return
+	}
+	_ = li.Set("system/config/local/files/watch/"+rootName, ent.ContentHash)
 }
 
 // Manifest returns the handler's self-description (v1.2 §5.5).
@@ -212,16 +242,26 @@ func (h *Handler) Load(ctx context.Context, cs store.ContentStore, li store.Loca
 		return nil
 	}
 	loaded := 0
+	rootConfigs := 0
 	for _, entry := range li.List(configPathPrefix) {
-		// Skip the watch/ sub-namespace (watcher configs, not root configs).
-		rel := strings.TrimPrefix(entry.Path, configPathPrefix)
-		if rel == "" || strings.Contains(rel, "/") {
+		// The location index returns PEER-QUALIFIED paths
+		// (/{peer}/system/config/local/files/{name}) while configPathPrefix is
+		// the bare relative form — so a plain TrimPrefix does not match and the
+		// remainder keeps its slashes, tripping the "/" guard and skipping EVERY
+		// root on restart (workbench-go row 10: mount lists healthy, every write
+		// 404s, the watcher never restarts). relativeUnder handles both the bare
+		// and peer-qualified forms.
+		rel, under := relativeUnder(entry.Path, configPathPrefix)
+		// Skip the watch/ sub-namespace (watcher configs, not root configs) and
+		// anything not directly under the prefix.
+		if !under || rel == "" || strings.Contains(rel, "/") {
 			continue
 		}
 		ent, ok := cs.Get(entry.Hash)
 		if !ok || ent.Type != TypeRootConfig {
 			continue
 		}
+		rootConfigs++
 		cfg, err := RootConfigDataFromEntity(ent)
 		if err != nil {
 			h.logf("local-files: skip malformed root config at %s: %v", entry.Path, err)
@@ -240,8 +280,31 @@ func (h *Handler) Load(ctx context.Context, cs store.ContentStore, li store.Loca
 	}
 	if loaded > 0 {
 		h.logf("local-files: rehydrated %d root(s) from tree", loaded)
+	} else if rootConfigs > 0 {
+		// The silent state row 10 lived in: root configs exist in the tree but
+		// none rehydrated. Surface the discrepancy rather than logging nothing.
+		h.logf("local-files: WARNING rehydrated 0 of %d root config(s) from tree — mounts will 404 (path form mismatch?)", rootConfigs)
 	}
 	return nil
+}
+
+// relativeUnder returns the tail of a possibly peer-qualified index path below
+// a bare relative prefix, and whether the path is under that prefix. It is
+// correct for BOTH the bare form ("system/config/local/files/x") and the
+// peer-qualified form ("/{peer}/system/config/local/files/x"), because a helper
+// that assumes one form is exactly how row 10 recurred.
+func relativeUnder(path, prefix string) (string, bool) {
+	if rest, ok := strings.CutPrefix(path, prefix); ok {
+		return rest, true
+	}
+	// Peer-qualified: strip a leading "/{peer}/" and retry.
+	trimmed := strings.TrimPrefix(path, "/")
+	if slash := strings.IndexByte(trimmed, '/'); slash >= 0 {
+		if rest, ok := strings.CutPrefix(trimmed[slash+1:], prefix); ok {
+			return rest, true
+		}
+	}
+	return "", false
 }
 
 // addRootInMemory rebuilds the in-memory RootMapping without re-persisting

@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
-	"time"
 
 	"go.entitychurch.org/entity-core-go/core/ecf"
 	"go.entitychurch.org/entity-core-go/core/entity"
@@ -17,56 +15,33 @@ import (
 	"go.entitychurch.org/entity-core-go/ext/content/chunker"
 )
 
-const recentWriteWindow = 5 * time.Second
-
-// reverseTracker tracks recently-written paths to prevent loops.
-type reverseTracker struct {
-	mu      sync.Mutex
-	written map[string]time.Time
-}
-
-func newReverseTracker() *reverseTracker {
-	return &reverseTracker{written: make(map[string]time.Time)}
-}
-
-func (rt *reverseTracker) markWritten(path string) {
-	rt.mu.Lock()
-	rt.written[path] = time.Now()
-	rt.mu.Unlock()
-}
-
-func (rt *reverseTracker) isRecentlyWritten(path string) bool {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	t, ok := rt.written[path]
-	if !ok {
-		return false
-	}
-	if time.Since(t) > recentWriteWindow {
-		delete(rt.written, path)
-		return false
-	}
-	return true
-}
-
 // StartReverseWrite begins processing tree change events to write files to disk (§5).
 // This should be called after peer construction. The localPeerID is used to filter
 // out events from remote peers (only local tree changes should write to disk).
 func (h *Handler) StartReverseWrite(ctx context.Context, events <-chan store.TreeChangeEvent,
 	cs store.ContentStore, li store.LocationIndex, localPeerID string) {
-	tracker := newReverseTracker()
-
 	h.mu.Lock()
-	h.reverseTracker = tracker
 	h.localNS = localPeerID
 	h.mu.Unlock()
 
-	go h.reverseWriteLoop(ctx, events, cs, li, tracker)
+	go h.reverseWriteLoop(ctx, events, cs, li)
 }
 
 // reverseWriteLoop processes tree change events.
+//
+// Loop prevention is by CONTENT, not by a clock (workbench-go row 2). An
+// earlier design dropped any event for a path written within a 5s window — but
+// that discarded (never deferred) a genuine SECOND update to a path inside the
+// window, so the tree and disk diverged permanently and silently, and it
+// dropped a genuine DELETE inside the window for good. The authoritative echo
+// guard is content-identity: reverseWrite skips only when the on-disk content
+// already hashes to the incoming blob (currentDiskBlobHash == fileData.Content,
+// recomputed at the incoming blob's chunk_size per §5.5 Amendment 3), and
+// reverseDelete tolerates os.IsNotExist so an echoed delete is a no-op on its
+// own terms. The clock could not tell an echo from a follow-up update; the
+// content check can, and it is what actually closes the write/notify loop.
 func (h *Handler) reverseWriteLoop(ctx context.Context, events <-chan store.TreeChangeEvent,
-	cs store.ContentStore, li store.LocationIndex, tracker *reverseTracker) {
+	cs store.ContentStore, li store.LocationIndex) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -97,11 +72,10 @@ func (h *Handler) reverseWriteLoop(ctx context.Context, events <-chan store.Tree
 				continue
 			}
 
-			if tracker.isRecentlyWritten(barePath) {
-				continue
-			}
-
 			if evt.ChangeType == store.ChangeDeleted {
+				// Ungated: an echoed delete is definitionally "already absent
+				// from disk" and reverseDelete swallows os.IsNotExist, so it is
+				// a no-op; a genuine delete inside a burst now lands.
 				h.reverseDelete(root, barePath)
 				continue
 			}
@@ -114,7 +88,7 @@ func (h *Handler) reverseWriteLoop(ctx context.Context, events <-chan store.Tree
 				continue
 			}
 
-			h.reverseWrite(root, barePath, ent, cs, tracker)
+			h.reverseWrite(root, barePath, ent, cs)
 		}
 	}
 }
@@ -132,7 +106,7 @@ func (h *Handler) reverseWriteLoop(ctx context.Context, events <-chan store.Tree
 // "diverges" verdict on identical content). Spec restructure: fetch
 // blob early, extract chunk_size, pass through to circuit breaker.
 func (h *Handler) reverseWrite(root *RootMapping, treePath string, fileEntity entity.Entity,
-	cs store.ContentStore, tracker *reverseTracker) {
+	cs store.ContentStore) {
 	fileData, err := FileDataFromEntity(fileEntity)
 	if err != nil {
 		h.logf("localfiles: reverse write decode error for %s: %v", treePath, err)
@@ -182,7 +156,6 @@ func (h *Handler) reverseWrite(root *RootMapping, treePath string, fileEntity en
 		return
 	}
 
-	tracker.markWritten(treePath)
 	// Stream chunks directly to the temp file rather than materializing
 	// the full payload buffer. For 64 MiB+ content this drops peak heap
 	// from ~2× file size (chunks in store + reassembled buffer) to

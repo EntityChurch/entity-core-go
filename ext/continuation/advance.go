@@ -329,10 +329,19 @@ func (h *Handler) bindLostErrorMarkerForJoin(hctx *handler.HandlerContext, chain
 		}
 	}
 
+	// §3.10.6 sender-side capture: record which peer the dispatch was aimed at,
+	// when the failed URI names one. A bare handler path leaves it absent (a
+	// consumer says "unknown" rather than inventing a peer). Row 17.
+	targetPeerID := ""
+	if pid, ok := capability.ExtractPeerStrict(failedURI); ok {
+		targetPeerID = string(pid)
+	}
+
 	marker, err := types.ChainErrorLostData{
 		Code:               origCode,
 		Status:             origStatus,
 		TargetURI:          failedURI,
+		TargetPeerID:       targetPeerID,
 		Timestamp:          originTimestampMs,
 		Reason:             pathReason,
 		ChainID:            rawChainID,

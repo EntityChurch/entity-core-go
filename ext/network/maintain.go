@@ -71,6 +71,22 @@ func (h *Handler) handleMaintainPeer(ctx context.Context, req *handler.Request) 
 
 	sess, existed := h.getOrCreateSession(peerID, remoteHash, params)
 
+	// Row 11: `existed` from the in-memory map alone cannot tell "a peer I have
+	// never maintained" from "a peer whose session map died with the last
+	// process" — after a restart the tree-resident graph is fully alive but the
+	// map is empty, so a peer unreachable at that instant would take dropSession
+	// + 502 and tear down a live relationship. When a durable graph survives in
+	// the tree, this IS an existing relationship: adopt the fresh session as the
+	// graph's (mark graphInstalled so the reconnect path below does not create a
+	// second set of lifecycle subscriptions) and take the maintain-not-connect
+	// branch.
+	if !existed && h.hasTreeResidentGraph(hctx.LocationIndex, peerID) {
+		existed = true
+		sess.mu.Lock()
+		sess.graphInstalled = true
+		sess.mu.Unlock()
+	}
+
 	// 1. Connect if needed (§4.1 step 1). EnsureConnected reuses the pooled
 	// binding or dials + handshakes; the establish path writes the §3.13
 	// connected status and pool insert starts keepalive (§4.1 steps 2 and 5
@@ -451,7 +467,10 @@ func (h *Handler) handleReconnect(ctx context.Context, req *handler.Request) (*h
 	if resp != nil {
 		return resp, nil
 	}
-	sess := h.getSession(peerID)
+	// Row 11: recover from the tree-resident graph after a restart rather than
+	// 404 into the restored continuation, which would bind a permanent lost
+	// marker per peer-status transition.
+	sess := h.recoverSession(peerID, hctx.LocationIndex)
 	if sess == nil {
 		return handler.NewErrorResponse(404, "not_found",
 			"no maintain session for peer "+string(peerID))
@@ -520,7 +539,9 @@ func (h *Handler) handleRestoreSubscriptions(ctx context.Context, req *handler.R
 	if resp != nil {
 		return resp, nil
 	}
-	sess := h.getSession(peerID)
+	// Row 11: recover from the tree-resident graph after a restart rather than
+	// 404 into the restored on-reconnect continuation (the marker-storm source).
+	sess := h.recoverSession(peerID, hctx.LocationIndex)
 	if sess == nil {
 		return handler.NewErrorResponse(404, "not_found",
 			"no maintain session for peer "+string(peerID))

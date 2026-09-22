@@ -211,20 +211,14 @@ func (h *Handler) handleWrite(ctx context.Context, req *handler.Request) (*handl
 		}
 	}
 
-	// F9 fix (workbench Round 6 handoff): mark the path as
-	// recently-written BEFORE the disk write so the watcher event fired
-	// by atomicWriteFile / streamReassembleToFile is suppressed by the
-	// loop-prevention tracker. Symmetric to reverse.go:185. Without this
-	// the dispatch-driven write path bypasses the circuit breaker that
-	// the tree-event-driven reverse-write path uses, and a same-path
-	// subscription loop runs unbounded (single-peer self-loop
-	// reproducer: 2169 entities/5s from one user write).
-	h.mu.Lock()
-	tracker := h.reverseTracker
-	h.mu.Unlock()
-	if tracker != nil {
-		tracker.markWritten(treePath)
-	}
+	// Loop prevention (workbench-go row 2): the write/notify loop is closed by
+	// CONTENT identity, not a recent-write clock. The watcher event this disk
+	// write fires is suppressed downstream when the on-disk content already
+	// hashes to the same blob (reverseWrite's currentDiskBlobHash check), and an
+	// embedder's delivery handler (e.g. workbench blob-resolve) short-circuits
+	// when the local tree already holds the same blob at the path. The old
+	// reverseTracker clock is gone: it dropped genuine follow-up updates and
+	// deletes within its window (silent tree/disk divergence).
 
 	// Bytes mode keeps rawBytes (input already in hand); content mode
 	// streams reassembly chunk-by-chunk to avoid double-buffering the

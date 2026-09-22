@@ -216,33 +216,33 @@ func (r *Recorder) recordTransition(evt store.TreeChangeEvent, eventType string,
 
 // prune truncates the history chain to max_depth transitions.
 // Older transitions become unreachable from the head and are eligible for GC.
+// prune is a NO-OP: max_depth is NOT enforced (workbench-go row 8).
+//
+// The previous body walked from the head to the max_depth'th transition and
+// returned, on the theory that this made older transitions "no longer reachable
+// from the head" and that "GC handles cleanup". Both were false:
+//
+//   - Nothing was mutated, so the head still reaches every transition by
+//     following `previous`. A history chain is immutable content-addressed
+//     entities; severing the link means rewriting the retained boundary
+//     transition with a zeroed `previous` — which changes its hash — which
+//     invalidates its successor's `previous`, cascading a rewrite of the entire
+//     retained chain and the head pointer. So a correct max_depth is either that
+//     O(max_depth)-writes-per-write cascade (a different cost profile), a
+//     head-side depth counter, a segmented chain, or an explicit reclaim pass.
+//   - There is NO garbage collector in the cohort to reclaim the unlinked tail
+//     (grep of core/store, core/tree: only chain-error marker collection, which
+//     is unrelated). Nothing deletes an unreachable content entity anywhere.
+//
+// Which mechanism max_depth should use is a design call with a real cost
+// implication; it is deferred rather than invented here (a bound built now and
+// unbuilt if a different one lands is worse than an honest no-op). The old walk
+// ran an O(max_depth) content-store read after every recorded write and achieved
+// nothing — pure cost — so it is removed. max_depth's doc comment says it is
+// reserved, and TestRecorderMaxDepthPruning asserts the chain is unbounded so it
+// fails the day real enforcement lands, which is exactly when it should.
 func (r *Recorder) prune(path string, maxDepth uint64) {
-	headPath := headPointerPath(path)
-	headHash, ok := r.li.Get(headPath)
-	if !ok {
-		return
-	}
-
-	current := headHash
-	count := uint64(1)
-	for count < maxDepth {
-		ent, ok := r.cs.Get(current)
-		if !ok {
-			return
-		}
-		td, err := types.TransitionDataFromEntity(ent)
-		if err != nil {
-			return
-		}
-		if td.Previous.IsZero() {
-			return // chain shorter than max_depth
-		}
-		current = td.Previous
-		count++
-	}
-	// current is now the last transition to keep.
-	// Its previous field still points to the old chain in the content store
-	// (immutable), but it's no longer reachable from the head. GC handles cleanup.
+	// no-op — see the comment above; max_depth is reserved, not enforced.
 }
 
 // readLogicalClock reads the current logical clock counter from the tree.

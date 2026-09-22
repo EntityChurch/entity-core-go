@@ -58,10 +58,16 @@ func TransitionDataFromEntity(e entity.Entity) (TransitionData, error) {
 // HistoryConfigData is the data payload for system/history/config.
 // Configures history recording for paths matching a pattern.
 type HistoryConfigData struct {
-	Pattern  string   `cbor:"pattern"`
-	Enabled  bool     `cbor:"enabled"`
-	Events   []string `cbor:"events,omitempty"`    // Default: ["created", "updated", "deleted"]
-	MaxDepth *uint64  `cbor:"max_depth,omitempty"` // Max transitions per path; nil = no limit
+	Pattern string   `cbor:"pattern"`
+	Enabled bool     `cbor:"enabled"`
+	Events  []string `cbor:"events,omitempty"` // Default: ["created", "updated", "deleted"]
+	// MaxDepth is RESERVED and NOT currently enforced (workbench-go row 8): a
+	// history chain is immutable content-addressed entities with no GC in the
+	// cohort, so bounding it needs a rewrite cascade or a reclaim pass — a
+	// deferred design call, not a slip. Do not size a retention plan against it
+	// as a guarantee; recording is unbounded per WRITE (not per file) until a
+	// bound lands. See ext/history.Recorder.prune.
+	MaxDepth *uint64 `cbor:"max_depth,omitempty"`
 }
 
 // ToEntity creates a system/history/config entity.

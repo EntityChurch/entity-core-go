@@ -483,16 +483,26 @@ func WithRemotePeer(peerID crypto.PeerID, addr string) Option {
 // Constraints: wildcard type_scope (required for content_store scope).
 // Allowances: content_store scope (full access to all entities).
 func OpenAccessGrants() []types.GrantEntry {
-	// General wildcard grant — covers all handlers/ops/resources.
+	// General wildcard grant — covers all handlers/ops/resources/peers.
 	// Resources include both "*" (canonicalizes to /{local}/* — local
 	// namespace) and "/*/*" (cross-peer wildcard — any peer's subtree). The
 	// cross-peer pattern is required for test scenarios that pre-bind
 	// signatures into auxiliary signers' namespaces (per EXTENSION-IDENTITY
 	// §8 V7 invariant pointer pattern: /{signer_peer_id}/system/signature/...).
+	//
+	// Peers is an EXPLICIT wildcard. Under 0.8.2.19 E1 the peers dimension
+	// (Dimension 4) is checked on outbound sub-dispatch, and an ABSENT peers
+	// field defaults to {include:[local]} — so leaving it off silently made
+	// this development "open access" grant local-only for cross-peer dispatch,
+	// which is not open access. A declared wildcard must be wildcard in every
+	// dimension or it lies (workbench-go AP63: an "open access" fixture that
+	// stops covering a dimension deletes that dimension from every suite that
+	// uses it, and each keeps passing on everything else).
 	general := types.GrantEntry{
 		Handlers:   types.CapabilityScope{Include: []string{"*"}},
 		Resources:  types.CapabilityScope{Include: []string{"*", "/*/*"}},
 		Operations: types.CapabilityScope{Include: []string{"*"}},
+		Peers:      &types.CapabilityScope{Include: []string{"*"}},
 	}
 
 	// Query-specific grant — exercises both constraint and allowance pathways.

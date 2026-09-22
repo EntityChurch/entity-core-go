@@ -63,6 +63,35 @@ func (h *Handler) lockPrefixForApply(prefix string) func() {
 func (h *Handler) Name() string { return "revision" }
 
 // Manifest returns the handler's self-description with all 18 operations.
+//
+// InternalScope is declared (not defaulted) because `pull` is the one kernel
+// operation whose entire purpose is to reach a FOREIGN peer: it dispatches
+// `system/revision:fetch` / `:fetch-entities` at `entity://{remote}/…` to pull
+// a diff and merge it locally (pull.go). Under 0.8.2.19 E1 the executing
+// handler's grant gates all four dimensions of an outbound sub-dispatch,
+// including Dimension 4 (peers) — and the DEFAULT self-grant
+// (defaultHandlerSelfGrant, core/peer/peer.go) leaves the peers dimension
+// absent, so it defaults to {include:[local]} and a default-scope handler is
+// cross-peer-INERT. A handler that legitimately reaches a foreign peer must say
+// so in its own manifest; the default is deliberately not widened (that would
+// hand cross-peer authority to every handler). So we spell two entries:
+//
+//   - Entry 1 reproduces the default self-grant verbatim (all handlers/ops,
+//     resources /*/*, peers absent → local). This preserves every LOCAL
+//     sub-dispatch revision makes (the strategy.go merge delegation, etc.)
+//     identically to what the default gave.
+//   - Entry 2 is the cross-peer reach for pull's outbound fetch: narrow in the
+//     three dimensions the handler CAN name at manifest time — handler
+//     `system/revision`, operations `fetch`/`fetch-entities` — and wildcard
+//     ONLY in the dimension it cannot: which peer an operator will pull from.
+//     This is the minimal-escalation shape (workbench-go's `blob-resolve`
+//     `system/content:get` Peers:["*"] is the same pattern for the same reason).
+//
+// Note (E1 delivery-vs-backfill, cohort-wide): a pull triggered by a
+// SUBSCRIPTION DELIVERY runs under the subscription's dispatch_capability, not
+// this handler grant — so an embedder wiring follow→pull must give that
+// dispatch_capability the same peers reach. That is the installer's grant, not
+// this manifest.
 func (h *Handler) Manifest() types.HandlerManifestData {
 	return types.HandlerManifestData{
 		Pattern: handlerPattern,
@@ -87,6 +116,24 @@ func (h *Handler) Manifest() types.HandlerManifestData {
 			"revert":         {InputType: types.TypeRevisionRevertParams},
 			"config":         {InputType: types.TypeRevisionConfigParams},
 			"merge-config":   {InputType: types.TypeRevisionMergeConfigParams},
+		},
+		InternalScope: []types.GrantEntry{
+			// Entry 1: the default self-grant, verbatim — all LOCAL authority
+			// (peers absent → local peer only), unchanged from the default.
+			{
+				Handlers:   types.CapabilityScope{Include: []string{"*"}},
+				Operations: types.CapabilityScope{Include: []string{"*"}},
+				Resources:  types.CapabilityScope{Include: []string{"/*/*"}},
+			},
+			// Entry 2: cross-peer reach for pull's outbound fetch. Narrow in
+			// handlers/operations/resources; peers wildcard is the one
+			// dimension unknowable at manifest time.
+			{
+				Handlers:   types.CapabilityScope{Include: []string{"system/revision"}},
+				Operations: types.CapabilityScope{Include: []string{"fetch", "fetch-entities"}},
+				Resources:  types.CapabilityScope{Include: []string{"/*/*"}},
+				Peers:      &types.CapabilityScope{Include: []string{"*"}},
+			},
 		},
 	}
 }

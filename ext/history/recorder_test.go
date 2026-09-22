@@ -386,14 +386,18 @@ func TestRecorderMaxDepthPruning(t *testing.T) {
 		}
 	}
 
-	// Note: pruning severs reachability from the head, but old transitions
-	// remain in the content store. The chain walk from head should find
-	// at most maxDepth reachable transitions. However, since we don't actually
-	// modify the transition entities (they're immutable), all 5 are still
-	// linked. The pruning just means GC can collect them — it doesn't
-	// break the chain in-place. This test verifies the chain was built correctly.
-	if count < 3 {
-		t.Errorf("expected at least %d transitions, got %d", maxDepth, count)
+	// max_depth is RESERVED and NOT enforced (workbench-go row 8): the chain is
+	// immutable content-addressed entities with no GC, so nothing severs the
+	// tail — all 5 transitions stay reachable from the head. This assertion is
+	// deliberately inverted from a "feature works" shape: it pins the CURRENT
+	// (unbounded) behaviour so it FAILS the day real enforcement lands, which is
+	// exactly when someone needs to know the reserved field went live. (An old
+	// `count >= maxDepth` assertion passed with pruning entirely removed — it
+	// asserted the precondition, not the feature.)
+	if count != 5 {
+		t.Errorf("max_depth is documented not-enforced, so all 5 transitions must stay reachable; got %d — "+
+			"if pruning was just implemented, enforce max_depth (=%d) and rewrite this test for the new bound",
+			count, maxDepth)
 	}
 }
 

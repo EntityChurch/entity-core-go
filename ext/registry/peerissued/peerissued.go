@@ -562,6 +562,17 @@ func (b *Backend) cacheBinding(hctx *handler.HandlerContext, name string, bindin
 	_, _ = hctx.TreeSet(types.LocalSignaturePath(bindingHash), sigEnt.ContentHash, "peer-issued-cache-sig")
 }
 
+// NormalizeName is the exported form of the peer-issued name normalization —
+// named a cross-impl CONTRACT (workbench-go tracker row 6). The by-name pointer
+// path and every resolution key derive from this normalization, so two impls
+// that disagree on it resolve the same name differently. Exported so a consumer
+// (an SDK, a sibling impl's conformance harness) can apply or verify the exact
+// normalization rather than re-deriving it. The rule: NFC + REGISTRY §6.3
+// name-path safety (no `/`, no control chars); dots allowed; no case-fold.
+func NormalizeName(name string) (string, error) {
+	return normalizeName(name)
+}
+
 // normalizeName applies NFC + REGISTRY §6.3 name-path safety (no `/`, no
 // control chars). Dots are allowed (`billslab.com` is fine). No case-fold
 // — registries deciding to apply case-fold do so before they author the

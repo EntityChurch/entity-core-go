@@ -90,7 +90,7 @@ func (h *Handler) handlePull(ctx context.Context, req *handler.Request) (*handle
 	}
 	if fetchResp == nil || fetchResp.Status >= 400 {
 		resp, _ := handler.NewErrorResponse(502, "remote_fetch_failed",
-			fmt.Sprintf("revision/fetch on %s: status=%d", params.Remote, statusOf(fetchResp)))
+			fmt.Sprintf("revision/fetch on %s: %s", params.Remote, downstreamError(fetchResp)))
 		return resp, nil
 	}
 
@@ -185,8 +185,8 @@ func (h *Handler) handlePull(ctx context.Context, req *handler.Request) (*handle
 		}
 		if feResp == nil || feResp.Status >= 400 {
 			resp, _ := handler.NewErrorResponse(502, "remote_fetch_failed",
-				fmt.Sprintf("revision/fetch-entities round %d on %s: status=%d",
-					round+1, params.Remote, statusOf(feResp)))
+				fmt.Sprintf("revision/fetch-entities round %d on %s: %s",
+					round+1, params.Remote, downstreamError(feResp)))
 			return resp, nil
 		}
 		if feResp.Result.Type != "system/envelope" {
@@ -304,11 +304,30 @@ func collectMissingPullHashes(cs interface {
 	return missing
 }
 
-func statusOf(r *handler.Response) int {
+// downstreamError renders a failed remote response so the wrapped 502 carries
+// the downstream CODE (and message), not just the status number. Row 21: the
+// old form printed `status=%d`, reducing a downstream `403 capability_denied`
+// to the bare number `403` — and since the `lost` marker records THIS op's code
+// (`remote_fetch_failed`), the downstream cause survived nowhere greppable. A
+// reader re-verifying a sweep was led to the WRONG conclusion (that 502s with
+// no `capability_denied` in the log were not E1) because the artifacts had
+// already lost the cause. Carrying the code fixes that at the source: the code
+// is what a client branches on, and it now reaches the caller's response verbatim.
+func downstreamError(r *handler.Response) string {
 	if r == nil {
-		return 0
+		return "status=0 (no response)"
 	}
-	return int(r.Status)
+	// A non-2xx handler response carries a system/protocol/error entity
+	// ({code, message}); decode it to recover the downstream code verbatim.
+	if r.Result.Type == types.TypeError {
+		if ed, err := types.ErrorDataFromEntity(r.Result); err == nil && ed.Code != "" {
+			if ed.Message != "" {
+				return fmt.Sprintf("status=%d code=%q message=%q", r.Status, ed.Code, ed.Message)
+			}
+			return fmt.Sprintf("status=%d code=%q", r.Status, ed.Code)
+		}
+	}
+	return fmt.Sprintf("status=%d", r.Status)
 }
 
 func firstNonEmpty(a, b string) string {

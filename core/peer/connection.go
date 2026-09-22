@@ -67,6 +67,9 @@ type Connection struct {
 	mu        sync.Mutex
 	closed    bool
 	closeOnce sync.Once
+	// outbound records whether THIS peer initiated the connection (dialed it),
+	// set in PerformConnect (the dialer-only handshake). Guarded by mu. Row 13.
+	outbound bool
 
 	// Client-side multiplexing state. Initialized via startReader after
 	// PerformConnect completes; nil/closed on server-side connections that
@@ -119,6 +122,26 @@ func newConnection(p *Peer, conn net.Conn) *Connection {
 		readerDone:       make(chan struct{}),
 		originatingReady: make(chan struct{}),
 	}
+}
+
+// IsOutbound reports whether THIS peer initiated the connection (dialed and ran
+// the §6 connect handshake). A server-side (accepted) connection returns false.
+// Row 13: an application can ask "did I originate this session?" — the question a
+// sharing UI actually has, which Connections() loses when it merges the inbound
+// and outbound lists and which IsConnected conflates with a §6.11 reentry binding.
+func (c *Connection) IsOutbound() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.outbound
+}
+
+// Direction returns "outbound" when this peer dialed the connection, else
+// "inbound". A stable string for surfaces that render connection direction.
+func (c *Connection) Direction() string {
+	if c.IsOutbound() {
+		return "outbound"
+	}
+	return "inbound"
 }
 
 // MarkEstablishedViaRendezvousKey records that this connection was reached by
@@ -917,6 +940,16 @@ func (c *Connection) routeServerResponse(env entity.Envelope) {
 
 // PerformConnect initiates the connection handshake as a client.
 func (c *Connection) PerformConnect(ctx context.Context) error {
+	// PerformConnect runs only on the DIALER — a server-side connection never
+	// calls it (see the pending/readerDone field comments). Recording it here
+	// is the single, authoritative point at which a connection's direction is
+	// known. Row 13: exposes IsOutbound()/Direction() so an application can ask
+	// "did I originate this?" — which Connections() otherwise loses when it
+	// merges the inbound and pooled-outbound lists, and IsConnected conflates.
+	c.mu.Lock()
+	c.outbound = true
+	c.mu.Unlock()
+
 	kp := c.peer.keypair
 	addr := c.conn.RemoteAddr()
 

@@ -4,10 +4,16 @@ import (
 	"encoding/hex"
 	"time"
 
+	"go.entitychurch.org/entity-core-go/core/capability"
 	"go.entitychurch.org/entity-core-go/core/hash"
+	"go.entitychurch.org/entity-core-go/core/protocol"
 	"go.entitychurch.org/entity-core-go/core/store"
 	"go.entitychurch.org/entity-core-go/core/types"
 )
+
+// markerCollectThrottle bounds how often a subscription marker-bind pays for a
+// reap sweep — mirrors ext/continuation's collectThrottle.
+const markerCollectThrottle = time.Minute
 
 // bindLostMarker binds a chain-error `lost` marker at
 //
@@ -55,15 +61,23 @@ func (e *Engine) bindLostMarker(chainID, subscriptionID, reason, deliverURI stri
 	// observation happens (here in the engine).
 	now := uint64(time.Now().UnixMilli())
 
+	// §3.10.6 sender-side capture: which peer the delivery was aimed at, when
+	// the deliver URI names one. Bare-path deliveries leave it absent. Row 17.
+	targetPeerID := ""
+	if pid, ok := capability.ExtractPeerStrict(deliverURI); ok {
+		targetPeerID = string(pid)
+	}
+
 	marker, err := types.ChainErrorLostData{
 		Reason:    pathReason,
 		Timestamp: now,
 		// The RAW wire values — the body is the record, the path is an index.
-		ChainID:   rawChainID,
-		StepIndex: rawStepKey,
-		TargetURI: deliverURI,
-		Status:    originalStatus,
-		Code:      originalCode,
+		ChainID:      rawChainID,
+		StepIndex:    rawStepKey,
+		TargetURI:    deliverURI,
+		TargetPeerID: targetPeerID,
+		Status:       originalStatus,
+		Code:         originalCode,
 	}.ToEntity()
 	if err != nil {
 		e.debugf("subscription lost-marker entity build failed: %v (sub=%s reason=%s)",
@@ -88,5 +102,42 @@ func (e *Engine) bindLostMarker(chainID, subscriptionID, reason, deliverURI stri
 	}
 	e.debugf("bound subscription lost-marker at %s (chain=%s sub=%s reason=%s)",
 		markerPath, chainID, subscriptionID, reason)
+
+	// Self-reap (row 12): the path that grows this tree must also reap it. The
+	// two other `lost`/`rejected` binders (ext/continuation/advance.go,
+	// core/protocol/dispatch.go) trigger a throttled sweep at bind time; the
+	// subscription engine was the odd one out — it bound and never collected,
+	// so a peer whose ONLY marker source is subscription delivery accumulated
+	// them until some unrelated dispatch happened to sweep. Same self-reap
+	// invariant, now closed here.
+	e.maybeCollectMarkers()
 	return markerHash
+}
+
+// maybeCollectMarkers runs a throttled §3.10 marker sweep from the bind path.
+// Bind-time rather than a background ticker, for the same reasons the
+// continuation handler documents: binding is when the tree grows, an idle peer
+// has nothing to collect, and no ext handler owns a goroutine to leak. The
+// retention window is the v1.23 operator knob (system/config/chain-errors →
+// retention_ms) when set, else the 24h default; an explicit 0 disables it.
+func (e *Engine) maybeCollectMarkers() {
+	if e.store == nil || e.locationIndex == nil {
+		return
+	}
+	now := time.Now()
+	e.mu.Lock()
+	if !e.lastMarkerCollect.IsZero() && now.Sub(e.lastMarkerCollect) < markerCollectThrottle {
+		e.mu.Unlock()
+		return
+	}
+	e.lastMarkerCollect = now
+	e.mu.Unlock()
+
+	retention := protocol.EffectiveRetention(e.store, e.locationIndex, protocol.DefaultMarkerRetentionMs)
+	if retention == protocol.RetainMarkersForever {
+		return
+	}
+	if n := protocol.CollectExpiredMarkers(e.store, e.locationIndex, retention, uint64(now.UnixMilli())); n > 0 {
+		e.debugf("collected %d expired chain-error marker(s) (retention %dms)", n, retention)
+	}
 }

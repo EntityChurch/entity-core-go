@@ -404,6 +404,30 @@ func ExtractPeer(locator string, localPeerID crypto.PeerID) crypto.PeerID {
 	return extractPeer(locator, localPeerID)
 }
 
+// ExtractPeerStrict returns the target peer id of a locator ONLY when the
+// locator actually carries a peer segment (an absolute `/{peer}/...` or an
+// `entity://{peer}/...` URI); it returns ("", false) for a bare handler path
+// like "system/network". Unlike ExtractPeer it never substitutes the local
+// peer — the caller wants "which foreign machine", not "default to me". Same
+// parse as extractPeer so the two do not diverge on what a peer segment is
+// (the DAG-fork hazard extractPeer's own comment names).
+//
+// Used by the chain-error `lost` marker binders to fill §3.10.6 TargetPeerID:
+// a marker for a dispatch aimed at `entity://{peer}/...` records that peer, and
+// a marker for a bare-path failure records nothing (the field stays absent, and
+// a consumer says "unknown" rather than inventing a peer).
+func ExtractPeerStrict(locator string) (crypto.PeerID, bool) {
+	norm := strings.TrimPrefix(entity.NormalizePath(locator), "/")
+	first := norm
+	if idx := strings.IndexByte(norm, '/'); idx >= 0 {
+		first = norm[:idx]
+	}
+	if isPeerID(first) {
+		return crypto.PeerID(first), true
+	}
+	return "", false
+}
+
 // idScopeMatches implements the §5.2 id-scope pattern grammar — the id-scope
 // arm of both scope_value_matches (matches_scope) and pattern_covers
 // (scope_subset). A literal identifier match with exactly two wildcard forms:

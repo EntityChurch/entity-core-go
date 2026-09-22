@@ -59,6 +59,10 @@ type Engine struct {
 	locationIndex store.LocationIndex
 	debugLog      *log.Logger
 
+	// lastMarkerCollect throttles the bind-time chain-error marker sweep
+	// (see maybeCollectMarkers, chain_error_lost.go). Guarded by mu.
+	lastMarkerCollect time.Time
+
 	// Inspect hooks (GUIDE-INSPECTABILITY v1.1 §2.1 #6 + #7). Append-only via
 	// AddEmitHook / AddDeliverHook; readers are inline on the hot path with no
 	// lock — callers MUST register before the peer starts accepting traffic.

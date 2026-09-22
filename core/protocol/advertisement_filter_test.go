@@ -92,6 +92,43 @@ func TestAdvertisementFilterMatchingRule(t *testing.T) {
 	}
 }
 
+// TestAdvertisementFilterForeignNamespaceResource pins the coverage relation
+// on the axis that bit us: a grant whose resource names ANOTHER peer's
+// namespace (a §1.4 universal-address-space path this peer's store serves — a
+// cached-remote entity, a follow mirror) must be RETAINED against an
+// advertisement that serves the handler across all peers ("/*/*"), and is
+// DROPPED against the own-namespace-only bare "*" spelling.
+//
+// The bare-"*" case is the bug: advertisedServedScope used to derive its
+// resources axis as bare "*", which §5.5 / PR-8 canonicalization resolves to
+// "/{local}/*". An operator who widens a grant by adding the foreign row then
+// has the whole entry deleted — a widening that silently narrows. See
+// core/peer.advertisedServedScope (fixed to "/*/*") and its sibling
+// defaultHandlerSelfGrant.
+func TestAdvertisementFilterForeignNamespaceResource(t *testing.T) {
+	foreignGrant := entry("foo/bar", "/2KSomeOtherPeerNamespaceAAAAAAAAAAAAAAAAAAA/system/signature/*", "get")
+
+	// The fixed spelling: the peer serves foo/bar across the universal address
+	// space, so the foreign-namespace resource is backed and retained.
+	crossPeer := []types.GrantEntry{entry("foo/bar", "/*/*", "*")}
+	got := filterAdvertisedGrants([]types.GrantEntry{foreignGrant}, crossPeer, filterTestPeer)
+	if len(got) != 1 {
+		t.Fatal("a grant naming a foreign namespace was DROPPED against a /*/* " +
+			"advertisement. The peer serves foo/bar across the universal address " +
+			"space (§1.4), so the entry is backed — dropping it is the bug that " +
+			"deletes a grant an operator widened.")
+	}
+
+	// The old own-namespace-only spelling drops it — pinned so a regression of
+	// advertisedServedScope back to bare "*" is a visible relation change here.
+	ownNamespace := []types.GrantEntry{entry("foo/bar", "*", "*")}
+	got = filterAdvertisedGrants([]types.GrantEntry{foreignGrant}, ownNamespace, filterTestPeer)
+	if len(got) != 0 {
+		t.Fatal("bare \"*\" canonicalizes to /{local}/* (PR-8), which cannot cover " +
+			"a foreign namespace — this direction documents why the fix was needed")
+	}
+}
+
 // TestAdvertisementFilterKeepsTheUniversalCarveOut pins the boundary the ruling
 // does not address, so that a later arch ruling against it is a visible test
 // change rather than a silent behavior drift.
