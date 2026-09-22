@@ -615,8 +615,8 @@ func TestLivenessNoEscalationWithoutFailureEpisode(t *testing.T) {
 // intact, or fails with it removed, the exclusion above is worthless and the
 // negative half of NET-LIVENESS-NO-ESCALATION-WITHOUT-EPISODE-1 is unguarded.
 func TestLivenessNoEscalationMutationHasTeeth(t *testing.T) {
-	suspectScopeGuardDisabled = true
-	t.Cleanup(func() { suspectScopeGuardDisabled = false })
+	suspectScopeGuardDisabled.Store(true)
+	t.Cleanup(func() { suspectScopeGuardDisabled.Store(false) })
 
 	server := startPeer(t)
 	client := startPeer(t,

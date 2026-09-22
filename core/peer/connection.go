@@ -484,6 +484,14 @@ func (c *Connection) reader() {
 		if env.Root.Type == types.TypeExecute {
 			if vErr := c.validateRecv("inbound execute", env); vErr != nil {
 				c.debugf("[%s] reader: inbound EXECUTE failed validation: %v", c.conn.RemoteAddr(), vErr)
+				// N4 (0.8.2.24 §1): decode-boundary refusal of a reach-back
+				// EXECUTE — the root decoded as a valid EXECUTE so the request_id
+				// correlates; emit the coded frame rather than dropping silently.
+				// This dialer-side reader keeps the connection (its own choice per
+				// N4); it does not close.
+				if respEnv, berr := buildDecodeRefusalResponse(bestEffortRequestID(env.Root)); berr == nil {
+					_ = c.SendEnvelope(respEnv)
+				}
 				continue
 			}
 			select {
@@ -638,6 +646,15 @@ func (c *Connection) serve(ctx context.Context) {
 		c.debugf("[%s] <- envelope root_type=%s", c.conn.RemoteAddr(), env.Root.Type)
 		if err := c.validateRecv("incoming", env); err != nil {
 			c.debugf("[%s] %v", c.conn.RemoteAddr(), err)
+			// N4 (0.8.2.24 §1): a decode-boundary refusal MUST put a coded frame
+			// on the wire before the close — correlated by request_id where the
+			// root still decodes (the mis-keyed-included forgery case: only an
+			// included entry is bad, the root is a valid EXECUTE), else a
+			// best-effort empty-id frame. A bare close (the pre-N4 behaviour) is
+			// non-conformant. The deferred Close below still runs.
+			if respEnv, berr := buildDecodeRefusalResponse(bestEffortRequestID(env.Root)); berr == nil {
+				_ = c.SendEnvelope(respEnv)
+			}
 			return
 		}
 
@@ -1481,6 +1498,46 @@ func (c *Connection) ExecuteWithIncluded(
 	}
 
 	return resp, nil
+}
+
+// buildDecodeRefusalResponse builds a best-effort 400 hash_mismatch
+// EXECUTE_RESPONSE envelope for a frame refused at the decode boundary
+// (validateRecv → ValidateAll: a root self-consistency failure or a mis-keyed
+// included entry, the §1.8 forgery vector). N4 (ENTITY-CORE-PROTOCOL 0.8.2.24,
+// §4.9(c)/§4.10(a)): a peer that refuses at the decode boundary MUST emit the
+// coded response correlated by request_id where the id is available, and
+// otherwise MUST make a best-effort coded frame before closing — dropping the
+// frame with no response and no close is non-conformant, and so is closing with
+// no coded frame. F79 pins this boundary's code to 400 hash_mismatch (every
+// ValidateAll failure is a hash-binding failure). requestID is the best-effort
+// id read from the still-decoded root (empty for a handshake frame or a root we
+// could not read); the frame is emitted either way. Whether the peer closes
+// afterwards remains its own choice (serve()'s deferred Close does).
+func buildDecodeRefusalResponse(requestID string) (entity.Envelope, error) {
+	errData := types.ErrorData{
+		Code:    "hash_mismatch",
+		Message: "envelope failed receive-boundary hash/key-binding validation (§1.8)",
+	}
+	errEntity, err := errData.ToEntity()
+	if err != nil {
+		return entity.Envelope{}, err
+	}
+	resultRaw, err := ecf.Encode(errEntity)
+	if err != nil {
+		return entity.Envelope{}, err
+	}
+	respData := types.ExecuteResponseData{
+		RequestID: requestID,
+		Status:    400,
+		Result:    resultRaw,
+	}
+	respEntity, err := respData.ToEntity()
+	if err != nil {
+		return entity.Envelope{}, err
+	}
+	return entity.NewEnvelope(respEntity, map[hash.Hash]entity.Entity{
+		errEntity.ContentHash: errEntity,
+	}), nil
 }
 
 // buildPayloadTooLargeResponse builds a best-effort 413 payload_too_large

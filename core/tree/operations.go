@@ -103,8 +103,25 @@ func (h *Handler) handleSnapshot(_ context.Context, req *handler.Request) (*hand
 
 	// Prefix from the effective resource target (§5.2, 0.8.2.20) first, fallback
 	// to params. effective[0], never Targets[0] — the F68 subject rule.
+	//
+	// N6 (0.8.2.24, EXTENSION-TREE §get row) — the TWO empties differ here for
+	// the SAME reason as tree:get, and worse. A genuinely absent resource asks
+	// for the whole-tree (or params-prefix) snapshot — legitimate. But a
+	// resource PRESENT with a non-empty target set whose effective set is empty
+	// (the caller named a target and excluded it, §5.2) is a different request
+	// and MUST be refused 400 path_required. Snapshot is the widest form of the
+	// N6 defect: §8.4 exempts the snapshot→diff path from the path check, so
+	// serving a self-excluded target the whole-tree snapshot (validatePrefix("")
+	// is true) would answer a request for one excluded path with a snapshot of
+	// the entire tree — py drove exactly this leak 2026-09-12. Landed only at
+	// tree:get in the 0.8.2.24 fold; py's cross-impl finding surfaced snapshot.
+	eff := hctx.EffectiveTargets()
+	if len(eff) == 0 && hctx.Resource != nil && len(hctx.Resource.Targets) > 0 {
+		return handler.NewErrorResponse(400, "path_required",
+			"resource is present with a non-empty target set whose effective set is empty (all targets excluded) — not the absent-resource snapshot case (N6)")
+	}
 	prefix := snapReq.Prefix
-	if eff := hctx.EffectiveTargets(); len(eff) > 0 {
+	if len(eff) > 0 {
 		prefix = eff[0]
 	}
 

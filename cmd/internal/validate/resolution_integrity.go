@@ -201,13 +201,16 @@ func runResolutionIntegrity(ctx context.Context, newClient func() (*PeerClient, 
 
 	// sendClassify sends env and reports (status, code, closed). A go peer binds
 	// the included map at validateRecv on the RECEIVE boundary (core/peer
-	// connection.go serve()) and CLOSES the connection on a binding failure
-	// rather than emitting a coded EXECUTE_RESPONSE — fail-closed (access denied,
-	// the security property holds), and the same pre-existing behavior go has for
-	// every receive-time hash-validation failure. A close is therefore a valid
-	// REFUSAL here (the denyOutcome/closeIsDeny precedent, security_chain.go);
-	// whether the decode-boundary row MUST instead return a coded 400/401/403 per
-	// §5.2a + §4.1 is the decision-gated robustness question routed to arch.
+	// connection.go serve()). N4 (0.8.2.24 §4.9(c)/§4.10(a)) RULED the
+	// decode-boundary question arch had left open: a peer that refuses there MUST
+	// put a coded frame on the wire (correlated by request_id where the root
+	// decodes) before closing — go now emits 400 hash_mismatch (F79), then the
+	// connection closes. This probe still accepts a bare close as a valid REFUSAL
+	// (the denyOutcome/closeIsDeny precedent, security_chain.go) because the
+	// property under test is that the FORGERY is refused, not accepted, and
+	// keystone's five transport-drop peers have not yet adopted N4; the coded
+	// (status, code) is recorded for the cross-impl drive. A separate wire vector
+	// (KB-16 / rust's frame vector) gates N4's frame-shape conformance directly.
 	sendClassify := func(env entity.Envelope) (status uint, code string, closed bool) {
 		respEnv, _, err := client.SendRawEnvelope(env)
 		if err != nil {
@@ -286,7 +289,7 @@ func runResolutionIntegrity(ctx context.Context, newClient func() (*PeerClient, 
 		inc[execSig.ContentHash] = execSig
 		status, code, closed := sendClassify(entity.NewEnvelope(execEntity, inc))
 		if closed {
-			return PassCheck("K1 forgery REFUSED fail-closed (connection closed at the receive-boundary binding check, no coded response) — the substitution is not resolved as the victim; access denied. §5.2a decode-boundary vs coded-DENY (§4.1) is routed to arch")
+			return PassCheck("K1 forgery REFUSED fail-closed (connection closed at the receive-boundary binding check, no coded response) — the substitution is not resolved as the victim; access denied. N4 (0.8.2.24) makes the bare close non-conformant (a coded frame is now owed before close); a peer that has not yet adopted N4 still refuses the forgery, so this arm passes")
 		}
 		if status == 200 {
 			return FailCheck("K1 FORGERY ACCEPTED (200): the peer resolved the author by the unverified included key, verified the attacker's signature against the attacker's substituted identity, and attributed the request to the victim — full impersonation")
@@ -297,7 +300,7 @@ func runResolutionIntegrity(ctx context.Context, newClient func() (*PeerClient, 
 		case 403:
 			return PassCheck(fmt.Sprintf("K1 forgery refused 403 code=%q (a key-binding peer's uniform authz-class verdict; §5.2a author row would be 401 for a key-discarding peer)", code))
 		case 400:
-			return PassCheck(fmt.Sprintf("K1 forgery refused 400 code=%q (§5.2a decode-boundary row)", code))
+			return PassCheck(fmt.Sprintf("K1 forgery refused 400 code=%q (§5.2a decode-boundary row; go's N4-conformant coded frame is 400 hash_mismatch, per F79)", code))
 		default:
 			return PassCheck(fmt.Sprintf("K1 forgery refused status=%d code=%q (not accepted); recorded for the cross-impl §5.2a status comparison", status, code))
 		}

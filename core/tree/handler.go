@@ -154,8 +154,23 @@ func (h *Handler) handleGet(ctx context.Context, req *handler.Request) (*handler
 	// Path comes from the effective resource target (§5.2, 0.8.2.20), never
 	// resource.Targets[0] — that is the F68 bypass (a caller excluding its own
 	// sole target reaches the handler with the dispatch-level check made
-	// vacuous). An empty effective set (absent, or a lone target the caller
-	// excluded) means a listing, a legitimate tree:get; the handler-level
+	// vacuous).
+	//
+	// N6 (0.8.2.24, EXTENSION-TREE §get row): the TWO empties are not the same.
+	// A genuinely absent resource (no field, or no targets) asks for the root
+	// listing — a legitimate tree:get. But a resource PRESENT with a non-empty
+	// target set whose effective set is empty (the caller named a target and
+	// excluded it, §5.2) is a different request and MUST be refused
+	// 400 path_required: serving it the root listing answers a request for one
+	// excluded path with a listing of the tree. §3.3 as landed licensed the
+	// opposite; N6 separates them.
+	eff := hctx.EffectiveTargets()
+	if len(eff) == 0 && hctx.Resource != nil && len(hctx.Resource.Targets) > 0 {
+		return handler.NewErrorResponse(400, "path_required",
+			"resource is present with a non-empty target set whose effective set is empty (all targets excluded) — not the absent-resource listing case (N6)")
+	}
+	// Empty effective set past the N6 guard means a GENUINELY absent resource →
+	// root listing; a non-empty set selects effective[0]. The handler-level
 	// CheckPathPermission below is the enforcement that closes F68 here.
 	path := hctx.ExtractResourcePath()
 

@@ -45,6 +45,10 @@ func runResourceEffective(ctx context.Context, client *PeerClient) []CheckResult
 		"V7 §5.2 (CORE-RESOURCE-EFFECTIVE-1 b): targets:[P,Q] exclude:[P] with Q in-grant and P not MUST proceed on Q — decided by a WITNESS FIELD (the returned entity type), never a status, since both selections answer 200. The witness rule is GUIDE-CONFORMANCE §2.4c. A peer that counts the effective list and then indexes targets[0] reads P; the witness is what catches it.")
 	r.Declare("resource_effective_no_disclosure",
 		"V7 §6.3/§5.2 (CORE-RESOURCE-EFFECTIVE-1 a, disclosure form): tree:get with targets:[P] exclude:[P], P out of grant with a distinct entity bound at P, MUST NOT return P's entity (the F68 disclosure). A conformant peer refuses or lists; it never discloses the excluded, unauthorized path.")
+	r.Declare("resource_effective_tree_get_n6_two_empties",
+		"ENTITY-CORE-PROTOCOL §3.3 (N6, 0.8.2.24; EXTENSION-TREE get row): the two empties differ. A genuinely ABSENT resource → 200 root listing (the positive control, established by the same drive); a resource PRESENT with a non-empty target set whose EFFECTIVE set is empty (in-grant P, exclude:[P]) → 400 path_required. Serving the second case a listing answers a request for one excluded path with a listing of the tree — the defect N6 closes. The excluded target is IN-GRANT so the 400 is attributable to N6, not to a capability denial. WIRE vector: an in-tree test cannot see a dispatch that pre-narrows targets to effective (rust's N6 was dead code at the wire for exactly this reason); this arm drives the real dispatch path.")
+	r.Declare("resource_effective_tree_snapshot_n6_two_empties",
+		"ENTITY-CORE-PROTOCOL 0.8.2.24 N6, snapshot form (py's cross-impl finding 2026-09-12): tree:snapshot binds N6 too, and is its widest form — §8.4 exempts the snapshot→diff path from a path check, so a self-excluded target served the whole-tree snapshot leaks the excluded key + its content hash out of a diff-against-empty. ABSENT resource → 200 snapshot (positive control); PRESENT with empty effective set → 400 path_required.")
 
 	remote := string(client.RemotePeerID())
 	treeURI := fmt.Sprintf("entity://%s/system/tree", remote)
@@ -258,6 +262,74 @@ func runResourceEffective(ctx context.Context, client *PeerClient) []CheckResult
 		}
 		// A refusal (403 path-denied / 400 path_required) is the cleaner non-disclosure.
 		return PassCheck(fmt.Sprintf("tree:get on the self-excluded forbidden P refused (status=%d code=%q) — P's entity is not disclosed", status, code))
+	})
+
+	// N6 (0.8.2.24) — tree:get two-empties on the WIRE. These arms drive with the
+	// client's OWN connection cap (full authority), NOT the scoped child cap: the
+	// discriminator's positive control is that the ABSENT case is SERVED (200), so
+	// the cap must cover the root listing. Under a scoped cap an absent tree:get is
+	// 403 (root out of grant) and the 400 becomes unattributable — a lesson the
+	// wire run taught after the in-tree test could not (the in-tree Resource never
+	// traverses dispatch; the wire does). N6 fires in the handler BEFORE the path
+	// check, so the excluded target need not be specially placed.
+	n6ProbePath := "system/validate/n6/x"
+	r.Run("resource_effective_tree_get_n6_two_empties", func() CheckOutcome {
+		// Positive control: a genuinely absent resource is served (200 listing).
+		aEnv, _, aErr := client.SendExecute(ctx, treeURI, "get", mustSimpleTreeGetParams(), nil)
+		if aErr != nil {
+			return FailCheck("send absent: " + aErr.Error())
+		}
+		aStatus, aCode, _, _ := extractStatusAndCode(aEnv)
+		if aStatus != 200 {
+			return FailCheck(fmt.Sprintf("N6 get UNATTRIBUTABLE: absent resource did not serve a listing (status=%d code=%q); the 400 below cannot be attributed to presence-with-exclusion", aStatus, aCode))
+		}
+		// Discriminator: present with a target the caller excludes → empty
+		// effective set → 400 path_required, NOT a listing.
+		res := &types.ResourceTarget{Targets: []string{n6ProbePath}, Exclude: []string{n6ProbePath}}
+		env, _, err := client.SendExecute(ctx, treeURI, "get", mustSimpleTreeGetParams(), res)
+		if err != nil {
+			return FailCheck("send self-excluded: " + err.Error())
+		}
+		status, code, _, _ := extractStatusAndCode(env)
+		if status == 400 && code == "path_required" {
+			return PassCheck("N6: absent → 200 listing, present-but-effectively-empty (targets:[P] exclude:[P]) → 400 path_required. The two empties are distinguished on the WIRE; go's dispatch carries Exclude to the handler and does not pre-narrow targets to effective, so the handler's N6 guard is live (not dead code at the wire).")
+		}
+		if status == 200 {
+			return FailCheck("N6 get FAIL: targets:[P] exclude:[P] answered 200 — the peer served a listing for a request that names one excluded path (the two empties collapsed; if the dispatch pre-narrows targets to effective, the handler's N6 guard is dead code at the wire)")
+		}
+		return FailCheck(fmt.Sprintf("N6 get FAIL: got status=%d code=%q; want 400 path_required", status, code))
+	})
+
+	// N6 (0.8.2.24) — tree:snapshot two-empties on the WIRE (py's finding).
+	r.Run("resource_effective_tree_snapshot_n6_two_empties", func() CheckOutcome {
+		snapParams, sErr := types.SnapshotRequestData{}.ToEntity()
+		if sErr != nil {
+			return FailCheck("build snapshot params: " + sErr.Error())
+		}
+		// Positive control: absent resource → whole-tree snapshot served (200).
+		aEnv, _, aErr := client.SendExecute(ctx, treeURI, "snapshot", snapParams, nil)
+		if aErr != nil {
+			return FailCheck("send absent snapshot: " + aErr.Error())
+		}
+		aStatus, aCode, _, _ := extractStatusAndCode(aEnv)
+		if aStatus != 200 {
+			return FailCheck(fmt.Sprintf("N6 snapshot UNATTRIBUTABLE: absent resource did not serve a snapshot (status=%d code=%q)", aStatus, aCode))
+		}
+		// Discriminator: present, sole target excluded → 400 path_required.
+		n6Prefix := "system/validate/n6/"
+		res := &types.ResourceTarget{Targets: []string{n6Prefix}, Exclude: []string{n6Prefix}}
+		env, _, err := client.SendExecute(ctx, treeURI, "snapshot", snapParams, res)
+		if err != nil {
+			return FailCheck("send self-excluded snapshot: " + err.Error())
+		}
+		status, code, _, _ := extractStatusAndCode(env)
+		if status == 400 && code == "path_required" {
+			return PassCheck("N6 snapshot: absent → 200 snapshot, present-but-effectively-empty → 400 path_required. The §8.4 diff exemption cannot leak an excluded key via a whole-tree snapshot.")
+		}
+		if status == 200 {
+			return FailCheck("N6 snapshot FAIL: targets:[P] exclude:[P] answered 200 — a self-excluded target was served the whole-tree snapshot (the §8.4 leak py drove)")
+		}
+		return FailCheck(fmt.Sprintf("N6 snapshot FAIL: got status=%d code=%q; want 400 path_required", status, code))
 	})
 
 	return r.Results()

@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"sync/atomic"
 	"time"
 
 	"go.entitychurch.org/entity-core-go/core/crypto"
@@ -73,8 +74,12 @@ func (p *Peer) demotePeerOnKeepaliveMiss(peerID crypto.PeerID, failed remoteEndp
 // suspectScopeGuardDisabled removes the scope pin below. Test-only: it is
 // unexported, defaults false, and is set solely by the mutation arm of
 // TestLivenessNoEscalationWithoutFailureEpisode. Production behaviour is
-// byte-identical to the guard being unconditional.
-var suspectScopeGuardDisabled bool
+// byte-identical to the guard being unconditional. It is an atomic because the
+// mutation arm writes it while OTHER concurrent tests' keepalive goroutines read
+// it through escalateUnboundSuspect — a plain bool races under `go test -race`
+// on the whole package (the read is on a live background goroutine, not the test
+// goroutine).
+var suspectScopeGuardDisabled atomic.Bool
 
 func (p *Peer) escalateUnboundSuspect(peerID crypto.PeerID, cause error) bool {
 	if p.pooledEndpoint(peerID) != nil {
@@ -100,7 +105,7 @@ func (p *Peer) escalateUnboundSuspect(peerID crypto.PeerID, cause error) bool {
 	// mutation test both ran against a malformed probe, so neither could have
 	// failed. A mutation nobody runs is a claim, and this file's whole
 	// subject is claims nobody checked.
-	if !suspectScopeGuardDisabled && prev.Status != types.PeerStatusSuspect {
+	if !suspectScopeGuardDisabled.Load() && prev.Status != types.PeerStatusSuspect {
 		return false
 	}
 	// Carried, not chosen. An empty prev.Reason is preserved as empty —

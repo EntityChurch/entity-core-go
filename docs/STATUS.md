@@ -1,6 +1,6 @@
 # entity-core-go — status
 
-_Updated: 2026-09-13 · released version: the newest git tag on `master` (authoritative in `CHANGELOG.md` + `go.mod`) — deliberately not restated here, so it cannot go stale on a cut_
+_Updated: 2026-09-14 · released version: the newest git tag on `master` (authoritative in `CHANGELOG.md` + `go.mod`) — deliberately not restated here, so it cannot go stale on a cut_
 
 **This file is the canonical rolling log for this repo** — one file, re-measured
 rather than appended to, and the only status document that publishes. The dated
@@ -40,6 +40,25 @@ live-HTTP transport surfaces.
 
 ## Where we left off
 
+> **2026-09-14 — the 0.8.2.24 cohort round landed, and it was mostly arch retracting
+> its own recent text.** Two behaviours changed here. **A frame that fails validation the moment
+> it is decoded — a mis-keyed supporting entity, the impersonation vector closed on 2026-09-13 —
+> now gets an explicit coded error on the wire before the connection is closed**, rather than the
+> bare close it used to get: dropping a request with no answer at all is non-conformant, whether
+> or not the connection then closes. **And `system/tree:get` now distinguishes the two ways a
+> request can name no path**: a genuinely absent resource still asks for the root listing, but a
+> request that names a path and then excludes exactly that path is refused (`400 path_required`)
+> rather than answered with a listing of the whole tree — serving the listing there answers a
+> request for one excluded path with everything. Both were implemented against the landed
+> specification; a third change the whole cohort had agreed on (that a certain ceiling could be
+> checked once instead of twice) was withdrawn upstream — the two implementations we thought
+> collapsed do not, and this repo had flagged the agreement as thin in advance. An unrelated data
+> race in a test-only liveness flag, present before this round, was fixed in passing; the race
+> detector is clean across all three modules. Full conformance suite a true green on every pass
+> (`1656 · 0F · 0S`). The one item the whole cohort still owes — a peer whose own handler grant is
+> narrower than the caller's, which three separate findings all need and none ships — is tracked,
+> not built.
+>
 > **2026-09-13 — the capability-forgery close and two path-scope corrections landed.** A
 > capability presented on the wire carries its supporting entities — identities, capability
 > chains, signatures — in a map addressed by content hash, and every authority decision looks

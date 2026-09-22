@@ -785,3 +785,118 @@ func TestPutCascadeDepthRefused(t *testing.T) {
 		t.Fatalf("expected all consumers skipped, got completed=%v skipped=%v", partial.ConsumersCompleted, partial.ConsumersSkipped)
 	}
 }
+
+// TestGet_N6_AbsentVsEmptyEffective pins ENTITY-CORE-PROTOCOL 0.8.2.24 N6
+// (EXTENSION-TREE §get row): the two empties are NOT the same request.
+//
+//   - genuinely absent resource (no field / no targets) → root listing (200)
+//   - resource present with a non-empty target set whose EFFECTIVE set is empty
+//     (the caller named a target and excluded it, §5.2) → 400 path_required
+//
+// Serving the second case a root listing answers a request for one excluded
+// path with a listing of the tree — the defect N6 closes. §3.3 as landed
+// licensed the opposite. Mutation witness: removing the N6 guard in handleGet
+// makes the self-excluded arm return a 200 listing instead of 400.
+func TestGet_N6_AbsentVsEmptyEffective(t *testing.T) {
+	h, cs, li, pid := setup(t)
+
+	e1 := makeEntity(t, "test/a", "a")
+	cs.Put(e1)
+	li.Set("local/files/a.txt", e1.ContentHash)
+
+	getReq := types.GetRequestData{}
+	getEntity, _ := getReq.ToEntity()
+
+	// (1) genuinely absent resource → root listing, NOT path_required.
+	reqAbsent := makeRequest(cs, li, pid, "system/tree", "get", getEntity, nil)
+	respAbsent, err := h.Handle(context.Background(), reqAbsent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if respAbsent.Status != 200 {
+		t.Fatalf("absent resource: expected 200 root listing, got status %d", respAbsent.Status)
+	}
+	if respAbsent.Result.Type != types.TypeTreeListing {
+		t.Fatalf("absent resource: expected listing type, got %s", respAbsent.Result.Type)
+	}
+
+	// (2) resource present with a target the caller excludes → empty effective
+	// set → 400 path_required (the N6 refusal). This is the discriminating arm:
+	// a resource IS present, so it is not the absent-listing case.
+	reqSelfExcluded := makeRequest(cs, li, pid, "system/tree", "get", getEntity,
+		&types.ResourceTarget{
+			Targets: []string{"local/files/a.txt"},
+			Exclude: []string{"local/files/a.txt"},
+		})
+	respExcluded, err := h.Handle(context.Background(), reqSelfExcluded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if respExcluded.Status != 400 {
+		t.Fatalf("self-excluded resource: expected 400 path_required, got status %d", respExcluded.Status)
+	}
+	var errData types.ErrorData
+	if err := ecf.Decode(respExcluded.Result.Data, &errData); err != nil {
+		t.Fatal(err)
+	}
+	if errData.Code != "path_required" {
+		t.Fatalf("self-excluded resource: expected code path_required, got %q", errData.Code)
+	}
+}
+
+// TestSnapshot_N6_AbsentVsEmptyEffective is the snapshot sibling of the get N6
+// test above — py's cross-impl finding (2026-09-12) that N6 binds snapshot too,
+// and worse: §8.4 exempts the snapshot→diff path from a path check, so serving
+// a self-excluded target the whole-tree snapshot leaks the excluded key + its
+// content hash out of a diff-against-empty. The two empties:
+//
+//   - genuinely absent resource → whole-tree/prefix snapshot (200)
+//   - resource present, all targets excluded → 400 path_required
+//
+// Mutation witness: removing the N6 guard in handleSnapshot makes the
+// self-excluded arm return a 200 snapshot instead of 400 (validatePrefix("")
+// is true, so the empty effective set falls back to a whole-tree snapshot).
+func TestSnapshot_N6_AbsentVsEmptyEffective(t *testing.T) {
+	h, cs, li, pid := setup(t)
+
+	e1 := makeEntity(t, "test/a", "a")
+	cs.Put(e1)
+	li.Set("local/files/a.txt", e1.ContentHash)
+
+	snapReq := types.SnapshotRequestData{}
+	snapEntity, _ := snapReq.ToEntity()
+
+	// (1) genuinely absent resource → whole-tree snapshot, NOT path_required.
+	reqAbsent := makeRequest(cs, li, pid, "system/tree", "snapshot", snapEntity, nil)
+	respAbsent, err := h.Handle(context.Background(), reqAbsent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if respAbsent.Status != 200 {
+		t.Fatalf("absent resource: expected 200 snapshot, got status %d", respAbsent.Status)
+	}
+	if respAbsent.Result.Type != types.TypeTreeSnapshot {
+		t.Fatalf("absent resource: expected snapshot type, got %s", respAbsent.Result.Type)
+	}
+
+	// (2) resource present, sole target excluded → empty effective → 400 path_required.
+	reqSelfExcluded := makeRequest(cs, li, pid, "system/tree", "snapshot", snapEntity,
+		&types.ResourceTarget{
+			Targets: []string{"local/files/"},
+			Exclude: []string{"local/files/"},
+		})
+	respExcluded, err := h.Handle(context.Background(), reqSelfExcluded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if respExcluded.Status != 400 {
+		t.Fatalf("self-excluded resource: expected 400 path_required, got status %d", respExcluded.Status)
+	}
+	var errData types.ErrorData
+	if err := ecf.Decode(respExcluded.Result.Data, &errData); err != nil {
+		t.Fatal(err)
+	}
+	if errData.Code != "path_required" {
+		t.Fatalf("self-excluded resource: expected code path_required, got %q", errData.Code)
+	}
+}
